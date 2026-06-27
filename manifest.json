@@ -1,0 +1,30 @@
+{
+  "id": {
+    "name": "查ID",
+    "version": "1.0.0",
+    "author": "AW",
+    "description": "发送 /id 或 .id（可回复某条消息）查询群组ID、用户ID、用户名。",
+    "path": "plugins/id.py"
+  },
+  "xjj": {
+    "name": "小姐姐视频",
+    "version": "1.0.0",
+    "author": "AW",
+    "description": "发送 /xjj 或 .xjj 获取一条随机短视频。",
+    "path": "plugins/xjj.py"
+  },
+  "keyword_auto_reply": {
+    "name": "关键词自动回复",
+    "version": "1.0.0",
+    "author": "AW",
+    "description": "监听群消息，命中关键词自动回复。支持多规则、匹配方式、冷却、限群、自动删除、模板变量。",
+    "path": "plugins/keyword_auto_reply.py"
+  },
+  "custom_auto_reply": {
+    "name": "定时自动回复",
+    "version": "1.0.0",
+    "author": "AW",
+    "description": "按 cron 定时用用户账号向指定会话发消息。支持多任务、活动日期范围、多账号、结果通知。",
+    "path": "plugins/custom_auto_reply.py"
+  }
+}
