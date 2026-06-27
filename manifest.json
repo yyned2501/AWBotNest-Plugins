@@ -75,5 +75,33 @@
     "author": "AWdress",
     "description": "私聊/群@你时 AI 人形对话（带记忆）；回复消息发 /ai 让 AI 解释或解答（支持图片）。",
     "path": "plugins/ai/"
+  },
+  "hdhive_lottery": {
+    "name": "HDHive抽奖",
+    "version": "1.0.0",
+    "author": "AWdress",
+    "description": "自动参与 HDHive 抽奖：监听抽奖消息，随机等待后发口令参与，开奖检测中奖并通知。",
+    "path": "plugins/hdhive_lottery.py"
+  },
+  "trans115search": {
+    "name": "115列表转发",
+    "version": "1.0.0",
+    "author": "AWdress",
+    "description": "监听来源会话里机器人发的「列表」消息，自动转发到你指定的目标会话。",
+    "path": "plugins/trans115search.py"
+  },
+  "movie_monitor_115": {
+    "name": "影巢115媒体监控",
+    "version": "1.0.0",
+    "author": "AWdress",
+    "description": "监控频道里的 115 分享，TMDB 识别后查 Emby 媒体库，缺失的转发给 CMS 入库机器人。",
+    "path": "plugins/movie_monitor_115/"
+  },
+  "quiz_game": {
+    "name": "趣味答题",
+    "version": "1.0.0",
+    "author": "AWdress",
+    "description": "群内答题游戏：发「开启答题」出题，群友抢答，答对自动发魔力奖励，支持连胜加成。AI或天行出题。",
+    "path": "plugins/quiz_game/"
   }
 }
