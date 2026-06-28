@@ -41,7 +41,7 @@ from . import _leaderboard as lb
 __plugin__ = {
     "name": "多站点转账",
     "id": "transfer",
-    "version": "1.0.2",
+    "version": "1.0.3",
     "author": "AWdress",
     "scope": "user",
     "default_enabled": False,
@@ -114,9 +114,10 @@ __plugin__ = {
             "type": "select", "default": "text", "label": "排行榜输出形式",
             "options": [
                 {"value": "text", "label": "文本（始终可用）"},
-                {"value": "image", "label": "图片（需 wkhtmltoimage，失败回退文本）"},
+                {"value": "image", "label": "图片（自带 PIL 即可出图，失败自动回退文本）"},
             ],
             "section": "排行榜",
+            "help": "图片模式优先用 wkhtmltoimage（若系统装了），否则用 Pillow 纯 Python 绘制，无需额外装系统依赖。",
         },
         # —— 通知中心 ——
         "owner_notify": {

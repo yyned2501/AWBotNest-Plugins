@@ -8,9 +8,9 @@
 __plugin__ = {
     "name": "定时自动回复",
     "id": "custom_auto_reply",
-    "version": "1.0.3",
+    "version": "1.0.4",
     "author": "AWdress",
-    "description": "到点自动用你的账号往指定群/会话发一条消息。可选每天定点、每隔几小时、每隔几分钟。",
+    "description": "到点自动用你的账号往指定群/会话发一条消息。可选每天定点、每隔几小时/几分钟，或直接填 cron 表达式。注册后会按规则反复发送。",
     "scope": "user",
     "default_enabled": False,
     "config_schema": {
@@ -30,10 +30,12 @@ __plugin__ = {
             "type": "select", "default": "daily", "label": "发送频率",
             "section": "发送时间",
             "options": [
-                {"value": "daily", "label": "每天定点发一次"},
-                {"value": "hours", "label": "每隔几小时发一次"},
-                {"value": "minutes", "label": "每隔几分钟发一次"},
+                {"value": "daily", "label": "每天定点（每天一次）"},
+                {"value": "hours", "label": "每隔几小时循环发"},
+                {"value": "minutes", "label": "每隔几分钟循环发"},
+                {"value": "cron", "label": "自定义 cron 表达式（高级）"},
             ],
+            "help": "无论选哪种，注册后都会按规则反复发送，不是只发一次。",
         },
         "daily_hour": {
             "type": "slider", "default": 9, "label": "每天几点", "min": 0, "max": 23, "step": 1,
@@ -50,6 +52,15 @@ __plugin__ = {
         "every_minutes": {
             "type": "slider", "default": 30, "label": "每隔几分钟", "min": 1, "max": 180, "step": 1,
             "section": "发送时间", "show_if": {"frequency": "minutes"},
+        },
+        "cron_expr": {
+            "type": "string", "default": "0 9 * * 1-5", "label": "cron 表达式",
+            "section": "发送时间", "show_if": {"frequency": "cron"},
+            "help": (
+                "标准 5 段格式：分 时 日 月 周。星期 0/7=周日，1=周一。\n"
+                "例：`0 9 * * 1-5` 工作日每天 9:00；`*/15 9-18 * * *` 9~18 点每 15 分钟一次；"
+                "`30 8 1 * *` 每月 1 号 8:30。"
+            ),
         },
 
         # —— 可选 ——
@@ -163,6 +174,16 @@ async def setup(ctx):
         minutes = int(cfg.get("every_minutes", 30) or 30)
         ctx.schedule(action, "interval", minutes=minutes, id="定时回复")
         ctx.log.info("[定时回复] 已注册：每 %d 分钟一次", minutes)
+    elif freq == "cron":
+        expr = (cfg.get("cron_expr") or "").strip()
+        try:
+            from apscheduler.triggers.cron import CronTrigger
+            trigger = CronTrigger.from_crontab(expr)
+        except Exception as e:  # noqa: BLE001 - 表达式非法
+            ctx.log.error("[定时回复] cron 表达式无效 %r：%r，未注册定时任务", expr, e)
+            return
+        ctx.schedule(action, trigger, id="定时回复")
+        ctx.log.info("[定时回复] 已注册：cron(%s)", expr)
     else:  # daily
         hour = int(cfg.get("daily_hour", 9) or 0)
         minute = int(cfg.get("daily_minute", 0) or 0)

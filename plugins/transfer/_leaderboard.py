@@ -1,9 +1,12 @@
 # =============================================================================
 # 多站点转账 - 排行榜渲染（文本默认，出图可选）
 #
-# 默认输出 Markdown/纯文本排行榜（无需任何系统二进制，保证可用）。
-# 可选增强：若环境装了 imgkit + wkhtmltoimage，可渲染成 PNG（render_image）。
-# 出图失败/不可用一律回退文本，绝不抛错。
+# 出图三档，自动择优、逐级回退，全程不抛错：
+#   1) imgkit + wkhtmltoimage（系统装了才用，HTML 渲染质量最好）
+#   2) Pillow/PIL 纯 Python 绘制（无需任何系统二进制；平台 venv 一般自带 PIL）
+#   3) 纯文本（保底，永远可用）
+#
+# 即「平台不额外装依赖」时，只要有 PIL 就能出图，不必再装 wkhtmltoimage。
 #
 # 不 import pyrogram / core / config。
 # =============================================================================
@@ -13,6 +16,17 @@ import shutil
 import uuid
 
 _MEDALS = ["🥇", "🥈", "🥉"]
+
+# PIL 出图配色（与 HTML 版风格一致）
+_BG = (102, 126, 234)          # #667eea 紫蓝背景
+_CARD = (255, 255, 255)
+_INK = (51, 51, 51)            # #333
+_SUB = (102, 102, 102)         # #666
+_ACCENT = (102, 126, 234)      # ID 列
+_TEAL = (78, 205, 196)         # 次数列 #4ecdc4
+_RED = (255, 107, 107)         # 金额列 #ff6b6b
+_LINE = (238, 238, 238)        # #eee 分隔线
+_MEDAL_RGB = [(255, 196, 0), (176, 184, 196), (205, 127, 50)]  # 金/银/铜
 
 
 def _mask_uid(uid: int | str) -> str:
@@ -70,8 +84,8 @@ def render_user_summary(stat: dict, bonus_name: str, direction: str,
     return f"{head}\n{tail}"
 
 
-def image_available() -> bool:
-    """imgkit + wkhtmltoimage 是否可用。"""
+def _imgkit_available() -> bool:
+    """imgkit + wkhtmltoimage 是否可用（最佳画质路径）。"""
     try:
         import imgkit  # noqa: F401
     except Exception:
@@ -79,11 +93,43 @@ def image_available() -> bool:
     return shutil.which("wkhtmltoimage") is not None
 
 
+def _pil_available() -> bool:
+    """Pillow 是否可用（纯 Python，无需系统二进制）。"""
+    try:
+        from PIL import Image, ImageDraw, ImageFont  # noqa: F401
+    except Exception:
+        return False
+    return True
+
+
+def image_available() -> bool:
+    """是否具备任意一种出图能力（imgkit 或 PIL）。"""
+    return _imgkit_available() or _pil_available()
+
+
 def render_image(entries: list[dict], site_name: str, bonus_name: str,
                  direction: str, owner_name: str, out_dir) -> str | None:
-    """渲染 PNG 排行榜，返回文件路径；不可用/失败返回 None（调用方回退文本）。"""
-    if not entries or not image_available():
+    """渲染 PNG 排行榜，返回文件路径；不可用/失败返回 None（调用方回退文本）。
+
+    优先 imgkit（HTML 渲染最好看），不可用时退 PIL 纯 Python 绘制。
+    """
+    if not entries:
         return None
+    if _imgkit_available():
+        path = _render_image_imgkit(entries, site_name, bonus_name,
+                                    direction, owner_name, out_dir)
+        if path:
+            return path
+        # imgkit 标称可用但实际失败 → 继续尝试 PIL
+    if _pil_available():
+        return _render_image_pil(entries, site_name, bonus_name,
+                                 direction, owner_name, out_dir)
+    return None
+
+
+def _render_image_imgkit(entries: list[dict], site_name: str, bonus_name: str,
+                         direction: str, owner_name: str, out_dir) -> str | None:
+    """imgkit + wkhtmltoimage 路径。失败返回 None。"""
     try:
         import imgkit
         title_word = "打赏" if direction == "in" else "赏赐"
@@ -132,6 +178,151 @@ def render_image(entries: list[dict], site_name: str, bonus_name: str,
         return img_path if os.path.exists(img_path) else None
     except Exception:
         return None
+
+
+# ─── PIL 纯 Python 出图（无需系统二进制） ─────────────────────────────────────
+_FONT_CANDIDATES = [
+    r"C:\Windows\Fonts\msyh.ttc", r"C:\Windows\Fonts\msyhbd.ttc",
+    r"C:\Windows\Fonts\simhei.ttf", r"C:\Windows\Fonts\simsun.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+    "/System/Library/Fonts/PingFang.ttc",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+]
+
+
+def _load_font(size: int):
+    """找一个能显示中文的字体；都没有则退 PIL 内置位图字体（仅 ASCII）。"""
+    from PIL import ImageFont
+    for path in _FONT_CANDIDATES:
+        if os.path.exists(path):
+            try:
+                return ImageFont.truetype(path, size)
+            except Exception:
+                continue
+    return ImageFont.load_default()
+
+
+def _text_w(draw, text, font) -> float:
+    try:
+        return draw.textlength(text, font=font)
+    except Exception:
+        l, t, r, b = draw.textbbox((0, 0), text, font=font)
+        return r - l
+
+
+def _render_image_pil(entries: list[dict], site_name: str, bonus_name: str,
+                      direction: str, owner_name: str, out_dir) -> str | None:
+    """用 Pillow 绘制排行榜 PNG。失败返回 None。"""
+    try:
+        from PIL import Image, ImageDraw
+
+        title_word = "打赏" if direction == "in" else "赏赐"
+        owner = owner_name or site_name
+
+        # 列：名次 / ID / 用户 / 次数 / 金额
+        cols = ["排名", "ID", "用户", "次数", bonus_name]
+        col_w = [70, 110, 170, 70, 130]
+        W = sum(col_w) + 40                       # 卡片内边距各 20
+        row_h = 38
+        head_h = 92                               # 标题区
+        table_head_h = 40
+        n = len(entries)
+        card_h = head_h + table_head_h + n * row_h + 16
+        pad = 16
+        H = card_h + pad * 2
+
+        f_title = _load_font(24)
+        f_sub = _load_font(15)
+        f_th = _load_font(15)
+        f_td = _load_font(15)
+        f_medal = _load_font(15)
+
+        img = Image.new("RGB", (W + pad * 2, H), _BG)
+        d = ImageDraw.Draw(img)
+
+        # 白卡
+        cx0, cy0 = pad, pad
+        cx1, cy1 = pad + W, pad + card_h
+        d.rounded_rectangle([cx0, cy0, cx1, cy1], radius=12, fill=_CARD)
+
+        # 标题 / 副标题（居中）
+        title = f"{owner} 的{title_word}数据终端"
+        sub = f">>> {site_name} TOP{n} 排行榜 <<<"
+        tw = _text_w(d, title, f_title)
+        d.text(((img.width - tw) / 2, cy0 + 18), title, font=f_title, fill=_INK)
+        sw = _text_w(d, sub, f_sub)
+        d.text(((img.width - sw) / 2, cy0 + 54), sub, font=f_sub, fill=_SUB)
+
+        # 表头背景条
+        tx0 = cx0 + 20
+        ty0 = cy0 + head_h
+        d.rectangle([cx0, ty0, cx1, ty0 + table_head_h], fill=_ACCENT)
+        x = tx0
+        for i, name in enumerate(cols):
+            cw = col_w[i]
+            w = _text_w(d, name, f_th)
+            d.text((x + (cw - w) / 2, ty0 + (table_head_h - 18) / 2),
+                   name, font=f_th, fill=(255, 255, 255))
+            x += cw
+
+        # 数据行
+        ry = ty0 + table_head_h
+        for e in entries:
+            rank = e["rank"]
+            cells = [
+                None,  # 名次单独画（带奖牌圆）
+                _mask_uid(e["user_id"]),
+                _clip_name(e["user_name"]),
+                str(e["count"]),
+                _fmt_amount(e["total"]),
+            ]
+            colors = [_INK, _ACCENT, _INK, _TEAL, _RED]
+            x = tx0
+            for i, val in enumerate(cells):
+                cw = col_w[i]
+                cy = ry + (row_h - 18) / 2
+                if i == 0:
+                    _draw_rank(d, x, ry, cw, row_h, rank, f_medal)
+                else:
+                    w = _text_w(d, val, f_td)
+                    d.text((x + (cw - w) / 2, cy), val, font=f_td, fill=colors[i])
+                x += cw
+            # 行底分隔线
+            d.line([tx0, ry + row_h, cx1 - 20, ry + row_h], fill=_LINE, width=1)
+            ry += row_h
+
+        out_dir = str(out_dir)
+        os.makedirs(out_dir, exist_ok=True)
+        img_path = os.path.join(out_dir, f"_lb_{uuid.uuid4().hex}.png")
+        img.save(img_path, "PNG")
+        return img_path if os.path.exists(img_path) else None
+    except Exception:
+        return None
+
+
+def _draw_rank(d, x, y, cw, row_h, rank: int, font):
+    """前三名画金/银/铜圆形 + 名次数字，其余画 'N.'。"""
+    cy = y + (row_h - 18) / 2
+    if rank <= 3:
+        rr = 11
+        cxm = x + cw / 2
+        cym = y + row_h / 2
+        col = _MEDAL_RGB[rank - 1]
+        d.ellipse([cxm - rr, cym - rr, cxm + rr, cym + rr], fill=col)
+        s = str(rank)
+        w = _text_w(d, s, font)
+        d.text((cxm - w / 2, cym - 9), s, font=font, fill=(255, 255, 255))
+    else:
+        s = f"{rank}."
+        w = _text_w(d, s, font)
+        d.text((x + (cw - w) / 2, cy), s, font=font, fill=_INK)
+
+
+def _clip_name(name: str) -> str:
+    name = str(name or "")
+    return (name[:10] + "…") if len(name) > 11 else name
 
 
 def _html_escape(s: str) -> str:
