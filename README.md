@@ -133,19 +133,6 @@ async def teardown(ctx):
 
 ---
 
-## 当前插件
-
-| 插件 | id | 触发 | scope | 说明 |
-|------|----|------|-------|------|
-| 查ID | `id` | `/id` `.id`（可回复消息） | user | 查群组ID / 用户ID / 用户名 |
-| 小姐姐视频 | `xjj` | `/xjj` `.xjj` | user | 拉取随机短视频 |
-| 删除自己消息 | `self_delete` | `/dme 数字` `.dme 数字` | user | 删除当前会话里自己最近发的若干条消息 |
-| P站图片 | `zpr` | `/zpr` `/zp`（及 `.` 前缀） | user | 二次元图片，`/zp` 附带原图文件 |
-| 关键词自动回复 | `keyword_auto_reply` | 监听群消息 | user | 一行一条「关键词=回复」，支持冷却、限群、自动删除、模板变量 |
-| 定时自动回复 | `custom_auto_reply` | 定时 | user | 每天定点 / 每隔几小时 / 每隔几分钟，向指定会话发消息 |
-
----
-
 ## 在平台中使用
 
 本仓库是平台**内置的官方仓库**，无需手动添加：
@@ -158,4 +145,4 @@ async def teardown(ctx):
 
 ---
 
-完整平台规范见平台仓库的 `SPEC.md` 与 `PLUGIN_GUIDE.md`。
+完整平台规范见本仓库 [`docs/SPEC.md`](docs/SPEC.md) 与 [`docs/PLUGIN_GUIDE.md`](docs/PLUGIN_GUIDE.md)。

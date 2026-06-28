@@ -1,0 +1,36 @@
+# AWBotNest-Plugins .clinerules
+
+## 项目本质
+这是一个 AWBotNest 平台的**官方插件仓库**。每个文件/文件夹 = 一个独立插件，遵循三段式契约。
+
+## 核心规则
+1. **三段式契约**：每个插件必须包含 `__plugin__` 元数据 + `setup(ctx)` 函数，`teardown(ctx)` 可选
+2. **插件 ID = 文件名/目录名**，全局唯一
+3. **禁止 `import pyrogram` / `config` / 内核模块**——一切走 `ctx`
+4. **处理器一律用 `@ctx.on_message` / `@ctx.on_callback`**，禁止 `@Client.on_message`
+5. **禁止 `print`**——用 `ctx.log`
+6. **插件之间禁止互相 import**——共用逻辑下沉到 `_` 开头的辅助文件
+7. **业务配置只进 `config_schema`**，禁止读写平台配置
+8. **改了代码必须同步抬高 `manifest.json` 中的 `version`**，否则商店收不到更新
+
+## ctx 能力速查
+- `ctx.config["字段名"]` — 读配置（每次读取最新值）
+- `ctx.kv.get/set/delete/keys` — 每插件独立 kv 存储
+- `ctx.data_dir` — `Path`，每插件独享可写目录
+- `ctx.log.info/debug/warning/error` — 日志
+- `ctx.schedule(fn, "interval", seconds=60)` / `(fn, "cron", hour=3)` — 定时任务
+- `ctx.notify(text, level=, category=, account=)` — 通知平台主人
+- `ctx.on_message(filter, group=0, target="auto")` — 注册消息处理器
+- `ctx.on_callback(filter, group=0, target="auto")` — 注册按钮回调
+- `ctx.bot.send(chat_id, text)` — Bot 发消息
+- `ctx.user.send(chat_id, text)` — 用户账号发消息
+- `ctx.owner_id` — 平台主人 Telegram ID
+- `ctx.add_cleanup(fn)` — 注册清理回调
+
+## config_schema 字段类型
+`string | password | number | boolean | select | multiselect | slider | text`
+参数：`default`(必填), `label`, `help`, `options`, `min/max/step`, `section`, `show_if`
+
+## 完整参考
+- `docs/PLUGIN_GUIDE.md` — 插件开发指南
+- `docs/SPEC.md` — 平台完整规范
