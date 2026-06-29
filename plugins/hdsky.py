@@ -237,13 +237,18 @@ async def setup(ctx):
 
         row, col = btn_pos
         chat_title = getattr(message.chat, "title", "") if message.chat else ""
+        msg_link = getattr(message, "link", "")
+        account_name = getattr(getattr(client, "me", None), "first_name", None) or str(chat_id)
 
         try:
             result = await message.click(x=col, y=row, timeout=10)
             result_text = getattr(result, "message", None) or str(result)
             ctx.log.info("已点击抢红包 chat=%s msg=%s 结果=%s", chat_id, message.id, result_text)
             await ctx.notify(
-                f"已抢天空红包：{result_text}",
+                f"🧧 天空红包-已抢 [账号: {account_name}]\n\n"
+                f"🏠 所在群组\n   {chat_title}\n   群ID: {chat_id}\n\n"
+                f"📩 抢包结果\n   {result_text}\n\n"
+                f"🔗 消息链接\n   {msg_link}",
                 level="success",
                 category="红包",
                 account=client,
@@ -251,7 +256,10 @@ async def setup(ctx):
         except Exception as e:
             ctx.log.warning("点击抢红包失败 chat=%s msg=%s: %s", chat_id, message.id, e)
             await ctx.notify(
-                f"天空红包点击失败：{e}",
+                f"❌ 天空红包-点击失败 [账号: {account_name}]\n\n"
+                f"🏠 所在群组\n   {chat_title}\n   群ID: {chat_id}\n\n"
+                f"⚠️ 错误信息\n   {e}\n\n"
+                f"🔗 消息链接\n   {msg_link}",
                 level="error",
                 category="红包",
                 account=client,
