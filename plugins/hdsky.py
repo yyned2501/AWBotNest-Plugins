@@ -178,8 +178,12 @@ async def setup(ctx):
 
         try:
             sent = await client.send_message(chat_id, auto_msg)
+            # 手动更新 last_id，避免依赖 Pyrogram update loop 触发 track_self_message
+            _last_self_msg_id[f"{chat_id}"] = sent.id
+            await ctx.kv.set(f"hdsky_last_msg:{chat_id}", str(sent.id))
             await sent.delete()
-            ctx.log.info("已响应 /red 发送 auto_msg (gap=%s >= auto_gap=%s) chat=%s", gap, auto_gap, chat_id)
+            ctx.log.info("已响应 /red 发送 auto_msg (gap=%s >= auto_gap=%s) chat=%s last_id=%s",
+                         gap, auto_gap, chat_id, sent.id)
         except Exception:
             pass
 
