@@ -151,11 +151,11 @@ async def setup(ctx):
         await ctx.kv.set(f"hdsky_last_msg:{chat_id}", str(message.id))
 
     # ─── 监听群友的 /red 指令（发 auto_msg 拉近活跃度）───
-    # 放 group=0，与 track_self_message(group=-9) 错开，Pyrogram 分别调度
+    # 同 group=-9，但 track_self_message 只用 filters.me，群友消息不会被它拦截
     @ctx.on_message(
         ctx.filters.group
         & ctx.filters.regex(r"/red\S*\s+\d+\s+\d+"),
-        group=0,
+        group=-9,
     )
     async def red_command_alert(client, message):
         """监听群友发送的 /red 指令，发 auto_msg 后删除，拉近自身活跃度 gap。"""
