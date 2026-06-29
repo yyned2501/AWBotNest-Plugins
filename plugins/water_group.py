@@ -74,8 +74,10 @@ _last_send: float = 0
 
 
 async def setup(ctx):
+    global _last_send
     cfg = ctx.config
     ctx.log.info("水群插件已启用")
+    _last_send = time.time()  # 初始化为当前时间，让第一次也遵守间隔
 
     async def water_task():
         global _last_send
