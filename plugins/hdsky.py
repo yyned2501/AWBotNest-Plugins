@@ -34,7 +34,12 @@ __plugin__ = {
             "type": "string", "default": "",
             "label": "自动发送的文字",
             "section": "自动发言",
-            "help": "群友发 /red 指令时自动发此消息后删除，拉近自身活跃度。也为 /red 指令提供发送内容。为空则不发送。",
+            "help": "群友发 /red 指令时自动发此消息后删除，拉近自身活跃度。为空则不发送。",
+        },
+        "auto_gap": {
+            "type": "slider", "default": 15, "label": "自动发送阈值(msg_id差)",
+            "min": 1, "max": 100, "step": 1, "section": "自动发言",
+            "help": "预留：gap 超过此值时的触发阈值。当前由 /red 指令触发 auto_msg，后续可扩展。",
         },
         "inactive_gap": {
             "type": "slider", "default": 20, "label": "不活跃阈值(msg_id差)",
