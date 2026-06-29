@@ -7,10 +7,10 @@
 # 点击按钮抢红包。
 #
 # 策略：
-# 1. 检测到拼手气红包 → 自动发消息拉近活跃度（可选）
-# 2. 拿红包消息的 msg_id 与最近一次自身发言对比
-# 3. gap >= 阈值 → 不活跃，等待 x 秒后抢
-# 4. gap < 阈值 → 活跃，立即抢
+# 1. 检测到拼手气红包 → 立即算 gap（先于任何 auto_msg，避免 auto_msg 污染 last_id）
+# 2. gap >= 阈值 → 不活跃，等待 x 秒后抢
+# 3. gap < 阈值 → 活跃，立即抢
+# 4. 可选：不活跃时自动发消息，拉近后续红包的活跃度
 # =============================================================================
 
 import asyncio
@@ -19,11 +19,10 @@ import time
 __plugin__ = {
     "name": "天空红包",
     "id": "hdsky",
-    "version": "1.1.0",
+    "version": "1.3.0",
     "author": "Yy",
     "description": "天空小秘（bot 8907007783）拼手气红包自动抢：检测「抢红包」按钮自动点击，auto_msg 拉近活跃度 + gap 判定不活跃延迟。",
     "scope": "user",
-    "default_enabled": False,
     "config_schema": {
         "enabled_groups": {
             "type": "string", "default": "-1001326208894",
@@ -174,21 +173,21 @@ async def setup(ctx):
             return
         _clicked[key] = time.time()
 
-        # ── 自动发消息（拉近活跃度，可选）──
+        # ── 活跃度判定（先于 auto_msg，避免 auto_msg 污染 last_id）──
+        inactive_gap = int(cfg.get("inactive_gap", 20))
+        last_id = await _get_last_self_id(ctx, chat_id)
+        gap = message.id - last_id
+        is_inactive = gap >= inactive_gap
+
+        # ── 自动发消息（拉近后续红包的活跃度，可选）──
         auto_msg = (cfg.get("auto_msg") or "").strip()
-        if auto_msg:
+        if auto_msg and is_inactive:
             try:
                 sent = await message.reply(auto_msg)
                 await sent.delete()
                 ctx.log.info("已自动发消息 chat=%s msg=%s", chat_id, message.id)
             except Exception:
                 pass
-
-        # ── 活跃度判定 ──
-        inactive_gap = int(cfg.get("inactive_gap", 20))
-        last_id = await _get_last_self_id(ctx, chat_id)
-        gap = message.id - last_id
-        is_inactive = gap >= inactive_gap
 
         if is_inactive:
             inactive_delay = int(cfg.get("inactive_delay", 5) or 0)
