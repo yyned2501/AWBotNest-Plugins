@@ -120,7 +120,7 @@ async def setup(ctx):
                 try:
                     sent = await ctx.user.send(chat_id, text)
                     sent_messages.append(sent)
-                    await asyncio.sleep(0.5)  # 防频率限制
+                    await asyncio.sleep(3)  # 每条消息间隔 3 秒，防频率限制
                 except Exception as e:
                     ctx.log.warning("水群发送失败 chat=%s: %s", chat_id, e)
 
