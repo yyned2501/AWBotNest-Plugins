@@ -247,26 +247,24 @@ async def setup(ctx):
             result = await message.click(x=col, y=row, timeout=10)
             result_text = getattr(result, "message", None) or str(result)
             ctx.log.info("已点击抢红包 chat=%s msg=%s 结果=%s", chat_id, message.id, result_text)
-            await ctx.notify(
-                f"🧧 天空红包-已抢\n\n"
-                f"🏠 所在群组\n   {chat_title}\n   群ID: {chat_id}\n\n"
-                f"📩 抢包结果\n   {result_text}\n\n"
-                f"🔗 消息链接\n   {msg_link}",
-                level="success",
-                category="红包",
-                account=client,
-            )
+            if ctx.bot.connected:
+                await ctx.bot.send(
+                    ctx.owner_id,
+                    f"🧧 天空红包-已抢\n\n"
+                    f"🏠 所在群组\n   {chat_title}\n   群ID: {chat_id}\n\n"
+                    f"📩 抢包结果\n   {result_text}\n\n"
+                    f"🔗 消息链接\n   {msg_link}",
+                )
         except Exception as e:
             ctx.log.warning("点击抢红包失败 chat=%s msg=%s: %s", chat_id, message.id, e)
-            await ctx.notify(
-                f"❌ 天空红包-点击失败\n\n"
-                f"🏠 所在群组\n   {chat_title}\n   群ID: {chat_id}\n\n"
-                f"⚠️ 错误信息\n   {e}\n\n"
-                f"🔗 消息链接\n   {msg_link}",
-                level="error",
-                category="红包",
-                account=client,
-            )
+            if ctx.bot.connected:
+                await ctx.bot.send(
+                    ctx.owner_id,
+                    f"❌ 天空红包-点击失败\n\n"
+                    f"🏠 所在群组\n   {chat_title}\n   群ID: {chat_id}\n\n"
+                    f"⚠️ 错误信息\n   {e}\n\n"
+                    f"🔗 消息链接\n   {msg_link}",
+                )
 
 
 async def teardown(ctx):
