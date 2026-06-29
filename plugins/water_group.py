@@ -12,7 +12,7 @@ import time
 __plugin__ = {
     "name": "水群",
     "id": "water_group",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "author": "Yy",
     "description": "定时从发言列表中随机选 N 条发送到指定群组，x 秒后自动删除。",
     "scope": "user",
@@ -114,27 +114,32 @@ async def setup(ctx):
         ctx.log.info("水群：从 %s 条中选 %s 条，发往 %s 个群", len(msgs), count, len(groups))
         _last_send = now
 
-        sent_messages = []
-        for chat_id in groups:
-            for text in chosen:
+        async def _schedule_delete(msg, delay):
+            """在 delay 秒后单独删除 msg。"""
+            await asyncio.sleep(delay)
+            try:
+                await msg.delete()
+                ctx.log.info("已删除水群消息 chat=%s msg=%s", msg.chat.id, msg.id)
+            except Exception:
+                pass
+
+        sent_count = 0
+        for i, chat_id in enumerate(groups):
+            for j, text in enumerate(chosen):
                 try:
                     sent = await ctx.user.send(chat_id, text)
-                    sent_messages.append(sent)
-                    await asyncio.sleep(3)  # 每条消息间隔 3 秒，防频率限制
+                    sent_count += 1
+                    # 每条消息独立计时删除，delete_after 从发出时开始算
+                    if delete_after > 0:
+                        asyncio.create_task(_schedule_delete(sent, delete_after))
+                    # 3 秒间隔只在消息之间，不在最后一条之后
+                    if j < len(chosen) - 1 or i < len(groups) - 1:
+                        await asyncio.sleep(3)
                 except Exception as e:
                     ctx.log.warning("水群发送失败 chat=%s: %s", chat_id, e)
 
-        if sent_messages and delete_after > 0:
-            await asyncio.sleep(delete_after)
-            deleted = 0
-            for msg in sent_messages:
-                try:
-                    await msg.delete()
-                    deleted += 1
-                except Exception:
-                    pass
-            if deleted:
-                ctx.log.info("已删除 %s 条水群消息", deleted)
+        if sent_count:
+            ctx.log.info("水群已发送 %s 条消息，删除定时已安排", sent_count)
 
     # 每分钟检查一次，内部根据 interval 判断是否已到时间
     ctx.schedule(water_task, "interval", minutes=1, id="water_check")
