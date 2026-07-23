@@ -41,7 +41,7 @@ from ._social import record
 __plugin__ = {
     "name": "智能学习",
     "id": "learning",
-    "version": "2.9.0",
+    "version": "3.0.0",
     "author": "Yy",
     "description": (
         "学习你的聊天偏好和说话风格，在匹配关键词的群聊中智能参与对话。"
@@ -49,6 +49,7 @@ __plugin__ = {
     ),
     "scope": "user",
     "default_enabled": False,
+    "render_mode": "vue",
     "config_schema": {
         # —— 接口 ——
         "api_key": {
