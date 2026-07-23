@@ -226,10 +226,10 @@ async function save() {
 /* 用平台主题变量（有则跟随暗色主题），带回退值以便本地 npm run dev 预览。
    container-type：让 @container 按「本组件(=配置弹窗)实际宽度」自适应，
    而非浏览器视口宽度——平台弹窗被 max-width 夹窄时也能正确收起侧栏。 */
-.lcfg { display: flex; flex-direction: column; gap: 14px; container-type: inline-size; }
+.lcfg { display: flex; flex-direction: column; gap: 14px; container-type: inline-size; min-height: 100%; }
 
 /* master-detail 布局 */
-.layout { display: flex; gap: 16px; align-items: flex-start; }
+.layout { display: flex; gap: 16px; align-items: flex-start; min-height: 100%; }
 .sidebar {
   flex: 0 0 150px; display: flex; flex-direction: column; gap: 4px;
   padding: 10px; border-radius: 10px;
@@ -298,5 +298,13 @@ textarea.inp { resize: vertical; font-family: inherit; }
   .sidebar { flex-basis: auto; width: 100%; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 6px; }
   .side-title { display: none; }
   .side-item { flex: 0 1 auto; }
+  .detail { width: 100%; }
+  .grid { grid-template-columns: 1fr; }
+}
+/* 极窄手机：卡片内边距缩小 */
+@container (max-width: 380px) {
+  .card { padding: 12px; }
+  .sidebar { padding: 8px; gap: 4px; }
+  .inp { padding: 7px 8px; }
 }
 </style>

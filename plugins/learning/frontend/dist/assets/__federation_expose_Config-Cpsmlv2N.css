@@ -1,0 +1,115 @@
+
+/* 用平台主题变量（有则跟随暗色主题），带回退值以便本地 npm run dev 预览。
+   container-type：让 @container 按「本组件(=配置弹窗)实际宽度」自适应，
+   而非浏览器视口宽度——平台弹窗被 max-width 夹窄时也能正确收起侧栏。 */
+.lcfg[data-v-4b14dbe8] { display: flex; flex-direction: column; gap: 14px; container-type: inline-size; min-height: 100%;
+}
+
+/* master-detail 布局 */
+.layout[data-v-4b14dbe8] { display: flex; gap: 16px; align-items: flex-start; min-height: 100%;
+}
+.sidebar[data-v-4b14dbe8] {
+  flex: 0 0 150px; display: flex; flex-direction: column; gap: 4px;
+  padding: 10px; border-radius: 10px;
+  background: var(--bg-elevated, #1a1d27); border: 1px solid var(--border-light, #2a2e3a);
+}
+.side-title[data-v-4b14dbe8] { font-size: 11px; color: var(--text-muted, #7a8291); padding: 4px 8px 6px;
+}
+.side-item[data-v-4b14dbe8] {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 9px 10px; border-radius: 8px; border: none; cursor: pointer; text-align: left;
+  background: none; color: var(--text-secondary, #b9c0cc); font-size: 13px;
+  transition: background 0.15s, color 0.15s;
+}
+.side-item[data-v-4b14dbe8]:hover { background: var(--bg-card, #12141c);
+}
+.side-item.on[data-v-4b14dbe8] { background: var(--accent-dim, #1e3a5f); color: var(--accent, #6ea8fe);
+}
+.dot[data-v-4b14dbe8] { width: 7px; height: 7px; border-radius: 50%; background: #6ee7a8; flex: 0 0 auto;
+}
+.detail[data-v-4b14dbe8] { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 14px;
+}
+.det-title[data-v-4b14dbe8] { margin: 0; font-size: 15px; font-weight: 600; color: var(--text-primary, #e8ebf0);
+}
+.card[data-v-4b14dbe8] {
+  display: flex; flex-direction: column; gap: 12px; padding: 16px; border-radius: 10px;
+  background: var(--bg-elevated, #1a1d27); border: 1px solid var(--border-light, #2a2e3a);
+}
+.card-h[data-v-4b14dbe8] { font-size: 13px; font-weight: 600; color: var(--accent, #6ea8fe);
+}
+
+/* 表单自适应：窄容器单列，够宽才两列 */
+.grid[data-v-4b14dbe8] { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px 20px;
+}
+.fld[data-v-4b14dbe8] { display: flex; flex-direction: column; gap: 6px; min-width: 0;
+}
+.lbl[data-v-4b14dbe8] { font-size: 13px; color: var(--text-secondary, #b9c0cc);
+}
+.help[data-v-4b14dbe8] { font-size: 12px; color: var(--text-muted, #7a8291);
+}
+.row[data-v-4b14dbe8] { display: flex; align-items: center; gap: 10px;
+}
+.row.switch[data-v-4b14dbe8] { cursor: pointer; font-size: 13px; color: var(--text-primary, #e8ebf0);
+}
+.row.switch input[data-v-4b14dbe8] { accent-color: var(--accent, #6ea8fe);
+}
+.inp[data-v-4b14dbe8] {
+  width: 100%; min-width: 0; box-sizing: border-box;
+  padding: 8px 10px; border-radius: 6px; font-size: 13px;
+  background: var(--bg-card, #12141c); color: var(--text-primary, #e8ebf0);
+  border: 1px solid var(--border-light, #2a2e3a);
+  transition: border-color 0.15s;
+}
+.inp[data-v-4b14dbe8]:focus { outline: none; border-color: var(--accent, #6ea8fe);
+}
+.inp[type='number'][data-v-4b14dbe8] { max-width: 150px;
+}
+textarea.inp[data-v-4b14dbe8] { resize: vertical; font-family: inherit;
+}
+.inp.mono[data-v-4b14dbe8] { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px;
+}
+.inp.ro[data-v-4b14dbe8] { color: var(--text-secondary, #b9c0cc);
+}
+.btn[data-v-4b14dbe8] {
+  padding: 7px 14px; border-radius: 6px; cursor: pointer; font-size: 13px;
+  background: var(--bg-card, #12141c); color: var(--text-secondary, #b9c0cc);
+  border: 1px solid var(--border-light, #2a2e3a);
+  transition: border-color 0.15s, color 0.15s;
+}
+.btn[data-v-4b14dbe8]:hover { border-color: var(--accent, #6ea8fe); color: var(--accent, #6ea8fe);
+}
+.btn.primary[data-v-4b14dbe8] { background: var(--accent-dim, #1e3a5f); border-color: var(--accent, #6ea8fe); color: var(--accent, #6ea8fe);
+}
+.btn.lg[data-v-4b14dbe8] { padding: 9px 22px;
+}
+.btn[data-v-4b14dbe8]:disabled { opacity: 0.5; cursor: not-allowed;
+}
+.savebar[data-v-4b14dbe8] { position: sticky; bottom: 0; display: flex; justify-content: flex-end; padding-top: 4px;
+}
+.muted[data-v-4b14dbe8] { font-size: 12px; color: var(--text-muted, #7a8291);
+}
+
+/* 弹窗较窄时：分组栏从左侧竖排改为顶部横排 chips，把整宽让给明细。 */
+@container (max-width: 620px) {
+.layout[data-v-4b14dbe8] { flex-direction: column;
+}
+.sidebar[data-v-4b14dbe8] { flex-basis: auto; width: 100%; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 6px;
+}
+.side-title[data-v-4b14dbe8] { display: none;
+}
+.side-item[data-v-4b14dbe8] { flex: 0 1 auto;
+}
+.detail[data-v-4b14dbe8] { width: 100%;
+}
+.grid[data-v-4b14dbe8] { grid-template-columns: 1fr;
+}
+}
+/* 极窄手机：卡片内边距缩小 */
+@container (max-width: 380px) {
+.card[data-v-4b14dbe8] { padding: 12px;
+}
+.sidebar[data-v-4b14dbe8] { padding: 8px; gap: 4px;
+}
+.inp[data-v-4b14dbe8] { padding: 7px 8px;
+}
+}
