@@ -1,11 +1,14 @@
 # =============================================================================
-# learning 插件私有辅助：OpenAI 兼容接口封装（不被平台识别为插件，_ 开头）
+# learning 插件：OpenAI 兼容接口封装
+# 按 (api_key, base_url) 缓存客户端实例，复用连接池。
 # =============================================================================
 
-import base64
 from typing import Optional
 
 import openai
+
+# 客户端缓存：(api_key, base_url) -> AsyncOpenAI
+_client_cache: dict[tuple[str, str], openai.AsyncOpenAI] = {}
 
 
 def classify_error(err: Exception) -> str:
@@ -28,33 +31,30 @@ def classify_error(err: Exception) -> str:
     return f"AI 调用失败：{msg}"
 
 
+def _get_client(api_key: str, base_url: Optional[str]) -> openai.AsyncOpenAI:
+    """获取或创建缓存的 AsyncOpenAI 客户端。"""
+    key = (api_key, base_url or "")
+    client = _client_cache.get(key)
+    if client is None:
+        client = openai.AsyncOpenAI(api_key=api_key, base_url=base_url or None)
+        _client_cache[key] = client
+    return client
+
+
 async def generate(
     api_key: str,
     base_url: Optional[str],
     model: str,
     messages: list[dict],
     temperature: float = 0.7,
-    image_bytes: Optional[bytes] = None,
 ) -> str:
-    """
-    调 OpenAI 兼容接口生成回复。messages 为 [{"role","content"}, ...]。
-    带 image_bytes 时把图片塞进最后一条 user 消息（vision 格式）。
+    """调 OpenAI 兼容接口生成回复。
+
+    messages 为 [{"role","content"}, ...]。
     出错抛异常，由调用方分类处理。
     """
-    client = openai.AsyncOpenAI(api_key=api_key, base_url=base_url or None)
+    client = _get_client(api_key, base_url)
     formatted = [{"role": m["role"], "content": m["content"]} for m in messages]
-
-    if image_bytes and formatted:
-        # 找最后一条 user 消息，改成 文本+图片 的 vision 结构
-        for i in range(len(formatted) - 1, -1, -1):
-            if formatted[i].get("role") == "user":
-                text = str(formatted[i].get("content", "")).strip() or "请解释这张图片表达的内容。"
-                b64 = base64.b64encode(image_bytes).decode("utf-8")
-                formatted[i]["content"] = [
-                    {"type": "text", "text": text},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-                ]
-                break
 
     resp = await client.chat.completions.create(
         model=model, messages=formatted, temperature=temperature
@@ -62,3 +62,8 @@ async def generate(
     if resp.choices:
         return resp.choices[0].message.content or ""
     return ""
+
+
+def clear_clients():
+    """清理缓存的客户端（teardown 时调用）。"""
+    _client_cache.clear()

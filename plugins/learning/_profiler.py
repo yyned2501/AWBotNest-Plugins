@@ -7,6 +7,7 @@ import time
 from collections import deque
 
 from ._engine import generate
+from ._text import extract_keywords
 
 # 自己消息缓冲：chat_id -> deque[str]
 _msg_buf: dict[int, deque] = {}
@@ -144,6 +145,7 @@ async def summarize(chat_id: int, kv, cfg, own_messages: list[str]) -> dict | No
       - voice.habits → 新旧取并集（去重）
       - voice.tone / avg_words / punctuation / emoji_freq → 用最新值
       - voice.style_prompt → LLM 在 prompt 中合并新旧风格，直接取最新结果
+      - keyword_heat → 从旧画像继承（不继承会导致热度每次总结清零）
       失败则保留旧数据不变。
     """
     if not own_messages:
@@ -199,6 +201,8 @@ async def summarize(chat_id: int, kv, cfg, own_messages: list[str]) -> dict | No
             "summary": str(parsed.get("summary", "") or ""),
             "ready": True,
             "updated_ts": time.time(),
+            # 继承旧画像的关键词热度；不继承会导致每次总结后热度清零
+            "keyword_heat": old_profile.get("keyword_heat", {}),
         }
 
         # —— voice 数据：合并各子维度 ——
@@ -251,7 +255,7 @@ def clear():
 
 def _prune_inplace(profile: dict, max_keywords: int):
     """对内存中的 profile dict 执行关键词裁剪（不读写 KV）。
-    
+
     评分公式：count × 10 + 最近使用奖赏(0~5)
     - 从未触发参与且创建>7天的词直接淘汰
     - 按分数降序保留前 max_keywords 个
@@ -285,45 +289,6 @@ def _prune_inplace(profile: dict, max_keywords: int):
     kept = sorted_kws[:max_keywords]
     profile["keywords"] = kept
     profile["keyword_heat"] = {k: v for k, v in heat.items() if k in kept}
-
-
-# 分隔符集合 + 简单关键词提取（独立于 _judger 以避免循环导入）
-_DELIMITERS = set(
-    ' \t\n\r,，。！？、；：""\'\''
-    '（）()'
-    '[]【】'
-    '/\\|@#'
-    '$%^&*+=~`<>《》'
-)
-
-
-def _extract_keywords(text: str) -> set[str]:
-    tokens = []
-    current: list[str] = []
-    for ch in text:
-        if ch in _DELIMITERS:
-            if current:
-                tokens.append(''.join(current))
-                current = []
-        else:
-            current.append(ch)
-    if current:
-        tokens.append(''.join(current))
-    stopwords = {
-        "的", "了", "在", "是", "我", "有", "和", "就", "不", "人", "都", "一",
-        "个", "上", "也", "很", "到", "说", "要", "去", "你", "会", "着",
-        "没有", "看", "好", "自己", "这", "他", "她", "它", "们", "那",
-        "什么", "怎么", "为啥", "吗", "呢", "啊", "吧", "嗯", "哦",
-        "the", "a", "an", "is", "are", "was", "were", "it", "this",
-        "that", "to", "in", "of", "for", "on", "and", "or", "with",
-    }
-    result = set()
-    for t in tokens:
-        t = t.strip().lower()
-        if len(t) < 2 or t in stopwords or t.isdigit():
-            continue
-        result.add(t)
-    return result
 
 
 def update_keyword_heat(chat_id: int, kv, matched_keyword: str):
@@ -368,7 +333,7 @@ def update_manual_keyword_heat(chat_id: int, kv, text: str, extra_keywords: list
     if not kw_list:
         return {"reason": "no_keywords"}
 
-    msg_tokens = _extract_keywords(text)
+    msg_tokens = extract_keywords(text)
     text_lower = text.lower()
     heat = profile.get("keyword_heat", {})
     now = time.time()

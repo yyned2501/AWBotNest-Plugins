@@ -5,50 +5,7 @@ import random
 
 from ._config import AiConfig
 from ._profiler import get_profile
-
-# 中文标点/分隔符集合
-_DELIMITERS = set(
-    ' \t\n\r,，。！？、；：""\'\''
-    '（）()'
-    '[]【】'
-    '/\\|@#'
-    '$%^&*+=~`<>《》'
-)
-
-
-def _extract_keywords(text: str) -> set[str]:
-    """简单关键词提取：去掉停用词后的中文词/英文词。
-
-    这里不做分词（不引入额外依赖），直接用分隔符切分，
-    过滤停用词。轻量但够用，更精确的留到 LLM 判断环节。
-    """
-    tokens = []
-    current: list[str] = []
-    for ch in text:
-        if ch in _DELIMITERS:
-            if current:
-                tokens.append(''.join(current))
-                current = []
-        else:
-            current.append(ch)
-    if current:
-        tokens.append(''.join(current))
-
-    stopwords = {
-        "的", "了", "在", "是", "我", "有", "和", "就", "不", "人", "都", "一",
-        "个", "上", "也", "很", "到", "说", "要", "去", "你", "会", "着",
-        "没有", "看", "好", "自己", "这", "他", "她", "它", "们", "那",
-        "什么", "怎么", "为啥", "吗", "呢", "啊", "吧", "嗯", "哦",
-        "the", "a", "an", "is", "are", "was", "were", "it", "this",
-        "that", "to", "in", "of", "for", "on", "and", "or", "with",
-    }
-    result = set()
-    for t in tokens:
-        t = t.strip().lower()
-        if len(t) < 2 or t in stopwords or t.isdigit():
-            continue
-        result.add(t)
-    return result
+from ._text import extract_keywords
 
 
 def should_participate(
@@ -87,7 +44,7 @@ def should_participate(
         keywords = list(set(keywords) | set(manual_kws))
 
     # 消息关键词
-    msg_keywords = _extract_keywords(message_text)
+    msg_keywords = extract_keywords(message_text)
 
     # 匹配：消息中的关键词是否与画像 keywords 重叠
     matched_kw: str | None = None

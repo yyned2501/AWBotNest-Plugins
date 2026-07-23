@@ -1,6 +1,7 @@
 # =============================================================================
 # 学习插件（智能参与版）：配置封装
 # =============================================================================
+import time
 from dataclasses import dataclass, field
 
 
@@ -66,8 +67,30 @@ def to_int(v, default: int) -> int:
         return default
 
 
+# ── parse_config TTL 缓存 ─────────────────────────────────────────
+# 消息回调每条都会解析配置，缓存 30 秒避免重复构造 dataclass。
+_CONFIG_CACHE_TTL = 30.0  # 秒
+_cache_raw: dict | None = None
+_cache_value: AiConfig | None = None
+_cache_ts: float = 0.0  # time.monotonic() 时间戳
+
+
 def parse_config(raw: dict) -> AiConfig:
-    return AiConfig(
+    """解析原始配置 dict 为 AiConfig（模块级 TTL 缓存，30 秒过期）。
+
+    缓存命中条件：raw 内容未变 且 距上次解析不足 TTL。
+    配置内容变化或缓存过期时重新解析。
+    """
+    global _cache_raw, _cache_value, _cache_ts
+    now = time.monotonic()
+    if (
+        _cache_value is not None
+        and _cache_raw == raw
+        and now - _cache_ts < _CONFIG_CACHE_TTL
+    ):
+        return _cache_value
+
+    cfg = AiConfig(
         api_key=str(raw.get("api_key", "") or ""),
         base_url=str(raw.get("base_url", "") or ""),
         model=str(raw.get("model", "gpt-3.5-turbo") or "gpt-3.5-turbo"),
@@ -83,3 +106,8 @@ def parse_config(raw: dict) -> AiConfig:
         participation_msg_gap=max(1, to_int(raw.get("participation_msg_gap", 5), 5)),
         profile_prompt_template=str(raw.get("profile_prompt_template", "") or AiConfig.profile_prompt_template),
     )
+
+    _cache_raw = dict(raw)  # 存副本，防止外部就地修改导致缓存失真
+    _cache_value = cfg
+    _cache_ts = now
+    return cfg

@@ -1,9 +1,13 @@
 # =============================================================================
 # 学习插件：参与回复生成器（模拟用户风格）
 # =============================================================================
+import logging
+
 from ._config import AiConfig
 from ._engine import generate
 from ._profiler import get_profile
+
+logger = logging.getLogger(__name__)
 
 _DEFAULT_VOICE = (
     "你是一个真实用户，在群里自然接话。"
@@ -74,6 +78,7 @@ async def participate(
             cfg.api_key, cfg.base_url, cfg.model, messages,
         )
     except Exception:
+        logger.error("参与回复生成失败 chat=%s", chat_id, exc_info=True)
         return None
 
     if not reply_text:
@@ -83,4 +88,5 @@ async def participate(
         await client.send_message(chat_id, reply_text)
         return reply_text
     except Exception:
+        logger.error("参与回复发送失败 chat=%s reply=%r", chat_id, reply_text[:50], exc_info=True)
         return None

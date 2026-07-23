@@ -2,11 +2,13 @@
 # 学习插件：社交图谱（记录我跟谁聊过天）
 # =============================================================================
 import time
-from typing import Optional
 
 # 内存缓存：chat_id -> {user_id -> {name, count, last_ts}}
 _cache: dict[int, dict[int, dict]] = {}
 _SAVE_KEY_TPL = "social:{}"  # social:<chat_id> → list
+
+# 脏标记：内存已修改但尚未刷盘的 chat_id 集合
+_dirty_chats: set[int] = set()
 
 
 def _ensure(chat_id: int):
@@ -15,7 +17,10 @@ def _ensure(chat_id: int):
 
 
 def record(chat_id: int, user_id: int, name: str, kv):
-    """记录一次与 user 的互动。"""
+    """记录一次与 user 的互动。
+
+    只更新内存缓存并标记脏位，不立即写 KV（延迟刷盘，由 flush() 统一落盘）。
+    """
     _ensure(chat_id)
     entry = _cache[chat_id].get(user_id)
     if entry:
@@ -29,8 +34,19 @@ def record(chat_id: int, user_id: int, name: str, kv):
             "count": 1,
             "last_ts": time.time(),
         }
-    # 持久化
-    _persist(chat_id, kv)
+    _dirty_chats.add(chat_id)
+
+
+async def flush(kv):
+    """将脏缓存刷回 KV（teardown / 定时任务调用）。
+
+    无脏数据时直接返回，避免无谓 IO。
+    """
+    if not _dirty_chats:
+        return
+    for chat_id in list(_dirty_chats):
+        _persist(chat_id, kv)
+    _dirty_chats.clear()
 
 
 def get_frequent(chat_id: int, kv, min_count: int = 3) -> list[dict]:
@@ -75,3 +91,4 @@ def _persist(chat_id: int, kv):
 
 def clear():
     _cache.clear()
+    _dirty_chats.clear()

@@ -13,10 +13,12 @@
 #
 # 默认不启用，手动打开后需要发一些消息让插件学习。
 # =============================================================================
+import asyncio
 import time
 import traceback
 
 from ._config import parse_config
+from ._engine import clear_clients
 from ._judger import should_participate
 from ._participator import participate
 from ._profiler import (
@@ -33,12 +35,13 @@ from ._profiler import (
     summarize,
     update_manual_keyword_heat,
 )
+from ._social import flush as flush_social
 from ._social import record
 
 __plugin__ = {
     "name": "智能学习",
     "id": "learning",
-    "version": "2.8.6",
+    "version": "2.9.0",
     "author": "Yy",
     "description": (
         "学习你的聊天偏好和说话风格，在匹配关键词的群聊中智能参与对话。"
@@ -186,6 +189,11 @@ _incoming_msg_count: dict[int, int] = {}
 # 自动回复中标记集：chat_id 在集合中时，on_own_messages 跳过热词追踪
 _auto_sending_chats: set[int] = set()
 
+# ── 配置写入防抖：展示字段更新频繁，合并到防抖窗口后一次性落盘 ──
+_CONFIG_DEBOUNCE = 5.0  # 秒，最后一次调用后等待时长
+_config_pending: dict = {}
+_config_debounce_task: asyncio.Task | None = None
+
 
 def _format_profile_display(profile: dict) -> str:
     """将画像 dict 格式化成可读的多行文本，供配置页显示（不含关键词，关键词在独立字段中）。"""
@@ -265,9 +273,28 @@ def _group_allowed(chat_id: int, cfg) -> bool:
 
 
 def _update_config(ctx, **updates):
-    """写入插件配置到持久存储。
+    """写入插件配置到持久存储（asyncio 防抖：最后一次调用后 5 秒合并写入）。
+
     ctx.config['x'] = y 不会持久化（ctx.config 是只读 property），
-    必须通过 registry.set_config 合并写入。"""
+    必须通过 registry.set_config 合并写入。
+    展示字段（keyword_display / profile_display）更新频繁，
+    防抖窗口内的多次调用合并为一次落盘，减少 IO。
+    """
+    global _config_debounce_task
+    _config_pending.update(updates)
+    # 取消上一轮定时器，重新计时
+    if _config_debounce_task is not None and not _config_debounce_task.done():
+        _config_debounce_task.cancel()
+    _config_debounce_task = asyncio.create_task(_flush_config_updates(ctx))
+
+
+async def _flush_config_updates(ctx):
+    """等待防抖窗口后，把累积的配置更新一次性写入 registry。"""
+    await asyncio.sleep(_CONFIG_DEBOUNCE)
+    updates = dict(_config_pending)
+    _config_pending.clear()
+    if not updates:
+        return
     reg = ctx._registry
     current = reg.get_config(ctx.plugin_id)
     current.update(updates)
@@ -460,6 +487,22 @@ async def setup(ctx):
 
 
 async def teardown(ctx):
+    global _config_debounce_task
+    # 取消防抖定时器，但把累积的配置更新立即落盘，防止丢失最后一次展示更新
+    if _config_debounce_task is not None and not _config_debounce_task.done():
+        _config_debounce_task.cancel()
+    if _config_pending:
+        updates = dict(_config_pending)
+        _config_pending.clear()
+        reg = ctx._registry
+        current = reg.get_config(ctx.plugin_id)
+        current.update(updates)
+        reg.set_config(ctx.plugin_id, current)
+
+    # 社交图谱刷盘 + 清理缓存的 AI 客户端
+    await flush_social(ctx.kv)
+    clear_clients()
+
     clear()
     _active_groups.clear()
     _last_participate_time.clear()

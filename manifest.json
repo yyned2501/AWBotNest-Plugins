@@ -8,7 +8,7 @@
   },
   "learning": {
     "name": "智能学习",
-    "version": "2.8.6",
+    "version": "2.9.0",
     "author": "Yy",
     "description": "学习你的聊天偏好和说话风格，在匹配关键词的群聊中智能参与对话。冷启动：未学到偏好前不参与。",
     "path": "plugins/learning/"
