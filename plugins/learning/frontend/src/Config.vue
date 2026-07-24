@@ -300,6 +300,11 @@ textarea.inp { resize: vertical; font-family: inherit; }
   .side-item { flex: 0 1 auto; }
   .detail { width: 100%; }
   .grid { grid-template-columns: 1fr; }
+  .inp[type='number'] { max-width: none; width: 100%; }
+  .row { flex-direction: column; align-items: stretch; gap: 6px; }
+  .row.switch { flex-direction: row; align-items: center; }
+  .savebar { justify-content: stretch; }
+  .savebar .btn.lg { width: 100%; text-align: center; }
 }
 /* 极窄手机：卡片内边距缩小 */
 @container (max-width: 380px) {
