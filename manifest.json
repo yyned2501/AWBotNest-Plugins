@@ -1,4 +1,11 @@
 {
+  "battleroyale": {
+    "name": "大逃杀助手",
+    "version": "1.0.0",
+    "author": "Yy",
+    "description": "监听 @NextFunBot 大逃杀游戏，自动跟踪投票统计、每圈结算通知、自动下注（以少胜多规则）。",
+    "path": "plugins/battleroyale/"
+  },
   "hdsky": {
     "name": "天空红包",
     "version": "2.0.0",
@@ -8,7 +15,7 @@
   },
   "learning": {
     "name": "智能学习",
-    "version": "3.0.0",
+    "version": "3.1.0",
     "author": "Yy",
     "description": "学习你的聊天偏好和说话风格，在匹配关键词的群聊中智能参与对话。冷启动：未学到偏好前不参与。",
     "path": "plugins/learning/"

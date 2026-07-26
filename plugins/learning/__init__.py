@@ -18,7 +18,7 @@ import time
 import traceback
 
 from ._config import parse_config
-from ._engine import clear_clients
+from ._ai import init_ai
 from ._judger import should_participate
 from ._participator import participate
 from ._profiler import (
@@ -41,7 +41,7 @@ from ._social import record
 __plugin__ = {
     "name": "智能学习",
     "id": "learning",
-    "version": "3.0.0",
+    "version": "3.1.0",
     "author": "Yy",
     "description": (
         "学习你的聊天偏好和说话风格，在匹配关键词的群聊中智能参与对话。"
@@ -51,19 +51,6 @@ __plugin__ = {
     "default_enabled": False,
     "render_mode": "vue",
     "config_schema": {
-        # —— 接口 ——
-        "api_key": {
-            "type": "password", "default": "", "label": "API Key",
-            "section": "接口", "help": "OpenAI 兼容接口的密钥。",
-        },
-        "base_url": {
-            "type": "string", "default": "", "label": "接口地址(Base URL)",
-            "section": "接口", "help": "OpenAI 兼容接口地址，留空用官方默认。",
-        },
-        "model": {
-            "type": "string", "default": "gpt-3.5-turbo", "label": "模型",
-            "section": "接口", "help": "用于关键词风格分析和参与回复。",
-        },
         # —— 学习 ——
         "summarize_gap": {
             "type": "slider", "default": 10, "label": "总结间隔(条)",
@@ -304,13 +291,14 @@ async def _flush_config_updates(ctx):
 
 async def setup(ctx):
     kv = ctx.kv
+    init_ai(ctx.ai)
 
     # ── 处理器 1：自己发的消息 → 学习（仅限 target_groups 中的群）──
     @ctx.on_message(ctx.filters.outgoing, group=-11)
     async def on_own_messages(client, message):
         try:
             cfg = parse_config(ctx.config)
-            if not cfg.api_key or not cfg.target_groups:
+            if not ctx.ai.available or not cfg.target_groups:
                 return
             if not message.text:
                 return
@@ -400,7 +388,7 @@ async def setup(ctx):
     @ctx.on_message(~ctx.filters.outgoing, group=11)
     async def on_all_messages(client, message):
         cfg = parse_config(ctx.config)
-        if not cfg.api_key:
+        if not ctx.ai.available:
             return
         if not message.text or not cfg.target_groups:
             return
@@ -424,7 +412,7 @@ async def setup(ctx):
     @ctx.on_message(ctx.filters.group & ctx.filters.text & ~ctx.filters.outgoing, group=12)
     async def on_participate(client, message):
         cfg = parse_config(ctx.config)
-        if not cfg.api_key or not cfg.enable_participation:
+        if not ctx.ai.available or not cfg.enable_participation:
             return
         if not cfg.target_groups:
             return
@@ -472,7 +460,7 @@ async def setup(ctx):
     # ── 定时兜底：检查未总结的群 ──
     async def summary_tick():
         cfg = parse_config(ctx.config)
-        if not cfg.api_key:
+        if not ctx.ai.available:
             return
         for chat_id in list(_active_groups):
             cnt = get_message_count(kv, chat_id)
@@ -485,6 +473,53 @@ async def setup(ctx):
                         reset_counter(chat_id, kv)
 
     ctx.schedule(summary_tick, "interval", minutes=5, id="AI学习总结")
+
+    # ── on_api 端点 ──
+    @ctx.on_api("/status", methods=["GET"])
+    async def status_api(req):
+        """返回插件当前运行状态。"""
+        cfg = parse_config(ctx.config)
+        groups_info = []
+        for gid in sorted(_active_groups):
+            profile = get_profile(gid, kv)
+            cnt = get_message_count(kv, gid)
+            groups_info.append({
+                "chat_id": gid,
+                "message_count": cnt,
+                "has_profile": bool(profile and profile.get("ready")),
+                "keywords": (profile.get("keywords", []) if profile else [])[:10],
+            })
+        return {
+            "ai_available": ctx.ai.available,
+            "ai_models": ctx.ai.available_models("text") if ctx.ai.available else [],
+            "active_groups": len(_active_groups),
+            "groups": groups_info,
+            "enable_participation": cfg.enable_participation,
+            "participation_rate": cfg.participation_rate,
+        }
+
+    @ctx.on_api("/profile", methods=["GET"])
+    async def profile_api(req):
+        """返回指定群组的画像。"""
+        chat_id = req.query.get("chat_id", "")
+        if not chat_id:
+            return {"error": "缺少 chat_id 参数"}
+        try:
+            gid = int(chat_id)
+        except ValueError:
+            return {"error": "chat_id 必须是数字"}
+        profile = get_profile(gid, kv)
+        if not profile:
+            return {"error": "该群组暂无画像"}
+        return {
+            "chat_id": gid,
+            "keywords": profile.get("keywords", []),
+            "summary": profile.get("summary", ""),
+            "ready": profile.get("ready", False),
+            "updated_ts": profile.get("updated_ts", 0),
+            "voice": profile.get("voice", {}),
+            "keyword_heat": profile.get("keyword_heat", {}),
+        }
 
 
 async def teardown(ctx):
@@ -500,9 +535,8 @@ async def teardown(ctx):
         current.update(updates)
         reg.set_config(ctx.plugin_id, current)
 
-    # 社交图谱刷盘 + 清理缓存的 AI 客户端
+    # 社交图谱刷盘
     await flush_social(ctx.kv)
-    clear_clients()
 
     clear()
     _active_groups.clear()

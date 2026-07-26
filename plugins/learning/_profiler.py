@@ -6,7 +6,7 @@ import re
 import time
 from collections import deque
 
-from ._engine import generate
+from ._ai import generate
 from ._text import extract_keywords
 
 # 自己消息缓冲：chat_id -> deque[str]
@@ -179,7 +179,7 @@ async def summarize(chat_id: int, kv, cfg, own_messages: list[str]) -> dict | No
     ]
 
     try:
-        raw = await generate(cfg.api_key, cfg.base_url, cfg.model, messages)
+        raw = await generate(messages)
     except Exception:
         return None
 

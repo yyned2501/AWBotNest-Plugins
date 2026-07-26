@@ -2,9 +2,9 @@
 # 学习插件：参与回复生成器（模拟用户风格）
 # =============================================================================
 import logging
+from typing import Any
 
-from ._config import AiConfig
-from ._engine import generate
+from ._ai import generate
 from ._profiler import get_profile
 
 logger = logging.getLogger(__name__)
@@ -21,15 +21,12 @@ async def participate(
     client,
     chat_id: int,
     message_text: str,
-    cfg: AiConfig,
+    cfg: Any,
     kv,
     context_lines: list[str] | None = None,
 ) -> str | None:
     """针对匹配到的群消息，模拟用户风格生成自然回复并直接发送。
     返回回复文本，失败返回 None。"""
-    if not cfg.api_key:
-        return None
-
     profile = get_profile(chat_id, kv)
     summary = profile.get("summary", "")
 
@@ -74,9 +71,7 @@ async def participate(
     ]
 
     try:
-        reply_text = await generate(
-            cfg.api_key, cfg.base_url, cfg.model, messages,
-        )
+        reply_text = await generate(messages)
     except Exception:
         logger.error("参与回复生成失败 chat=%s", chat_id, exc_info=True)
         return None

@@ -8,10 +8,6 @@ from dataclasses import dataclass, field
 @dataclass
 class AiConfig:
     """AI 智能参与插件全部配置，字段与 __plugin__['config_schema'] 对应。"""
-    # —— 接口 ——
-    api_key: str = ""
-    base_url: str = ""
-    model: str = "gpt-3.5-turbo"
     # —— 学习 ——
     summarize_gap: int = 10
     max_context_lines: int = 5
@@ -91,9 +87,6 @@ def parse_config(raw: dict) -> AiConfig:
         return _cache_value
 
     cfg = AiConfig(
-        api_key=str(raw.get("api_key", "") or ""),
-        base_url=str(raw.get("base_url", "") or ""),
-        model=str(raw.get("model", "gpt-3.5-turbo") or "gpt-3.5-turbo"),
         summarize_gap=max(1, to_int(raw.get("summarize_gap", 10), 10)),
         max_context_lines=max(1, min(20, to_int(raw.get("max_context_lines", 5), 5))),
         enable_participation=bool(raw.get("enable_participation", True)),

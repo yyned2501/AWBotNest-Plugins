@@ -5,8 +5,7 @@
 //   host: 平台能力对象
 //     host.getConfig()         读取本插件已保存配置（Promise<对象>）
 //     host.saveConfig(values)  保存配置（Promise）——存平台统一存储，插件里 ctx.config 可读到
-//     host.toast.success/error(msg)  弹平台提示
-// 本插件没有后端 API（无 ctx.on_api），故不使用 host.callApi。
+//     host.callApi(path) 调用插件后端 API（on_api 端点）
 // 布局：左侧分组导航 + 右侧明细（master-detail），窄容器时侧栏收为横排 chips。
 import { ref, reactive, onMounted } from 'vue'
 
@@ -17,7 +16,6 @@ const props = defineProps({
 
 // 默认配置（与 src/main.js 的 mock 保持一致）
 const DEFAULTS = {
-  api_key: '', base_url: '', model: 'gpt-3.5-turbo',
   summarize_gap: 10, max_context_lines: 5,
   target_groups: '',
   enable_participation: true, participation_rate: 20,
@@ -28,7 +26,7 @@ const DEFAULTS = {
 
 // 左侧分组导航。en=对应启用开关键（有则显示启用小圆点）。
 const GROUPS = [
-  { key: 'api', label: '接口' },
+  { key: 'ai', label: 'AI 服务' },
   { key: 'learn', label: '学习' },
   { key: 'groups', label: '群组' },
   { key: 'participation', label: '参与', en: 'enable_participation' },
@@ -36,7 +34,7 @@ const GROUPS = [
   { key: 'profile', label: '身份模拟' },
 ]
 
-const group = ref('api')
+const group = ref('ai')
 const loading = ref(true)
 const saving = ref(false)
 const cfg = reactive({ ...DEFAULTS })
@@ -63,6 +61,20 @@ async function save() {
     saving.value = false
   }
 }
+
+async function testAI() {
+  try {
+    const res = await props.host.callApi('/status')
+    if (res && res.ai_available) {
+      const models = (res.ai_models || []).join(', ')
+      props.host.toast.success(`AI 服务正常 | 模型: ${models || '默认'}`)
+    } else {
+      props.host.toast.error('AI 服务不可用，请在系统设置 → AI 服务中配置')
+    }
+  } catch (e) {
+    props.host.toast.error('测试失败：' + (e.message || e))
+  }
+}
 </script>
 
 <template>
@@ -79,25 +91,23 @@ async function save() {
       </aside>
 
       <div class="detail">
-        <!-- ============ 接口 ============ -->
-        <template v-if="group === 'api'">
-          <h3 class="det-title">接口</h3>
+        <!-- ============ AI 服务 ============ -->
+        <template v-if="group === 'ai'">
+          <h3 class="det-title">AI 服务</h3>
           <section class="card">
-            <div class="card-h">LLM 接口（OpenAI 兼容）</div>
+            <div class="card-h">平台 AI（系统设置 → AI 服务配置）</div>
             <div class="fld">
-              <span class="lbl">API Key</span>
-              <input v-model="cfg.api_key" class="inp" type="password" placeholder="sk-…" autocomplete="off" />
-              <span class="help">OpenAI 兼容接口的密钥</span>
+              <span class="lbl">状态</span>
+              <span class="tag ok">已启用</span>
+              <span class="help">AI 服务由管理员在系统设置中统一配置，插件无需单独设置</span>
             </div>
             <div class="fld">
-              <span class="lbl">接口地址(Base URL)</span>
-              <input v-model="cfg.base_url" class="inp" type="text" placeholder="https://api.openai.com/v1" />
-              <span class="help">OpenAI 兼容接口地址，留空用官方默认</span>
+              <span class="lbl">说明</span>
+              <span class="help">本插件使用平台内置 AI 服务（ctx.ai），无需手动填写 API Key / Base URL。
+              管理员在「系统设置 → AI 服务」中配置好模型后，插件自动可用。</span>
             </div>
             <div class="fld">
-              <span class="lbl">模型</span>
-              <input v-model="cfg.model" class="inp" type="text" placeholder="gpt-3.5-turbo" />
-              <span class="help">用于关键词风格分析和参与回复</span>
+              <button class="btn sm" @click="testAI">测试连接</button>
             </div>
           </section>
         </template>
