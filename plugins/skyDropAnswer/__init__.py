@@ -100,6 +100,9 @@ async def setup(ctx):
         ctx.kv.set(_KV_PENDING, [p for p in pending if now - p.get("time", 0) < 300])
 
         text = (message.text or "").strip()
+        # 匹配奖励格式，不匹配则跳过
+        if not re.search(r"小秘想给你 \d+ 银元奖励。", text):
+            return
         _PROMPT_ANSWER = "你是Telegram答题助手，分析题目并给出答案。只输出答案内容，不要加任何解释。"
         ans = None
 
