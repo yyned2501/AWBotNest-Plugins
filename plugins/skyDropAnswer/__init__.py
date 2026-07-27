@@ -76,11 +76,9 @@ async def setup(ctx):
         ctx.kv.set(_KV_PENDING, pending[-20:])
 
     # ── 答题奖励 ──
-    @ctx.on_message(ctx.filters.group & ctx.filters.text & ctx.filters.regex(r"小秘想给你 \d+ 银元奖励。"), group=5)
+    @ctx.on_message(ctx.filters.group & ctx.filters.text & ctx.filters.reply & ctx.filters.regex(r"小秘想给你 \d+ 银元奖励。"), group=5)
     async def _reward_handler(client, message):
         if not ctx.config.get("enable_reward_answer", False):
-            return
-        if not message.reply_to_message_id:
             return
         # 检查是否来自指定机器人
         reward_bots = str(ctx.config.get("reward_bot_ids", "") or "").strip()
