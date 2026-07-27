@@ -26,5 +26,12 @@
     "author": "Yy",
     "description": "散财童子刮刮乐自动挂机。回调文本直接累加奖金（无需等消息编辑），双重试，filter 层 Bot+回复过滤。",
     "path": "plugins/scratch.py"
+  },
+  "skyDropAnswer": {
+    "name": "天空答题",
+    "version": "1.0.0",
+    "author": "Yy",
+    "description": "天空答题奖励，自动发言 + 答题奖励（数学/找不同/映射记忆）+ AI兜底。",
+    "path": "plugins/skyDropAnswer/"
   }
 }
