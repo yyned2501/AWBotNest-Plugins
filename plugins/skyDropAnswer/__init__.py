@@ -76,7 +76,14 @@ async def setup(ctx):
         ctx.kv.set(_KV_PENDING, pending[-20:])
 
     # ── 答题奖励 ──
-    @ctx.on_message(ctx.filters.group & ctx.filters.text & ctx.filters.reply & ctx.filters.regex(r"小秘想给你 \d+ 银元奖励。"), group=5)
+    def _reply_to_own(_, __, message):
+        """仅当消息是回复我们自己的消息时通过"""
+        if not message.reply_to_message_id:
+            return False
+        pending = ctx.kv.get(_KV_PENDING, [])
+        return any(p["chat_id"] == message.chat.id and p["msg_id"] == message.reply_to_message_id for p in pending)
+
+    @ctx.on_message(ctx.filters.group & ctx.filters.text & ctx.filters.create(_reply_to_own) & ctx.filters.regex(r"小秘想给你 \d+ 银元奖励。"), group=5)
     async def _reward_handler(client, message):
         if not ctx.config.get("enable_reward_answer", False):
             return
@@ -88,14 +95,6 @@ async def setup(ctx):
             sender_name = (message.from_user.username or "") if message.from_user else ""
             if bot_ids and sender_id not in bot_ids and sender_name not in bot_ids:
                 return
-        # 检查是否回复了我们的消息
-        pending = ctx.kv.get(_KV_PENDING, [])
-        matched = [p for p in pending if p["chat_id"] == message.chat.id and p["msg_id"] == message.reply_to_message_id]
-        if not matched:
-            return
-        # 清理过期记录
-        now = time.time()
-        ctx.kv.set(_KV_PENDING, [p for p in pending if now - p.get("time", 0) < 300])
 
         text = (message.text or "").strip()
         _PROMPT_ANSWER = "你是Telegram答题助手，分析题目并给出答案。只输出答案内容，不要加任何解释。"
