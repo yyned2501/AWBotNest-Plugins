@@ -50,17 +50,19 @@ __plugin__ = {
 _KV_PENDING = "auto_say_pending_rewards"
 _PROMPT_ANSWER = "你是Telegram答题助手，分析题目并给出答案。只输出答案内容，不要任何解释。"
 
+# 注意：{{ 和 }} 是 str.format() 的转义，代表一个字面 { 或 }
+# {text} 是真正的格式占位符，会被替换为题目文本
 _PROMPT_LEARN = (
     '分析以下题目，生成 Python 模板文件。只输出JSON，不要其他文字。\n\n'
     '题目: {text}\n\n'
-    '输出JSON: {\n'
+    '输出JSON: {{\n'
     '  "filename": "简短英文文件名(如prime_number)",\n'
     '  "type": "题型名（如「质数判断」）",\n'
     '  "regex": "能匹配此类题目的正则表达式（含 re.DOTALL）",\n'
     '  "sample": "题目示例(前50字)",\n'
     '  "has_options": true|false,\n'
     '  "script_code": "def extract(text):\\n    import re\\n    # 纯文本提取逻辑，无IO\\n    return str(<答案>)"\n'
-    '}'
+    '}}'
 )
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
