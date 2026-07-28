@@ -14,7 +14,7 @@ TZ = timezone(timedelta(hours=8))
 __plugin__ = {
     "name": "天空答题",
     "id": "skyDropAnswer",
-    "version": "1.3.0",
+    "version": "1.4.0",
     "author": "Yy",
     "description": "天空答题奖励，内置3种题型+AI学习模板，Vue配置面板。",
     "scope": "user",
@@ -49,7 +49,7 @@ __plugin__ = {
 }
 
 _KV_PENDING = "auto_say_pending_rewards"
-_KV_TEMPLATES = "sky_answer_templates"
+_KV_TEMPLATE_IDS = "sky_answer_template_ids"
 _PROMPT_ANSWER = "你是Telegram答题助手，分析题目并给出答案。只输出答案内容，不要加任何解释。"
 _PROMPT_LEARN = (
     "分析以下题目，提取答题模板。只输出JSON，不要任何其他文字。\n\n"
@@ -64,52 +64,8 @@ _PROMPT_LEARN = (
     '}'
 )
 
-# ── 内置模板定义 ──
-BUILTIN_TEMPLATES = [
-    {
-        "id": "builtin_math",
-        "type": "数学题",
-        "regex": r"请回答[：:]\s*(\d+)\s*([+\-×xX*/])\s*(\d+)\s*=\s*多少\s*[?？]",
-        "has_handler": True,
-        "handler": "handle_math",
-        "sample": "请回答：14 + 2 = 多少？",
-        "answer": "",
-        "count": 0,
-        "builtin": True,
-    },
-    {
-        "id": "builtin_find_diff",
-        "type": "找不同",
-        "regex": r"找出唯一不同的图案，点击它的位置[：:]\s*\n(.+)",
-        "has_handler": True,
-        "handler": "handle_find_diff",
-        "sample": "找出唯一不同的图案，点击它的位置：\n🐱 🐱 🐱 🐯 🐱 🐱",
-        "answer": "",
-        "count": 0,
-        "builtin": True,
-    },
-    {
-        "id": "builtin_mapping_memory",
-        "type": "映射记忆",
-        "regex": r"记住映射[：:]\s*(.+?)\s*请问\s*(.+?)\s*对应哪个数字",
-        "has_handler": True,
-        "handler": "handle_mapping_memory",
-        "sample": "记住映射：☀️=8、🍉=5、🍎=2 请问 🍉 对应哪个数字？",
-        "answer": "",
-        "count": 0,
-        "builtin": True,
-    },
-]
 
-
-def _seed_builtin_templates(kv):
-    """首次启动时写入内置模板，已有模板则不覆盖"""
-    templates = kv.get(_KV_TEMPLATES, [])
-    if not templates:
-        kv.set(_KV_TEMPLATES, [dict(t) for t in BUILTIN_TEMPLATES])
-
-
-# ── 3 个 handler 函数（从原硬编码提取） ──
+# ── Handler 函数（按 type 路由） ──
 
 def _handle_math(text: str) -> str | None:
     """数学题: 14 + 2 = 多少？"""
@@ -148,7 +104,6 @@ def _handle_mapping_memory(text: str) -> str | None:
     target = m.group(2).strip()
     for symbol, num in pairs:
         if symbol.strip() == target:
-            # 检查是否有选项
             opt_m = re.search(r"选项[：:]\s*(.+)", text, re.DOTALL)
             if opt_m:
                 options = re.findall(r"(\d+)\.\s*(\d+)", opt_m.group(1))
@@ -159,25 +114,76 @@ def _handle_mapping_memory(text: str) -> str | None:
     return None
 
 
+# ── 内置模板（仅用于 seed，不混入 KV） ──
+# 格式与学习模板完全一致，无 has_handler/handler/builtin 字段
+
 _HANDLER_MAP = {
-    "handle_math": _handle_math,
-    "handle_find_diff": _handle_find_diff,
-    "handle_mapping_memory": _handle_mapping_memory,
+    "数学题": _handle_math,
+    "找不同": _handle_find_diff,
+    "映射记忆": _handle_mapping_memory,
 }
 
 
-# ── 模板工具函数 ──
+# ── 模板工具函数（独立 KV 存储） ──
 
 def _load_templates(kv) -> list[dict]:
-    return kv.get(_KV_TEMPLATES, [])
+    """从 KV 加载所有模板（每个模板独立 key）"""
+    ids = kv.get(_KV_TEMPLATE_IDS, [])
+    out = []
+    for tid in ids:
+        tpl = kv.get(f"sky_answer_template:{tid}")
+        if tpl:
+            out.append(tpl)
+    return out
 
 
 def _save_templates(kv, templates: list[dict]):
-    kv.set(_KV_TEMPLATES, templates)
+    """保存模板列表到 KV（每个模板独立 key）"""
+    ids = []
+    for t in templates:
+        tid = t.get("id")
+        if not tid:
+            continue
+        kv.set(f"sky_answer_template:{tid}", t)
+        ids.append(tid)
+    kv.set(_KV_TEMPLATE_IDS, ids)
+
+
+def _seed_builtin_templates(kv):
+    """首次启动时 seed 内置模板（独立 KV 条目，与学习模板格式一致）"""
+    ids = kv.get(_KV_TEMPLATE_IDS, [])
+    if ids:
+        return  # 已有模板，不覆盖
+
+    now = time.time()
+    builtins = [
+        {
+            "id": "builtin_math",
+            "type": "数学题", "answer": "",
+            "regex": r"请回答[：:]\s*(\d+)\s*([+\-×xX*/])\s*(\d+)\s*=\s*多少\s*[?？]",
+            "sample": "请回答：14 + 2 = 多少？",
+            "count": 0, "created_at": now,
+        },
+        {
+            "id": "builtin_find_diff",
+            "type": "找不同", "answer": "",
+            "regex": r"找出唯一不同的图案，点击它的位置[：:]\s*\n(.+)",
+            "sample": "找出唯一不同的图案，点击它的位置：\n🐱 🐱 🐱 🐯 🐱 🐱",
+            "count": 0, "created_at": now,
+        },
+        {
+            "id": "builtin_mapping_memory",
+            "type": "映射记忆", "answer": "",
+            "regex": r"记住映射[：:]\s*(.+?)\s*请问\s*(.+?)\s*对应哪个数字",
+            "sample": "记住映射：☀️=8、🍉=5、🍎=2 请问 🍉 对应哪个数字？",
+            "count": 0, "created_at": now,
+        },
+    ]
+    _save_templates(kv, builtins)
 
 
 def _match_templates(text: str, kv) -> tuple[str | None, str | None, str | None]:
-    """遍历模板，返回 (ans, handler_name, tpl_id)"""
+    """遍历模板，返回 (ans, tpl_type, tpl_id)"""
     templates = _load_templates(kv)
     for t in templates:
         regex = t.get("regex", "")
@@ -185,8 +191,9 @@ def _match_templates(text: str, kv) -> tuple[str | None, str | None, str | None]
             continue
         try:
             if re.search(regex, text, re.DOTALL):
-                if t.get("has_handler"):
-                    return (None, t.get("handler"), t.get("id"))
+                tpl_type = t.get("type", "")
+                if tpl_type in _HANDLER_MAP:
+                    return (None, tpl_type, t.get("id"))
                 return (t.get("answer"), None, t.get("id"))
         except re.error:
             continue
@@ -194,15 +201,14 @@ def _match_templates(text: str, kv) -> tuple[str | None, str | None, str | None]
 
 
 def _increment_template_count(kv, tpl_id: str | None):
-    """模板命中后 +1 计数"""
+    """模板命中后 +1 计数（独立 KV 条目操作）"""
     if not tpl_id:
         return
-    templates = _load_templates(kv)
-    for t in templates:
-        if t.get("id") == tpl_id:
-            t["count"] = t.get("count", 0) + 1
-            _save_templates(kv, templates)
-            return
+    key = f"sky_answer_template:{tpl_id}"
+    tpl = kv.get(key)
+    if tpl:
+        tpl["count"] = tpl.get("count", 0) + 1
+        kv.set(key, tpl)
 
 
 async def _learn_template(text: str, ans: str, ctx, kv):
@@ -219,8 +225,8 @@ async def _learn_template(text: str, ans: str, ctx, kv):
         if not template.get("regex"):
             return
 
+        # 去重：已存在相同regex则更新计数
         templates = _load_templates(kv)
-        # 去重：已存在相同regex则更新
         found = False
         for t in templates:
             if t.get("regex") == template["regex"]:
@@ -228,16 +234,16 @@ async def _learn_template(text: str, ans: str, ctx, kv):
                 t["answer"] = ans
                 t["sample"] = template.get("sample", text[:50])
                 found = True
+                _save_templates(kv, templates)
                 break
+
         if not found:
             template["id"] = str(int(time.time() * 1000))
             template["count"] = 1
-            template["has_handler"] = False
-            template["builtin"] = False
             template["created_at"] = time.time()
             templates.append(template)
+            _save_templates(kv, templates)
 
-        _save_templates(kv, templates)
         ctx.log.info("[天空答题] 学习新模板: %s | %s | 共%d个模板",
                      template.get("type", "?"), template["regex"][:40], len(templates))
     except Exception as e:
@@ -256,18 +262,18 @@ async def _answer_and_submit(text, client, message, ctx, kv):
     """答题主逻辑：模板路由 → AI 兜底 + 学习 → 提交"""
     ans = None
 
-    # 模板路由（内置 handler + AI 学习模板）
-    tpl_ans, handler_name, tpl_id = _match_templates(text, kv)
-    if handler_name:
-        handler = _HANDLER_MAP.get(handler_name)
+    # 模板路由（内置 handler + AI 学习模板，格式统一）
+    tpl_ans, tpl_type, tpl_id = _match_templates(text, kv)
+    if tpl_type:
+        handler = _HANDLER_MAP.get(tpl_type)
         if handler:
             ans = handler(text)
             if ans:
-                ctx.log.info("[天空答题] 内置模板命中: %s → %s", handler_name, ans)
+                ctx.log.info("[天空答题] 模板命中: %s → %s", tpl_type, ans)
                 _increment_template_count(kv, tpl_id)
     elif tpl_ans:
         ans = tpl_ans
-        ctx.log.info("[天空答题] 学习模板命中: %s", ans)
+        ctx.log.info("[天空答题] 模板命中: %s", ans)
         _increment_template_count(kv, tpl_id)
 
     # AI 兜底 + 学习
@@ -317,7 +323,7 @@ async def _answer_and_submit(text, client, message, ctx, kv):
 
 
 async def setup(ctx):
-    ctx.log.info("天空答题插件已加载 (v1.3.0)")
+    ctx.log.info("天空答题插件已加载 (v1.4.0)")
 
     # 首次启动写入内置模板
     _seed_builtin_templates(ctx.kv)
@@ -369,11 +375,13 @@ async def setup(ctx):
         if not tid:
             return {"ok": False, "message": "缺少 id"}
         kv = ctx.kv
-        templates = _load_templates(kv)
-        new_templates = [t for t in templates if t.get("id") != tid]
-        if len(new_templates) == len(templates):
-            return {"ok": False, "message": "未找到指定模板"}
-        _save_templates(kv, new_templates)
+        # 删除独立 KV 条目
+        kv.delete(f"sky_answer_template:{tid}")
+        # 更新 ID 列表
+        ids = kv.get(_KV_TEMPLATE_IDS, [])
+        if tid in ids:
+            ids.remove(tid)
+            kv.set(_KV_TEMPLATE_IDS, ids)
         ctx.log.info("[天空答题] 删除模板: %s", tid)
         return {"ok": True, "message": "已删除"}
 
@@ -381,7 +389,10 @@ async def setup(ctx):
     @ctx.on_api("/api/templates/clear", methods=["POST"])
     async def _clear_templates(req):
         kv = ctx.kv
-        _save_templates(kv, [])
+        ids = kv.get(_KV_TEMPLATE_IDS, [])
+        for tid in ids:
+            kv.delete(f"sky_answer_template:{tid}")
+        kv.set(_KV_TEMPLATE_IDS, [])
         ctx.log.info("[天空答题] 清空所有模板")
         return {"ok": True, "message": "已清空"}
 
