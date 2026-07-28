@@ -14,9 +14,9 @@ TZ = timezone(timedelta(hours=8))
 __plugin__ = {
     "name": "天空答题",
     "id": "skyDropAnswer",
-    "version": "1.2.0",
+    "version": "1.3.0",
     "author": "Yy",
-    "description": "天空答题奖励，自动答题+AI学习模板，Vue配置面板。",
+    "description": "天空答题奖励，内置3种题型+AI学习模板，Vue配置面板。",
     "scope": "user",
     "render_mode": "vue",
     "default_enabled": False,
@@ -55,28 +55,118 @@ _PROMPT_LEARN = (
     "分析以下题目，提取答题模板。只输出JSON，不要任何其他文字。\n\n"
     "题目: {text}\n"
     "正确答案: {ans}\n\n"
-    '输出JSON: {{\n'
+    '输出JSON: {\n'
     '  "regex": "能匹配此类题目的Python正则表达式（含re.DOTALL标志）",\n'
     '  "type": "数学题|映射记忆|找不同|未知题型",\n'
     '  "sample": "题目示例(前50字)",\n'
     '  "answer": "答案",\n'
     '  "has_options": true|false\n'
-    '}}'
+    '}'
 )
 
+# ── 内置模板定义 ──
+BUILTIN_TEMPLATES = [
+    {
+        "id": "builtin_math",
+        "type": "数学题",
+        "regex": r"请回答[：:]\s*(\d+)\s*([+\-×xX*/])\s*(\d+)\s*=\s*多少\s*[?？]",
+        "has_handler": True,
+        "handler": "handle_math",
+        "sample": "请回答：14 + 2 = 多少？",
+        "answer": "",
+        "count": 0,
+        "builtin": True,
+    },
+    {
+        "id": "builtin_find_diff",
+        "type": "找不同",
+        "regex": r"找出唯一不同的图案，点击它的位置[：:]\s*\n(.+)",
+        "has_handler": True,
+        "handler": "handle_find_diff",
+        "sample": "找出唯一不同的图案，点击它的位置：\n🐱 🐱 🐱 🐯 🐱 🐱",
+        "answer": "",
+        "count": 0,
+        "builtin": True,
+    },
+    {
+        "id": "builtin_mapping_memory",
+        "type": "映射记忆",
+        "regex": r"记住映射[：:]\s*(.+?)\s*请问\s*(.+?)\s*对应哪个数字",
+        "has_handler": True,
+        "handler": "handle_mapping_memory",
+        "sample": "记住映射：☀️=8、🍉=5、🍎=2 请问 🍉 对应哪个数字？",
+        "answer": "",
+        "count": 0,
+        "builtin": True,
+    },
+]
 
-def _parse_ids(raw) -> list[int]:
-    out = []
-    for c in str(raw or "").replace("\n", ",").split(","):
-        c = c.strip()
-        if not c:
-            continue
-        try:
-            out.append(int(c))
-        except ValueError:
-            pass
-    return out
 
+def _seed_builtin_templates(kv):
+    """首次启动时写入内置模板，已有模板则不覆盖"""
+    templates = kv.get(_KV_TEMPLATES, [])
+    if not templates:
+        kv.set(_KV_TEMPLATES, [dict(t) for t in BUILTIN_TEMPLATES])
+
+
+# ── 3 个 handler 函数（从原硬编码提取） ──
+
+def _handle_math(text: str) -> str | None:
+    """数学题: 14 + 2 = 多少？"""
+    m = re.search(r"请回答[：:]\s*(\d+)\s*([+\-×xX*/])\s*(\d+)\s*=\s*多少\s*[?？]", text)
+    if not m:
+        return None
+    a, op, b = int(m.group(1)), m.group(2), int(m.group(3))
+    if op in ("+",): return str(a + b)
+    elif op in ("-",): return str(a - b)
+    elif op in ("×", "x", "X", "*"): return str(a * b)
+    elif op in ("/",): return str(a // b) if b != 0 else "0"
+    return None
+
+
+def _handle_find_diff(text: str) -> str | None:
+    """找不同: 🐱 🐱 🐱 🐯 🐱 🐱 → 点击第4个"""
+    m = re.search(r"找出唯一不同的图案，点击它的位置[：:]\s*\n(.+)", text)
+    if not m:
+        return None
+    items = re.split(r"\s+", m.group(1).strip())
+    if len(items) < 3:
+        return None
+    counts = Counter(items)
+    for i, item in enumerate(items, 1):
+        if counts[item] == 1:
+            return str(i)
+    return None
+
+
+def _handle_mapping_memory(text: str) -> str | None:
+    """映射记忆: 🔺=9、☀️=7、🌙=4 请问 ☀️ 对应哪个数字？"""
+    m = re.search(r"记住映射[：:]\s*(.+?)\s*请问\s*(.+?)\s*对应哪个数字", text, re.DOTALL)
+    if not m:
+        return None
+    pairs = re.findall(r"([^\d\s，,、]+)\s*=\s*(\d+)", m.group(1))
+    target = m.group(2).strip()
+    for symbol, num in pairs:
+        if symbol.strip() == target:
+            # 检查是否有选项
+            opt_m = re.search(r"选项[：:]\s*(.+)", text, re.DOTALL)
+            if opt_m:
+                options = re.findall(r"(\d+)\.\s*(\d+)", opt_m.group(1))
+                for opt_num, opt_val in options:
+                    if opt_val == num:
+                        return opt_num
+            return num
+    return None
+
+
+_HANDLER_MAP = {
+    "handle_math": _handle_math,
+    "handle_find_diff": _handle_find_diff,
+    "handle_mapping_memory": _handle_mapping_memory,
+}
+
+
+# ── 模板工具函数 ──
 
 def _load_templates(kv) -> list[dict]:
     return kv.get(_KV_TEMPLATES, [])
@@ -86,8 +176,8 @@ def _save_templates(kv, templates: list[dict]):
     kv.set(_KV_TEMPLATES, templates)
 
 
-def _match_templates(text: str, kv) -> str | None:
-    """遍历模板，匹配则返回答案"""
+def _match_templates(text: str, kv) -> tuple[str | None, str | None]:
+    """遍历模板，返回 (ans, handler_name)"""
     templates = _load_templates(kv)
     for t in templates:
         regex = t.get("regex", "")
@@ -95,10 +185,12 @@ def _match_templates(text: str, kv) -> str | None:
             continue
         try:
             if re.search(regex, text, re.DOTALL):
-                return t.get("answer")
+                if t.get("has_handler"):
+                    return (None, t.get("handler"))
+                return (t.get("answer"), None)
         except re.error:
             continue
-    return None
+    return (None, None)
 
 
 async def _learn_template(text: str, ans: str, ctx, kv):
@@ -128,6 +220,8 @@ async def _learn_template(text: str, ans: str, ctx, kv):
         if not found:
             template["id"] = str(int(time.time() * 1000))
             template["count"] = 1
+            template["has_handler"] = False
+            template["builtin"] = False
             template["created_at"] = time.time()
             templates.append(template)
 
@@ -147,65 +241,22 @@ def _update_config(ctx, **updates):
 
 
 async def _answer_and_submit(text, client, message, ctx, kv):
-    """答题主逻辑：模板→硬编码→AI兜底→学习→提交"""
+    """答题主逻辑：模板路由 → AI 兜底 + 学习 → 提交"""
     ans = None
-    learned = False
 
-    # 0. 模板匹配（优先于硬编码，但优先级低于AI准确率考量）
-    #    放在硬编码之后、AI之前，因为模板可能不够精确
+    # 模板路由（内置 handler + AI 学习模板）
+    tpl_ans, handler_name = _match_templates(text, kv)
+    if handler_name:
+        handler = _HANDLER_MAP.get(handler_name)
+        if handler:
+            ans = handler(text)
+            if ans:
+                ctx.log.info("[天空答题] 内置模板命中: %s → %s", handler_name, ans)
+    elif tpl_ans:
+        ans = tpl_ans
+        ctx.log.info("[天空答题] 学习模板命中: %s", ans)
 
-    # 1. 数学题: 14 + 2 = 多少？
-    m = re.search(r"请回答[：:]\s*(\d+)\s*([+\-×xX*/])\s*(\d+)\s*=\s*多少\s*[?？]", text)
-    if m:
-        a, op, b = int(m.group(1)), m.group(2), int(m.group(3))
-        if op in ("+",): ans = str(a + b)
-        elif op in ("-",): ans = str(a - b)
-        elif op in ("×", "x", "X", "*"): ans = str(a * b)
-        elif op in ("/",): ans = str(a // b) if b != 0 else "0"
-        ctx.log.info("[天空答题] 数学题: %d %s %d = %s", a, op, b, ans)
-
-    # 2. 找不同
-    if not ans:
-        m = re.search(r"找出唯一不同的图案，点击它的位置[：:]\s*\n(.+)", text)
-        if m:
-            line = m.group(1).strip()
-            items = re.split(r"\s+", line)
-            if len(items) >= 3:
-                counts = Counter(items)
-                for i, item in enumerate(items, 1):
-                    if counts[item] == 1:
-                        ans = str(i)
-                        ctx.log.info("[天空答题] 找不同: %s → 第%d个", item, i)
-                        break
-
-    # 3. 映射记忆
-    if not ans:
-        m = re.search(r"记住映射[：:]\s*(.+?)\s*请问\s*(.+?)\s*对应哪个数字", text, re.DOTALL)
-        if m:
-            mapping_str = m.group(1)
-            target = m.group(2).strip()
-            pairs = re.findall(r"([^\d\s，,、]+)\s*=\s*(\d+)", mapping_str)
-            for symbol, num in pairs:
-                if symbol.strip() == target:
-                    opt_m = re.search(r"选项[：:]\s*(.+)", text, re.DOTALL)
-                    if opt_m:
-                        options = re.findall(r"(\d+)\.\s*(\d+)", opt_m.group(1))
-                        for opt_num, opt_val in options:
-                            if opt_val == num:
-                                ans = opt_num
-                                break
-                    if not ans:
-                        ans = num
-                    ctx.log.info("[天空答题] 映射: %s=%s", target, ans)
-                    break
-
-    # 4. 模板匹配（硬编码没命中时才查模板）
-    if not ans:
-        ans = _match_templates(text, kv)
-        if ans:
-            ctx.log.info("[天空答题] 模板命中: %s", ans)
-
-    # 5. AI 兜底 + 学习
+    # AI 兜底 + 学习
     if not ans and ctx.config.get("use_ai_fallback", True) and ctx.ai.available:
         try:
             ctx.log.info("[天空答题] 使用AI分析题目: %s", text[:60])
@@ -214,9 +265,7 @@ async def _answer_and_submit(text, client, message, ctx, kv):
             if ai_ans:
                 ans = ai_ans
                 ctx.log.info("[天空答题] AI回答: %s", ans)
-                # 学习模板
                 await _learn_template(text, ans, ctx, kv)
-                learned = True
         except Exception as e:
             ctx.log.warning("[天空答题] AI分析失败: %r", e)
 
@@ -254,7 +303,10 @@ async def _answer_and_submit(text, client, message, ctx, kv):
 
 
 async def setup(ctx):
-    ctx.log.info("天空答题插件已加载 (v1.2.0)")
+    ctx.log.info("天空答题插件已加载 (v1.3.0)")
+
+    # 首次启动写入内置模板
+    _seed_builtin_templates(ctx.kv)
 
     # ── 记录用户自己发的消息 ──
     @ctx.on_message(ctx.filters.outgoing & ctx.filters.text, group=3)
