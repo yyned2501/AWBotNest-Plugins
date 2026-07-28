@@ -176,8 +176,8 @@ def _save_templates(kv, templates: list[dict]):
     kv.set(_KV_TEMPLATES, templates)
 
 
-def _match_templates(text: str, kv) -> tuple[str | None, str | None]:
-    """遍历模板，返回 (ans, handler_name)"""
+def _match_templates(text: str, kv) -> tuple[str | None, str | None, str | None]:
+    """遍历模板，返回 (ans, handler_name, tpl_id)"""
     templates = _load_templates(kv)
     for t in templates:
         regex = t.get("regex", "")
@@ -186,11 +186,23 @@ def _match_templates(text: str, kv) -> tuple[str | None, str | None]:
         try:
             if re.search(regex, text, re.DOTALL):
                 if t.get("has_handler"):
-                    return (None, t.get("handler"))
-                return (t.get("answer"), None)
+                    return (None, t.get("handler"), t.get("id"))
+                return (t.get("answer"), None, t.get("id"))
         except re.error:
             continue
-    return (None, None)
+    return (None, None, None)
+
+
+def _increment_template_count(kv, tpl_id: str | None):
+    """模板命中后 +1 计数"""
+    if not tpl_id:
+        return
+    templates = _load_templates(kv)
+    for t in templates:
+        if t.get("id") == tpl_id:
+            t["count"] = t.get("count", 0) + 1
+            _save_templates(kv, templates)
+            return
 
 
 async def _learn_template(text: str, ans: str, ctx, kv):
@@ -245,16 +257,18 @@ async def _answer_and_submit(text, client, message, ctx, kv):
     ans = None
 
     # 模板路由（内置 handler + AI 学习模板）
-    tpl_ans, handler_name = _match_templates(text, kv)
+    tpl_ans, handler_name, tpl_id = _match_templates(text, kv)
     if handler_name:
         handler = _HANDLER_MAP.get(handler_name)
         if handler:
             ans = handler(text)
             if ans:
                 ctx.log.info("[天空答题] 内置模板命中: %s → %s", handler_name, ans)
+                _increment_template_count(kv, tpl_id)
     elif tpl_ans:
         ans = tpl_ans
         ctx.log.info("[天空答题] 学习模板命中: %s", ans)
+        _increment_template_count(kv, tpl_id)
 
     # AI 兜底 + 学习
     if not ans and ctx.config.get("use_ai_fallback", True) and ctx.ai.available:
