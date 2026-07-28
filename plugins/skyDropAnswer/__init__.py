@@ -13,10 +13,10 @@ TZ = timezone(timedelta(hours=8))
 __plugin__ = {
     "name": "天空答题",
     "id": "skyDropAnswer",
-    "version": "1.8.0",
+    "version": "1.9.0",
     "author": "Yy",
     "description": "天空答题奖励，每题型独立.py文件，模板管理+验证循环，Vue配置面板。",
-    "changelog": "v1.8.0 更新内容：\n- 模板智能去重：按 filename/题型/归一化正则/样例互配判断同类，同类题归并到已有模板而不再重复新建；启动时自动合并历史遗留的重复模板\n- 优化 AI 学习提示：把已有模板清单喂给 AI 让其归类复用，并要求生成宽松、抓题型结构的正则（数字用 \\d+、空白 \\s*），减少同题型变体漏匹配",
+    "changelog": "v1.9.0 更新内容：\n- 新增内置模板「找出指定符号位置」：动态提取题目里要找的符号并在序列中定位，任意符号通用（取代此前把 🔺/💎 等符号写死、一符号一模板的两个学习模板）\n- 强化 AI 学习提示：明确要求把会变化的符号/数字当变量动态解析、绝不写死，并给出正反例，从源头避免同题型重复生成模板",
     "scope": "user",
     "render_mode": "vue",
     "default_enabled": False,
@@ -62,7 +62,13 @@ _PROMPT_LEARN = (
     '1. regex 要宽松、只抓题型结构，不要硬编码题目里的具体数字或符号：'
     '数字用 \\d+，空白用 \\s*，可变内容用 .*?。须兼容 re.DOTALL。\n'
     '2. filename 是稳定的英文标识，同一题型务必始终相同（如 math_arithmetic、find_odd_one）。\n'
-    '3. extract(text) 只做纯文本提取并返回字符串答案；答案若是选项序号就返回序号字符串。\n\n'
+    '3. extract(text) 只做纯文本提取并返回字符串答案；答案若是选项序号就返回序号字符串。\n'
+    '4. 【最重要】题目中会变化的内容（要找的符号、具体数字、关键词等）必须当作变量动态解析，'
+    '绝不把某一个具体值写死进 regex 或 extract——否则同一题型换个符号就会被误判成全新题型而重复生成模板。'
+    '做法：regex 里用捕获组 (.+?) 或 \\d+ 占位，extract 里先解析出这个变量再用它求解。'
+    '例：「找出“🔺”出现的位置，点击它的位置：🍉 🐶 🔺 ⭐ 🐱」这类题，'
+    '应先用 找出\\s*(.+?)\\s*出现的位置 提取引号里的目标符号（此处是 🔺，但下一题会变成别的），'
+    '再在符号序列里找该符号的 1-based 位置返回；切勿把 🔺 写死。\n\n'
     '输出JSON: {{\n'
     '  "filename": "稳定英文标识",\n'
     '  "type": "题型中文名",\n'
@@ -443,7 +449,7 @@ async def _answer_and_submit(text, client, message, ctx, templates):
 
 
 async def setup(ctx):
-    ctx.log.info("天空答题插件已加载 (v1.8.0)")
+    ctx.log.info("天空答题插件已加载 (v1.9.0)")
 
     # 从 templates/ 目录加载所有 .py 模板文件，并合并历史遗留的同类重复模板
     templates = _dedup_templates(_load_all_templates(), ctx)
