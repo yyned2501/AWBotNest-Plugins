@@ -13,7 +13,7 @@ TZ = timezone(timedelta(hours=8))
 __plugin__ = {
     "name": "天空答题",
     "id": "skyDropAnswer",
-    "version": "1.6.0",
+    "version": "1.6.1",
     "author": "Yy",
     "description": "天空答题奖励，每题型独立.py文件，模板管理+验证循环，Vue配置面板。",
     "scope": "user",
@@ -55,7 +55,7 @@ _PROMPT_LEARN = (
     '题目: {text}\n\n'
     '输出JSON: {\n'
     '  "filename": "简短英文文件名(如prime_number)",\n'
-    '  "type": "题型名（如"质数判断"）",\n'
+    '  "type": "题型名（如「质数判断」）",\n'
     '  "regex": "能匹配此类题目的正则表达式（含 re.DOTALL）",\n'
     '  "sample": "题目示例(前50字)",\n'
     '  "has_options": true|false,\n'
@@ -217,6 +217,10 @@ async def _learn_template(text: str, ans: str, ctx, templates: list[dict]):
                      tpl["type"], regex[:40], len(templates))
     except Exception as e:
         ctx.log.warning("[天空答题] 模板学习失败: %r", e)
+        try:
+            ctx.log.warning("[天空答题] AI原始响应(前200字): %s", result[:200])
+        except Exception:
+            pass
 
 
 async def _verify_template(ai_ans: str, script_ans: str | None, tpl: dict, ctx) -> str | None:
@@ -320,19 +324,21 @@ async def _answer_and_submit(text, client, message, ctx, templates):
             clicked = True
             ctx.log.info("[天空答题] 点击按钮: 索引=%d（答案 %s）", button_index, ans)
         else:
-            ctx.log.warning("[天空答题] 答案 %s 无法对应按钮（共%d个），改为发文字", ans, total_buttons)
+            ctx.log.warning("[天空答题] 答案 %s 无法对应按钮（共%d个），跳过", ans, total_buttons)
     if not clicked:
-        await client.send_message(message.chat.id, str(ans))
-        ctx.log.info("[天空答题] 发送文字: %s", ans)
+        ctx.log.info("[天空答题] 无按钮或无法点击，跳过")
     ctx.log.info("[天空答题] 答题完成")
 
 
 async def setup(ctx):
-    ctx.log.info("天空答题插件已加载 (v1.6.0)")
+    ctx.log.info("天空答题插件已加载 (v1.6.1)")
 
     # 从 templates/ 目录加载所有 .py 模板文件
     templates = _load_all_templates()
     ctx.log.info("[天空答题] 加载 %d 个模板文件", len(templates))
+
+    # 防抖：记录已处理的消息 ID
+    _processed_msg_ids = set()
 
     # ── 记录用户自己发的消息 ──
     @ctx.on_message(ctx.filters.outgoing & ctx.filters.text, group=3)
@@ -357,6 +363,11 @@ async def setup(ctx):
     async def _reward_handler(client, message):
         if not ctx.config.get("enable_reward_answer", False):
             return
+        # 防抖：同一消息只处理一次
+        if message.id in _processed_msg_ids:
+            ctx.log.info("[天空答题] 跳过重复消息: %s", message.id)
+            return
+        _processed_msg_ids.add(message.id)
         reward_bots = str(ctx.config.get("reward_bot_ids", "") or "").strip()
         if reward_bots:
             bot_ids = [b.strip().lstrip("@") for b in reward_bots.replace("，", ",").split(",") if b.strip()]
