@@ -13,7 +13,7 @@ TZ = timezone(timedelta(hours=8))
 __plugin__ = {
     "name": "天空答题",
     "id": "skyDropAnswer",
-    "version": "1.1.0",
+    "version": "1.1.1",
     "author": "Yy",
     "description": "天空答题奖励，自动回复机器人的数学题/找不同/映射记忆，AI兜底未知题型。",
     "scope": "user",
@@ -126,17 +126,18 @@ async def setup(ctx):
                             ctx.log.info("[天空答题] 找不同: %s → 第%d个", item, i)
                             break
 
-        # 3. 映射记忆: 🔺=9、☀️=7、🌙=4 请问 ☀️ 对应哪个数字？
+        # 3. 映射记忆: 记住映射：☀️=8、🍉=5、🍎=2（含换行）请问 🍉 对应哪个数字？
+        #    注意：题目正文带换行，必须用 re.DOTALL 让 . 跨行匹配
         if not ans:
-            m = re.search(r"记住映射[：:]\s*(.+?)。?\s*请问\s*(.+?)\s*对应哪个数字", text)
+            m = re.search(r"记住映射[：:]\s*(.+?)\s*请问\s*(.+?)\s*对应哪个数字", text, re.DOTALL)
             if m:
                 mapping_str = m.group(1)
-                target = m.group(2)
-                pairs = re.findall(r"([^\d\s，,]+)\s*=\s*(\d+)", mapping_str)
+                target = m.group(2).strip()
+                pairs = re.findall(r"([^\d\s，,、]+)\s*=\s*(\d+)", mapping_str)
                 for symbol, num in pairs:
-                    if symbol == target:
-                        # 检查是否有选项
-                        opt_m = re.search(r"选项[：:]\s*(.+)", text)
+                    if symbol.strip() == target:
+                        # 检查是否有选项（如 选项：1.2  2.5，答案为选项序号）
+                        opt_m = re.search(r"选项[：:]\s*(.+)", text, re.DOTALL)
                         if opt_m:
                             options = re.findall(r"(\d+)\.\s*(\d+)", opt_m.group(1))
                             for opt_num, opt_val in options:
@@ -170,7 +171,26 @@ async def setup(ctx):
         if d_min >= d_max:
             d_max = d_min + 1
         await asyncio.sleep(random.uniform(d_min, d_max))
-        await client.send_message(message.chat.id, str(ans))
+
+        # 提交答案：带 inline keyboard 按钮的题目点按钮，纯文字题发文字
+        clicked = False
+        reply_markup = getattr(message, "reply_markup", None)
+        keyboard = getattr(reply_markup, "inline_keyboard", None)
+        if keyboard:
+            total_buttons = sum(len(row) for row in keyboard)
+            try:
+                button_index = int(str(ans).strip()) - 1  # 按钮为 0-indexed
+            except ValueError:
+                button_index = -1
+            if 0 <= button_index < total_buttons:
+                await message.click(button_index)
+                clicked = True
+                ctx.log.info("[天空答题] 点击按钮: 索引=%d（答案 %s）", button_index, ans)
+            else:
+                ctx.log.warning("[天空答题] 答案 %s 无法对应按钮（共%d个），改为发文字", ans, total_buttons)
+        if not clicked:
+            await client.send_message(message.chat.id, str(ans))
+            ctx.log.info("[天空答题] 发送文字: %s", ans)
         ctx.log.info("[天空答题] 答题完成")
 
     ctx.log.info("天空答题已就绪")
