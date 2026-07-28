@@ -13,10 +13,10 @@ TZ = timezone(timedelta(hours=8))
 __plugin__ = {
     "name": "天空答题",
     "id": "skyDropAnswer",
-    "version": "1.7.0",
+    "version": "1.8.0",
     "author": "Yy",
     "description": "天空答题奖励，每题型独立.py文件，模板管理+验证循环，Vue配置面板。",
-    "changelog": "v1.7.0 更新内容：\n- 修复答案提交：改为按按钮文本匹配答案，数学题等「值为答案」的题型现在能正确点击（此前只有序号类题型有效）\n- 学习模板以完整能力运行，移除未使用的沙箱死代码\n- 修复配置面板「删除/清空模板」因缺少鉴权而失败的问题",
+    "changelog": "v1.8.0 更新内容：\n- 模板智能去重：按 filename/题型/归一化正则/样例互配判断同类，同类题归并到已有模板而不再重复新建；启动时自动合并历史遗留的重复模板\n- 优化 AI 学习提示：把已有模板清单喂给 AI 让其归类复用，并要求生成宽松、抓题型结构的正则（数字用 \\d+、空白 \\s*），减少同题型变体漏匹配",
     "scope": "user",
     "render_mode": "vue",
     "default_enabled": False,
@@ -52,16 +52,23 @@ _KV_PENDING = "auto_say_pending_rewards"
 _PROMPT_ANSWER = "你是Telegram答题助手，分析题目并给出答案。只输出答案内容，不要任何解释。"
 
 # 注意：{{ 和 }} 是 str.format() 的转义，代表一个字面 { 或 }
-# {text} 是真正的格式占位符，会被替换为题目文本
+# {text} / {existing} 是真正的格式占位符
 _PROMPT_LEARN = (
-    '分析以下题目，生成 Python 模板文件。只输出JSON，不要其他文字。\n\n'
+    '分析以下题目，生成一个可复用的 Python 答题模板。只输出JSON，不要其他文字。\n\n'
     '题目: {text}\n\n'
+    '已有模板列表（若本题属于其中某一类，必须复用其 filename 和 type，切勿新建）:\n'
+    '{existing}\n\n'
+    '生成要求:\n'
+    '1. regex 要宽松、只抓题型结构，不要硬编码题目里的具体数字或符号：'
+    '数字用 \\d+，空白用 \\s*，可变内容用 .*?。须兼容 re.DOTALL。\n'
+    '2. filename 是稳定的英文标识，同一题型务必始终相同（如 math_arithmetic、find_odd_one）。\n'
+    '3. extract(text) 只做纯文本提取并返回字符串答案；答案若是选项序号就返回序号字符串。\n\n'
     '输出JSON: {{\n'
-    '  "filename": "简短英文文件名(如prime_number)",\n'
-    '  "type": "题型名（如「质数判断」）",\n'
-    '  "regex": "能匹配此类题目的正则表达式（含 re.DOTALL）",\n'
+    '  "filename": "稳定英文标识",\n'
+    '  "type": "题型中文名",\n'
+    '  "regex": "宽松正则表达式",\n'
     '  "sample": "题目示例(前50字)",\n'
-    '  "has_options": true|false,\n'
+    '  "has_options": true,\n'
     '  "script_code": "def extract(text):\\n    import re\\n    # 纯文本提取逻辑，无IO\\n    return str(<答案>)"\n'
     '}}'
 )
@@ -166,13 +173,87 @@ def _update_template_file(tpl: dict, **kwargs):
     filepath.write_text("\n".join(new_lines), encoding="utf-8")
 
 
+def _norm_regex(rx: str) -> str:
+    """归一化正则用于比较：去空白、统一全/半角常见等价写法。"""
+    import re
+    rx = re.sub(r"\s+", "", rx or "")
+    return rx.replace("（", "(").replace("）", ")").replace("：", ":").replace("，", ",")
+
+
+def _identity(d: dict) -> tuple:
+    """取模板/题目的归类标识：(filename小写, type, 归一化正则)。"""
+    fn = (d.get("filename") or d.get("id") or "").strip().lower()
+    ty = (d.get("type") or "").strip()
+    return fn, ty, _norm_regex(d.get("regex", ""))
+
+
+def _same_type(a: dict, b: dict) -> bool:
+    """判断两个模板（或一个题目 data 与一个模板）是否同类。
+
+    高置信信号：filename / type / 归一化正则相同；
+    兜底信号：双方正则能互相匹配对方样例（双向，降低误判）。
+    """
+    import re
+    fa, ta, ra = _identity(a)
+    fb, tb, rb = _identity(b)
+    if fa and fa == fb:
+        return True
+    if ta and ta == tb:
+        return True
+    if ra and ra == rb:
+        return True
+    sa, sb = (a.get("sample") or ""), (b.get("sample") or "")
+    ra_raw, rb_raw = (a.get("regex") or ""), (b.get("regex") or "")
+    try:
+        ab = bool(ra_raw and sb and re.search(ra_raw, sb, re.DOTALL))
+        ba = bool(rb_raw and sa and re.search(rb_raw, sa, re.DOTALL))
+        if ab and ba:
+            return True
+    except re.error:
+        pass
+    return False
+
+
+def _rank(t: dict) -> tuple:
+    """模板优先级：verified > learning，再比验证次数、命中数。"""
+    return (1 if t.get("status") == "verified" else 0, t.get("verify_count", 0), t.get("count", 0))
+
+
+def _dedup_templates(templates: list[dict], ctx) -> list[dict]:
+    """启动时合并同类模板：聚类后每组保留最优者（_rank 最高），命中数累加，
+    其余模板删除文件。返回去重后的列表。"""
+    groups: list[list[dict]] = []
+    for t in templates:
+        grp = next((g for g in groups if _same_type(g[0], t)), None)
+        if grp is None:
+            groups.append([t])
+        else:
+            grp.append(t)
+    kept: list[dict] = []
+    for grp in groups:
+        if len(grp) == 1:
+            kept.append(grp[0])
+            continue
+        survivor = max(grp, key=_rank)
+        survivor["count"] = sum(x.get("count", 0) for x in grp)
+        _update_template_file(survivor, count=survivor["count"])
+        for x in grp:
+            if x is not survivor:
+                _delete_template_file(x["id"])
+                ctx.log.info("[天空答题] 启动去重：模板 %s 归并到 %s", x["id"], survivor["id"])
+        kept.append(survivor)
+    return kept
+
+
 async def _learn_template(text: str, ans: str, ctx, templates: list[dict]):
     """AI 分析题目 → 生成 .py 模板文件 → 加载到内存"""
     cfg = ctx.config
     if not cfg.get("enable_template_learning", True):
         return
     try:
-        prompt = _PROMPT_LEARN.format(text=text[:200])
+        existing_lines = [f"- {t.get('id')}: {t.get('type', '')}" for t in templates]
+        existing = "\n".join(existing_lines) if existing_lines else "（暂无）"
+        prompt = _PROMPT_LEARN.format(text=text[:200], existing=existing)
         result = await ctx.ai.chat(prompt)
         result = result.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
         data = json.loads(result)
@@ -181,14 +262,14 @@ async def _learn_template(text: str, ans: str, ctx, templates: list[dict]):
         if not regex:
             return
 
-        # 去重
-        for t in templates:
-            if t.get("regex") == regex:
-                t["count"] = t.get("count", 0) + 1
-                t["sample"] = data.get("sample", text[:50])
-                _update_template_file(t, count=t["count"], sample=t["sample"])
-                ctx.log.info("[天空答题] 更新已有模板: %s", regex[:40])
-                return
+        # 去重：同类题归并到已有模板（filename/type/正则/样例判断），不新建
+        hit = next((t for t in templates if _same_type(data, t)), None)
+        if hit:
+            hit["count"] = hit.get("count", 0) + 1
+            hit["sample"] = data.get("sample", text[:50])
+            _update_template_file(hit, count=hit["count"], sample=hit["sample"])
+            ctx.log.info("[天空答题] 同类题归并到已有模板 %s（不新建）", hit["id"])
+            return
 
         # 新模板
         filename = data.get("filename", str(int(time.time() * 1000)))
@@ -362,10 +443,10 @@ async def _answer_and_submit(text, client, message, ctx, templates):
 
 
 async def setup(ctx):
-    ctx.log.info("天空答题插件已加载 (v1.7.0)")
+    ctx.log.info("天空答题插件已加载 (v1.8.0)")
 
-    # 从 templates/ 目录加载所有 .py 模板文件
-    templates = _load_all_templates()
+    # 从 templates/ 目录加载所有 .py 模板文件，并合并历史遗留的同类重复模板
+    templates = _dedup_templates(_load_all_templates(), ctx)
     ctx.log.info("[天空答题] 加载 %d 个模板文件", len(templates))
 
     # 防抖：记录已处理的消息 ID
