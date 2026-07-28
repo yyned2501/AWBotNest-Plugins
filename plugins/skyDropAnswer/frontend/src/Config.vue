@@ -67,10 +67,9 @@ async function save() {
 
 async function deleteTemplate(tpl) {
   try {
-    await fetch(`/api/plugins/${props.pluginId}/api/templates`, {
+    await props.host.callApi('/api/templates', {
       method: 'DELETE',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: tpl.id }),
+      body: { id: tpl.id },
     })
     props.host.toast.success('已删除')
     loadTemplates()
@@ -81,9 +80,7 @@ async function deleteTemplate(tpl) {
 
 async function clearTemplates() {
   try {
-    await fetch(`/api/plugins/${props.pluginId}/api/templates/clear`, {
-      method: 'POST',
-    })
+    await props.host.callApi('/api/templates/clear', { method: 'POST' })
     props.host.toast.success('已清空')
     loadTemplates()
   } catch (e) {

@@ -13,9 +13,10 @@ TZ = timezone(timedelta(hours=8))
 __plugin__ = {
     "name": "天空答题",
     "id": "skyDropAnswer",
-    "version": "1.6.1",
+    "version": "1.7.0",
     "author": "Yy",
     "description": "天空答题奖励，每题型独立.py文件，模板管理+验证循环，Vue配置面板。",
+    "changelog": "v1.7.0 更新内容：\n- 修复答案提交：改为按按钮文本匹配答案，数学题等「值为答案」的题型现在能正确点击（此前只有序号类题型有效）\n- 学习模板以完整能力运行，移除未使用的沙箱死代码\n- 修复配置面板「删除/清空模板」因缺少鉴权而失败的问题",
     "scope": "user",
     "render_mode": "vue",
     "default_enabled": False,
@@ -67,20 +68,12 @@ _PROMPT_LEARN = (
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 
-# ── 沙箱执行环境 ──
-_SAFE_BUILTINS = {
-    "True": True, "False": False, "None": None,
-    "all": all, "any": any, "max": max, "min": min,
-    "sum": sum, "abs": abs, "sorted": sorted,
-    "enumerate": enumerate, "zip": zip, "reversed": reversed,
-    "int": int, "float": float, "str": str, "bool": bool,
-    "len": len, "range": range, "list": list, "dict": dict,
-    "tuple": tuple, "set": set, "open": None, "__import__": None,
-}
-
-
 def _load_template_namespace(filepath: Path) -> dict:
-    """加载单个 .py 模板文件到 namespace dict"""
+    """加载单个 .py 模板文件到 namespace dict。
+
+    模板以完整 builtins 执行（非沙箱）：学习出来的脚本需要 import re、
+    collections 等标准库能力，这是本插件的设计前提。
+    """
     ns = {"__builtins__": __builtins__}
     try:
         exec(filepath.read_text(encoding="utf-8"), ns)
@@ -248,6 +241,49 @@ def _update_config(ctx, **updates):
     reg.set_config(ctx.plugin_id, current)
 
 
+def _match_button(message, ans):
+    """在内联键盘里找与答案匹配的按钮，返回 (row, col) 或 None。
+
+    匹配优先级：文本精确相等 > 数值相等 > 文本包含答案。
+    同时兼容两类答案：
+      - 「答案是按钮上的值」（数学题，如答案 16 → 点文本为 16 的按钮）
+      - 「答案是序号/选项号」（找不同、映射记忆，如答案 4 → 点文本为 4 的按钮）
+    """
+    markup = getattr(message, "reply_markup", None)
+    keyboard = getattr(markup, "inline_keyboard", None) if markup else None
+    if not keyboard:
+        return None
+    ans_s = str(ans).strip()
+    if not ans_s:
+        return None
+    buttons = [
+        (r, c, (getattr(btn, "text", "") or "").strip())
+        for r, row in enumerate(keyboard)
+        for c, btn in enumerate(row)
+    ]
+    # 1) 文本精确相等
+    for r, c, text in buttons:
+        if text == ans_s:
+            return (r, c)
+    # 2) 数值相等（兼容 "16" / "16.0"）
+    try:
+        ans_num = float(ans_s)
+    except ValueError:
+        ans_num = None
+    if ans_num is not None:
+        for r, c, text in buttons:
+            try:
+                if float(text) == ans_num:
+                    return (r, c)
+            except ValueError:
+                continue
+    # 3) 文本包含答案（按钮带装饰文字时的兜底）
+    for r, c, text in buttons:
+        if ans_s in text:
+            return (r, c)
+    return None
+
+
 async def _answer_and_submit(text, client, message, ctx, templates):
     """答题主逻辑：模板匹配 → 验证循环/AI兜底 → 提交"""
     ans = None
@@ -311,29 +347,22 @@ async def _answer_and_submit(text, client, message, ctx, templates):
         d_max = d_min + 1
     await asyncio.sleep(random.uniform(d_min, d_max))
 
-    # 提交答案
-    clicked = False
-    reply_markup = getattr(message, "reply_markup", None)
-    keyboard = getattr(reply_markup, "inline_keyboard", None)
-    if keyboard:
-        total_buttons = sum(len(row) for row in keyboard)
+    # 提交答案：按按钮文本匹配答案（兼容「值为答案」与「序号为答案」两类题型）
+    pos = _match_button(message, ans)
+    if pos:
+        row, col = pos
         try:
-            button_index = int(str(ans).strip()) - 1
-        except ValueError:
-            button_index = -1
-        if 0 <= button_index < total_buttons:
-            await message.click(button_index)
-            clicked = True
-            ctx.log.info("[天空答题] 点击按钮: 索引=%d（答案 %s）", button_index, ans)
-        else:
-            ctx.log.warning("[天空答题] 答案 %s 无法对应按钮（共%d个），跳过", ans, total_buttons)
-    if not clicked:
-        ctx.log.info("[天空答题] 无按钮或无法点击，跳过")
+            await message.click(x=col, y=row)
+            ctx.log.info("[天空答题] 点击按钮 (%d,%d)，答案 %s", row, col, ans)
+        except Exception as e:
+            ctx.log.warning("[天空答题] 点击按钮失败: %r", e)
+    else:
+        ctx.log.warning("[天空答题] 未找到匹配答案 %s 的按钮，跳过", ans)
     ctx.log.info("[天空答题] 答题完成")
 
 
 async def setup(ctx):
-    ctx.log.info("天空答题插件已加载 (v1.6.1)")
+    ctx.log.info("天空答题插件已加载 (v1.7.0)")
 
     # 从 templates/ 目录加载所有 .py 模板文件
     templates = _load_all_templates()

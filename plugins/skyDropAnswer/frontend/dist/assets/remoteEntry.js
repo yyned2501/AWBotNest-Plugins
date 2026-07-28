@@ -2,8 +2,8 @@ const currentImports = {};
       const exportSet = new Set(['Module', '__esModule', 'default', '_export_sfc']);
       let moduleMap = {
 "./Config":()=>{
-      dynamicLoadingCss(["__federation_expose_Config-DlumTTQ4.css"], false, './Config');
-      return __federation_import('/api/plugins/skyDropAnswer/fe/assets/__federation_expose_Config-e6DRs5lW.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},};
+      dynamicLoadingCss(["__federation_expose_Config-CkdQB5fF.css"], false, './Config');
+      return __federation_import('/api/plugins/skyDropAnswer/fe/assets/__federation_expose_Config-DfD4AXS-.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},};
       const seen = {};
       const dynamicLoadingCss = (cssFilePaths, dontAppendStylesToHead, exposeItemName) => {
         const metaUrl = import.meta.url;
