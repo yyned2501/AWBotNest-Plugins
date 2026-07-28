@@ -1,7 +1,7 @@
 {
   "battleroyale": {
     "name": "大逃杀助手",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "author": "Yy",
     "description": "监听 @NextFunBot 大逃杀游戏，自动跟踪投票统计、每圈结算通知、自动下注（以少胜多规则）。",
     "path": "plugins/battleroyale/"

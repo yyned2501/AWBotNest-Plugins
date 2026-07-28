@@ -25,7 +25,7 @@ _loop = None
 __plugin__ = {
     "name": "大逃杀助手",
     "id": "battleroyale",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "author": "Yy",
     "description": (
         "监听 @NextFunBot 大逃杀游戏，自动跟踪投票统计、"
@@ -379,35 +379,36 @@ async def setup(ctx):
             fu.first_name or "?", uid, text,
             {k: len(v) for k, v in state.votes.items()},
         )
-        # ── on_api 端点（在 setup 内部注册）──
-        @ctx.on_api
-        async def api_handler(req):
-            cfg = ctx.config
-            path = req.method + ' ' + req.path.rstrip('/')
-            if path == 'GET /status':
-                return _state.to_dict()
-            if path == 'GET /history':
-                return _state.history
-            if path == 'POST /force_bet':
-                if not _state.is_active or not _state.options:
-                    return {'ok': False, 'message': '没有进行中的游戏'}
-                if _state.bet_placed:
-                    return {'ok': False, 'message': '本圈已下注'}
-                chat_id = _get_chat_id(cfg)
-                if not chat_id:
-                    return {'ok': False, 'message': '未配置群组'}
-                strategy = cfg.get('bet_strategy', '少')
-                bettor = AutoBettor(_state, ctx)
-                target = bettor.determine_target(strategy)
-                if not target:
-                    return {'ok': False, 'message': '无法确定下注目标'}
-                await bettor.execute_bet(target, chat_id)
-                return {'ok': True, 'message': f'已下注「{target}」'}
-            if path == 'POST /reset':
-                _state.reset_all()
-                _monitored_keywords.clear()
-                return {'ok': True, 'message': '游戏状态已重置'}
-            return {'ok': False, 'message': '未知路径'}
+
+    # ── on_api 端点（setup 顶层注册，插件启用即可用，不依赖是否收到过投票）──
+    @ctx.on_api
+    async def api_handler(req):
+        cfg = ctx.config
+        path = req.method + ' ' + req.path.rstrip('/')
+        if path == 'GET /status':
+            return _state.to_dict()
+        if path == 'GET /history':
+            return _state.history
+        if path == 'POST /force_bet':
+            if not _state.is_active or not _state.options:
+                return {'ok': False, 'message': '没有进行中的游戏'}
+            if _state.bet_placed:
+                return {'ok': False, 'message': '本圈已下注'}
+            chat_id = _get_chat_id(cfg)
+            if not chat_id:
+                return {'ok': False, 'message': '未配置群组'}
+            strategy = cfg.get('bet_strategy', '少')
+            bettor = AutoBettor(_state, ctx)
+            target = bettor.determine_target(strategy)
+            if not target:
+                return {'ok': False, 'message': '无法确定下注目标'}
+            await bettor.execute_bet(target, chat_id)
+            return {'ok': True, 'message': f'已下注「{target}」'}
+        if path == 'POST /reset':
+            _state.reset_all()
+            _monitored_keywords.clear()
+            return {'ok': True, 'message': '游戏状态已重置'}
+        return {'ok': False, 'message': '未知路径'}
 
 
 async def teardown(ctx):
