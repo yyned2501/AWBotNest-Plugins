@@ -9,3 +9,6 @@ PROGRESS.md
 
 # 内部迁移追踪文档，不公开到仓库
 MIGRATION.md
+
+# Claude 私人部署工具（项目作用域，不入库）
+.claude/skills/deploy-plugin/
