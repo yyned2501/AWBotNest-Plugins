@@ -13,7 +13,7 @@ TZ = timezone(timedelta(hours=8))
 __plugin__ = {
     "name": "天空答题",
     "id": "skyDropAnswer",
-    "version": "1.10.0",
+    "version": "1.10.1",
     "author": "Yy",
     "description": "天空答题奖励，每题型独立.py文件，模板管理+验证循环，Vue配置面板。",
     "changelog": "v1.10.0 更新内容：\n- 模板支持在配置面板直接编辑：每个模板卡片加「编辑」，可调正则与 extract 脚本，保存前自动校验（语法错误/缺 extract/正则不合法会被拦下且不写坏文件），通过后落盘并立即对后续题目生效\n- 模板列表展示「已验证/学习中」「内置」徽章与命中数，内置模板不可删除\n- 修复模板文件重写时含换行/引号/emoji 的样例导致语法错误的往返缺陷（字符串字段统一用 repr 写入）",
@@ -469,14 +469,15 @@ async def _answer_and_submit(text, client, message, ctx, templates):
 
 
 async def setup(ctx):
-    ctx.log.info("天空答题插件已加载 (v1.10.0)")
+    ctx.log.info("天空答题插件已加载 (v1.10.1)")
 
     # 从 templates/ 目录加载所有 .py 模板文件，并合并历史遗留的同类重复模板
     templates = _dedup_templates(_load_all_templates(), ctx)
     ctx.log.info("[天空答题] 加载 %d 个模板文件", len(templates))
 
-    # 防抖：记录已处理的消息 ID
-    _processed_msg_ids = set()
+    # 防抖：记录已处理的消息 ID（带时间戳，TTL 清理防无界增长）
+    _processed_msg_ids: dict[int, float] = {}
+    _DEDUP_TTL = 3600.0
 
     # ── 记录用户自己发的消息 ──
     @ctx.on_message(ctx.filters.outgoing & ctx.filters.text, group=3)
@@ -501,11 +502,16 @@ async def setup(ctx):
     async def _reward_handler(client, message):
         if not ctx.config.get("enable_reward_answer", False):
             return
-        # 防抖：同一消息只处理一次
+        # 防抖：同一消息只处理一次（顺带清理过期记录，防集合无界增长）
+        now = time.time()
+        if len(_processed_msg_ids) > 500:
+            stale = [k for k, ts in _processed_msg_ids.items() if now - ts > _DEDUP_TTL]
+            for k in stale:
+                _processed_msg_ids.pop(k, None)
         if message.id in _processed_msg_ids:
             ctx.log.info("[天空答题] 跳过重复消息: %s", message.id)
             return
-        _processed_msg_ids.add(message.id)
+        _processed_msg_ids[message.id] = now
         reward_bots = str(ctx.config.get("reward_bot_ids", "") or "").strip()
         if reward_bots:
             bot_ids = [b.strip().lstrip("@") for b in reward_bots.replace("，", ",").split(",") if b.strip()]
