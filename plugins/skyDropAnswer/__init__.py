@@ -79,10 +79,10 @@ _SAFE_BUILTINS = {
 
 def _load_template_namespace(filepath: Path) -> dict:
     """加载单个 .py 模板文件到 namespace dict"""
-    ns = {"__builtins__": _SAFE_BUILTINS}
+    ns = {"__builtins__": __builtins__}
     try:
         exec(filepath.read_text(encoding="utf-8"), ns)
-    except Exception:
+    except Exception as e:
         return {}
     return ns
 
