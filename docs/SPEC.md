@@ -40,7 +40,7 @@ AWBotNest/
 │   ├── static/              # 前端构建产物（FastAPI 托管）
 │   └── frontend/            # Vue3 + Vite 源码
 │
-├── core/ infra/ adapters/ models/ libs/ schedulers/ filters/
+├── core/ infra/ libs/ schedulers/ filters/
 │                            # 复用自旧项目的底座（统一出口仍是 core/）
 ├── config/                  # 平台代码（垫片 config.py，不做卷映射）
 ├── data/                    # 运行时数据（卷映射）：config.json（唯一配置源）、
@@ -81,12 +81,19 @@ __plugin__ = {
     "scope": "user",           # 必填：user | bot | both
     "author": "AW",            # 可选
     "description": "...",       # 可选：前端展示
+    "changelog": "v1.0.0 初始版本\n- 功能说明",  # 可选：版本更新说明
+    "icon": "",                # 可选：图标 URL，前端卡片用；空则回退平台 logo
     "default_enabled": False,  # 可选：上传后是否默认启用
     "config_schema": {...},    # 可选：前端自动生成配置表单
+    "requirements": [          # 可选：第三方依赖(PEP 508)，启用时由平台代装
+        "httpx>=0.27", "pillow>=10",
+    ],
 }
 ```
 
 - 缺必填字段、`id` ≠ 文件名、`scope` 非法 → 前端标红，禁止启用。
+- `icon` 在「我的插件」与「插件市场」卡片展示；GitHub 发布时 `manifest.json` 的 `icon` 用于市场，二者保持一致。
+- `changelog` 会显示在插件卡片三点菜单的「版本历史」弹窗中，帮助用户了解版本变化。支持多行（用 `\n` 换行）。发布到 GitHub 插件仓库时，`manifest.json` 也要写入相同内容。
 
 ### 3.2 `setup(ctx)`（必填）
 
@@ -115,11 +122,29 @@ async def setup(ctx):
 - 以 `_` 开头的文件/目录不被识别为插件（用于模板、私有辅助）。
 - **插件之间禁止互相 import**。共享逻辑下沉为平台服务；插件内部辅助放在自己的文件夹里（文件夹形态）或 `_` 开头同目录文件。
 
+### 3.5 第三方依赖 `requirements`（可选）
+
+插件**声明**依赖，平台代装；**插件不要自己调 pip**。
+
+- 写法：PEP 508 字符串列表（`"包名>=版本"`），建议用宽松范围（`>=`）而非钉死（`==`），减少撞车。
+- **必须兼容平台的 Python 版本（当前 Python 3.13）**。声明前务必确认所要的版本范围里**存在支持 3.13 的发行版**——很多包用 `Requires-Python` 卡了上限（如 `<3.12`/`<3.13`），即使 pypi 上有该版本号，pip 在 3.13 上也会判定「无匹配版本」而装失败。
+    - 反例：`rapidocr_onnxruntime>=1.3` —— 其所有版本都标 `Requires-Python <3.13`，在本平台**永远装不上**。应改用支持 3.13 的后继包（如 `rapidocr>=2`）或平台已内置的等价库。
+    - **优先复用平台已装依赖**（见 `requirements.txt`，如 OCR 用 `ddddocr`、HTTP 用 `httpx`/`aiohttp`、图像用 `Pillow`），既免装又零冲突。只有平台确实没有时才声明新依赖。
+    - 发布前自检：`pip install "你的依赖" --dry-run`（在 Python 3.13 环境）能解出版本，再写进 `requirements`。
+- 安装时机：**启用时**（非上传/下载时），由平台 `kernel/deps.py` 统一处理，在线程里跑不阻塞事件循环。
+- 安装源：默认走 `PIP_INDEX_URL`（设置→运行代理，默认清华镜像，境内直连不经墙）；留空则走官方 pypi，此时若启用了平台代理会自动套 `--proxy` 出墙。限制 `--retries 1 --timeout 15`，连不上快速失败，不长时间占用安装锁。
+- 安装位置：用 `pip --target` 装进 `data/plugin_deps/`（**已挂载的 `data/` 卷**），并在启动早期把该目录加进 `sys.path`。这样容器**重建/拉新镜像后依赖不丢**——若装进镜像 site-packages（容器可写层），重建即丢失，每次都要重装。该目录放在 `sys.path` 末尾，平台自带依赖优先，plugin_deps 只补平台没有的。
+- 平台是**单进程热插拔**，所有插件 import 进同一个解释器，**同一个包只能有一个版本生效**——无法为不同插件隔离版本。所以装之前先拿「当前已安装环境」做冲突检测：
+    - 已满足 → 跳过；缺失 → `pip install`；
+    - **冲突（已装了不兼容版本）→ 拒绝启用**，前端报明确原因，绝不强行覆盖（否则会把平台/别的插件依赖的库静默换掉）。
+- 已 import 进进程的包即使被 pip 装了新版也不会热生效（模块已缓存）；这类需重启平台。
+- 安全：每条 requirement 经 `packaging.Requirement` 解析、规范化后作为独立 argv 传给 pip（不走 shell），杜绝参数注入；带环境标记（如 `sys_platform`）不匹配本环境的依赖自动跳过。
+
 ---
 
 ## 4. 热插拔（必须支持）
 
-1. 所有处理器经 `ctx.on_message` / `ctx.on_callback` 注册——它们内部用实例级 `client.add_handler`，并登记句柄。**禁止使用类级 `@Client.on_message`**（无法热卸载）。
+1. 所有处理器经 `ctx.on_message` / `ctx.on_edited_message` / `ctx.on_callback` 注册——它们内部用实例级 `client.add_handler`，并登记句柄。**禁止使用类级 `@Client.on_message`**（无法热卸载）。
 2. 所有自管理资源（定时任务、连接、后台 task）必须可在 `teardown` 或通过 `ctx.add_cleanup` 释放。
 3. 启用 = 导入文件 + `setup`；停用 = 注销句柄 + `teardown` + 从 `sys.modules` 卸载。全程不重启进程。
 4. **容错**：单个插件 `setup` 抛异常只标记该插件 `error`，不影响内核与其它插件。
@@ -133,14 +158,14 @@ async def setup(ctx):
    - 平台级配置（登录凭据、账号、Web 控制台、ngrok、代理、数据库）全部在前端「系统设置」页修改，经 `GET/PUT /api/settings` 读写 `data/config.json`。敏感字段读取时打码、写入时跳过打码值保留原值。
    - 部分关键项（API 凭据等）改后需重启平台生效，接口返回 `restart_required`。
 1. **插件自带配置，禁止碰平台配置**。
-   - 平台级配置只含：登录凭据(API_ID/HASH/BOT_TOKEN)、账号(ACCOUNTS)、Web 控制台、ngrok、运行代理、数据库(DB_INFO，平台存储基础设施)。
+   - 平台级配置只含：登录凭据(API_ID/HASH/BOT_TOKEN)、多 Bot(BOTS)、账号(ACCOUNTS)、Web 控制台、ngrok、运行代理、数据库(DB_INFO，平台存储基础设施)。
    - **不含任何业务数据**：群组 ID(PT_GROUP_ID)、抽奖/奖品/陷阱/AI/炸弹等全部属于插件，写在各插件的 `config_schema` 里。
    - 业务功能的所有参数（开关、密钥、群组、文案等）一律写进插件自己的 `__plugin__["config_schema"]`，由前端「配置」按钮自动生成 UI，值存于 `data/plugins_state.json`。插件用 `ctx.config` 读取。
    - 严禁插件向平台配置写入或依赖业务键。旧项目的完整配置已归档在 `config/config.legacy.py`，仅供迁移时参照。
 2. **config_schema 字段规范**（前端据此渲染设置界面）：
    ```python
    "字段名": {
-       "type": "string|password|number|boolean|select|multiselect|slider|text",  # 必填
+       "type": "string|password|number|boolean|select|multiselect|slider|text|list|chat|action|info",  # 必填
        "default": ...,          # 必填：默认值（multiselect 用 list，slider/number 用数字）
        "label": "显示名",        # 建议
        "help": "字段说明",       # 可选：显示在字段下方
@@ -150,8 +175,9 @@ async def setup(ctx):
        "show_if": {"其他字段": 值},  # 可选：条件显示，仅当该字段当前值匹配才显示本字段
    }
    ```
-   - 字段类型：`string`(单行)/`password`(密码)/`number`(数字)/`boolean`(开关)/`select`(下拉)/`multiselect`(多选标签)/`slider`(滑块)/`text`(多行)。
+   - 字段类型：`string`(单行)/`password`(密码)/`number`(数字)/`boolean`(开关)/`select`(下拉)/`multiselect`(多选标签)/`slider`(滑块)/`text`(多行)/`list`(可增删行表格，`fields` 定义每行子字段)/`chat`(会话选择器)/`action`(动作按钮，触发插件 `ctx.action` 注册的函数)/`info`(只读展示)。
    - 用 `section` 把「功能开关」与「参数」分块；用 `show_if` 做联动（如某开关打开才显示相关参数），实现「打开插件 = 一个带分区、会联动的设置面板」。
+   - **界面布局由平台自动排布，插件不用操心宽度**：配置弹窗是一块大画布（桌面约 1000px，窄屏自动全屏）。schema 表单按 `section` 分组，同组内短字段（string/password/number/boolean/select/slider）自动并排成多列，大字段（text/list/multiselect/chat）占整行，容器变窄时回落单列。**vue 模式插件**自带界面也在这块大画布内渲染（窄屏全屏），请用响应式布局（百分比/栅格），不要写死窄宽度，否则窄屏会溢出。
 3. **数据隔离**：插件用 `ctx.kv` 存键值，每插件独立 sqlite 命名空间（`data/kv/<id>.sqlite`）。需要关系型存储时，表名/键名必须带 `plugin_id` 前缀，禁止污染他人数据。
 4. 平台级敏感配置（API_ID/HASH/BOT_TOKEN 等）存 `data/config.json`，**`data/` 禁止提交 Git**，禁止在日志/响应中回显明文（`/api/settings` 读取时打码）。
 5. **可写数据目录 `ctx.data_dir`**：需要存实际文件（如头像图片池、下载的素材）的插件用 `ctx.data_dir` 拿一个**每插件独立**的可写目录 `data/plugin_data/<id>/`（`Path`，首次访问自动建）。`ctx.kv` 只存键值，文件存这里。
@@ -194,7 +220,7 @@ async def setup(ctx):
    - `owner/repo`、`owner/repo/子目录`
    - `https://github.com/owner/repo`（可带 `/tree/分支/子目录`）
    - 直接 raw 链接：`https://raw.githubusercontent.com/owner/repo/分支/路径/plugin.py`
-5. **私有仓库**：前端可填 GitHub token（通过 Authorization 头访问），token 不落盘。
+5. **仅支持公开仓库**：平台不接收 GitHub 私有仓库凭据，也不会发送授权请求头。
 6. 导入 = 下载落盘到 `plugins/`（文件夹插件保留目录结构）+ 静态校验元数据，**不自动启用**；用户在列表里手动开启。
 
 ## 7.6 插件商店 / 仓库自动同步（多仓库）
@@ -204,16 +230,16 @@ async def setup(ctx):
 仓库地址在插件页「设置仓库地址」对话框管理。
 
 1. **配置项**（平台级，存 `data/config.json`，前端可改）：
-   - `PLUGIN_REPO_ENABLE`：**已废弃**——轮询强制常开，不再受此开关控制（仍写 `true` 兼容旧字段）。
-   - `PLUGIN_REPOS`：仓库列表 `[{"url": "...", "token": "..."}, ...]`。`url` 格式同 §7.5；`token` 为私有仓库令牌（敏感，打码存储）。官方仓库 `AWdress/AWBotNest-Plugins` 由平台内置，不在此列。
-   - `PLUGIN_REPO_INTERVAL`：轮询间隔（分钟，默认 20，最小 1）。
-2. **仓库格式**：与 §7.5 完全一致——优先 `manifest.json`（推荐，带版本号才能识别"更新"），无清单则目录扫描。多仓库出现同 id 插件时先到先得。
+   - `PLUGIN_REPO_ENABLE`：**已废弃**——轮询强制常开，不再受此开关控制。
+   - `PLUGIN_REPOS`：公开仓库列表，例如 `[{"url": "AWdress/AWBotNest-Plugins"}, ...]`。用户名可以不同，仓库名必须是 `AWBotNest-Plugins`；输入完整 GitHub 链接时也会自动缩短。官方仓库 `AWdress/AWBotNest-Plugins` 由平台内置，不在此列。
+   - `PLUGIN_REPO_INTERVAL`：后台使用的轮询间隔，默认 20 分钟；前端不提供修改入口。
+2. **仓库格式**：额外仓库使用与 `AWdress/AWBotNest-Plugins` 相同的命名格式，并按仓库根目录读取。优先 `manifest.json`（推荐，带版本号才能识别"更新"），无清单则目录扫描。多仓库出现同 id 插件时先到先得。
 3. **插件商店（显示，不自动下载）**：聚合所有仓库的插件列表，标记 `installed`。商店只展示**未安装**的；用户点「下载」才落盘。下载 = 写入 `plugins/`，**绝不自动启用**（启用 = 在服务器执行远程代码，须用户到「我的插件」手动开启，同 §7.5 安全铁律）。
 4. **自动轮询只做两件事**（不自动下载新插件）：
    - ①刷新商店列表缓存（让仓库新插件出现在商店）；
-   - ②对**已安装**插件，若 manifest 版本号变化则下载覆盖更新（运行中实例需手动「重载」生效）。无版本信号的不动；用户手动停用的插件，轮询不碰其启用状态。
+   - ②对**已安装**插件，若 manifest 版本号变化则下载覆盖更新；**若该插件当前正在运行，则自动热重载使新代码生效**（未运行的只更新文件、不自动启用，保持 §7.5）。无版本信号的不动；用户手动停用的插件，轮询不碰其启用状态。
 5. **任务展示**：轮询任务以平台级身份（id `插件仓库轮询`）注册到 scheduler，显示在「系统状态」页定时任务卡片。
-6. **触发时机**：平台启动 + 设置变更（仓库/间隔）即时重排任务（轮询常开，无需开关）。插件页「刷新市场」按钮手动拉取（`GET /api/plugins/store?refresh=true`），「下载」走 `POST /api/plugins/store/download`。
+6. **触发时机**：平台启动 + 仓库设置变更时重排任务（轮询常开，无需开关）。插件页「刷新市场」按钮手动拉取（`GET /api/plugins/store?refresh=true`），「下载」走 `POST /api/plugins/store/download`。
 7. 商店缓存 + 各插件已知版本存 `data/repo_sync.json`。
 
 ---
@@ -226,16 +252,25 @@ async def setup(ctx):
 4. 跨文件引用用绝对导入（`from kernel.registry import ...`），禁止模糊相对引用。
 5. 每个包目录必须有 `__init__.py`。
 
-### 8.1 通知中心（插件 → 平台 → 主人）
+### 8.1 通知中心（插件 → 平台 → 管理员）
 
 插件**不直接**发通知，而是提交给平台通知中心 `kernel/notifier.py`，由平台统一处理：
 
 1. 插件调 `await ctx.notify(text, level="info", category=None, account=client)` —— 只提供内容、级别、分类，以及（多账号时）触发的账号。
-2. 平台 `notifier.submit` 负责**分类与统一格式**：按 `level`（info/success/warning/error）打图标标签，前缀插件名 + 可选 `category`；**多账号场景标注账号名**（从传入的 `account` client 解析 `me.first_name`→session 名，与账号管理页一致），让主人知道是哪个账号的消息。
-3. 平台**统一投递**给平台主人：优先 Bot 私聊（`MY_TGID`，需主人 /start 过 Bot），Bot 不可用时回退主账号「收藏夹」。
+2. 平台 `notifier.submit` 负责**分类与统一格式**：按 `level`（info/success/warning/error）打图标标签，前缀插件名 + 可选 `category`；**多账号场景标注账号名**（从传入的 `account` client 解析 `me.first_name`→session 名，与账号管理页一致），让管理员知道是哪个账号的消息。
+3. 平台**统一投递**给平台管理员：优先 **本插件被平台分配的 Bot**（见 §8.2 多 Bot）私聊（`MY_TGID`，需管理员 /start 过该 Bot），Bot 不可用时回退主账号「收藏夹」。
 4. 每条通知同时记入运行日志（带插件名）与通知中心历史环形缓冲（最近 200 条）。
 
 「发给谁、什么格式、怎么投递」是平台策略，插件不实现也不绕过——禁止插件为了发通知自己拼 `ctx.bot.send` 给 `owner_id`，统一走 `ctx.notify`。
+
+### 8.2 多 Bot 与推送路由（平台集中管理）
+
+平台支持配置**多个 Bot**，并由平台（管理员）集中决定「哪个插件用哪个 Bot」——插件作者**不选择** Bot，选择权在平台。
+
+- **配置**：`BOT_TOKEN` 表示 id 为 `"default"` 的内置 Bot，显示名可修改；额外 Bot 存在 `config.json` 的 `BOTS`。`DEFAULT_BOT_ID` 决定当前默认使用哪一个 Bot，内置或额外 Bot 都能设为默认。都在前端「系统设置 → 通知」页管理，新增、删除、改名、换 Token 和切换默认项保存后立即生效。
+- **推送路由**：`data/plugins_state.json` 的 `bot_choice`（`{插件id: bot_id}`，空/缺失=跟随当前默认 Bot，`"default"`=明确使用内置 Bot）。在「通知」页的路由表里逐插件选择，`PUT /api/bots/routing` 即时生效（重载重挂）。删除某个 Bot 时，指向它的插件自动回退默认 Bot。
+- **作用范围（通知 + 处理器一致）**：该选择同时决定 ① `ctx.notify` 走哪个 Bot 投递；② `ctx.bot` 返回哪个 Bot；③ `scope=bot`/`both` 插件的 handler（`target="bot"`/`"both"`）挂到哪个 Bot。默认 Bot 用于所有未分配的插件，保证既有部署零改动。
+- 运行时由 `AccountManager.bot_apps`（`{id: Client}`）持有各 Bot，`accounts.bot_app` 恒为默认 Bot（向后兼容）；`accounts.get_bot(id)` 取指定 Bot（不存在/未连接回退默认）。
 
 ---
 
@@ -263,7 +298,51 @@ async def setup(ctx):
 
 ---
 
-## 11. 变更协议
+## 11. 平台 API（插件可用）
+
+平台提供 HTTP API 供插件在 Web UI 或其他场景调用，以下是插件开发常用接口：
+
+### 11.1 获取会话信息 `GET /api/chats/{chat_id}`
+
+**用途**：通过 chat_id 获取群组/频道/私聊的名称和类型，无需获取完整对话列表。
+
+**适用场景**：
+- 插件配置中存储了群组 ID（如 `-100123456789`），需要在界面上显示群组名称而非数字 ID
+- 避免调用 `/api/plugins/{plugin_id}/dialogs` 获取全部对话列表（性能开销大）
+- 需要验证某个 chat_id 是否有效、属于什么类型
+
+**请求参数**：
+- `chat_id`（路径参数，必填）：会话 ID，可以是：
+  - 数字 ID（如 `-100123456789` 超级群组，`123456` 私聊用户）
+  - `@username` 形式的用户名（如 `@telegram`）
+- `session`（查询参数，可选）：指定用哪个账号查询，传账号名称；不传则使用首个已连接的用户账号
+
+**响应示例**：
+```json
+{
+  "id": -1001234567890,
+  "title": "我的测试群",
+  "type": "supergroup"
+}
+```
+
+**字段说明**：
+- `id`：会话的数字 ID
+- `title`：显示名称（群组/频道名、用户全名）
+- `type`：会话类型，可能值：`private`（私聊）、`group`（普通群组）、`supergroup`（超级群组）、`channel`（频道）、`bot`（Bot）
+
+**错误响应**：
+- `409`：没有可用的已连接用户账号
+- `404`：chat_id 不存在或无权访问
+
+**使用建议**：
+- 此接口是**可选增强**，不影响向后兼容性
+- 插件可以在配置保存后调用此接口缓存群组名称，提升用户体验
+- 与 `/api/plugins/{plugin_id}/dialogs` 的区别：后者返回完整对话列表（用于会话选择器），前者只查询单个指定会话（用于显示已保存的 ID）
+
+---
+
+## 12. 变更协议
 
 1. 改动前先读本文件。
 2. 改 `kernel/` 或 `ctx` 接口前，先输出受影响文件清单，经确认再动。
@@ -273,24 +352,36 @@ async def setup(ctx):
 
 ---
 
-## 附录：内核能力速查（ctx 提供）
+## 附录A：内核能力速查（ctx 提供）
 
 | 能力 | 用法 |
 |------|------|
 | 过滤器 | `ctx.filters.text` 等 |
 | 注册消息 | `@ctx.on_message(filter, group=0, target="auto")` |
+| 注册编辑消息 | `@ctx.on_edited_message(filter, group=0, target="auto")`（仅消息被编辑时触发，用法同 on_message） |
 | 注册回调 | `@ctx.on_callback(filter, group=0, target="auto")` |
-| Bot 发送 | `await ctx.bot.send(chat_id, text)` |
+| 中断传播 | `raise ctx.StopPropagation`（在 handler 内主动阻止后续插件处理这条消息） |
+| Bot 发送 | `await ctx.bot.send(chat_id, text)`（`ctx.bot` = 本插件被平台分配的 Bot，未分配=默认 Bot，见 §8.2） |
+| 指定 Bot | `ctx.get_bot(bot_id)`（高级：取某个 Bot 的发送代理，不传/不存在回退默认 Bot） |
 | 用户发送 | `await ctx.user.send(chat_id, text)` |
-| 通知所有者 | `await ctx.notify(text, level="info", category=None, account=client)`（提交给平台通知中心 → 平台分类+统一格式+标注账号 → Bot 发给主人，回退主账号收藏夹） |
-| 所有者 ID | `ctx.owner_id`（平台主人 Telegram 数字 ID，无主账号为 0） |
+| 多账号列表 | `ctx.user_apps`（所有已连接用户账号；未连接时发送代理抛 `RuntimeError`，可判 `ctx.bot/user.connected`） |
+| 通知管理员 | `await ctx.notify(text, level="info", category=None, account=client)`（提交给平台通知中心 → 平台分类+统一格式+标注账号 → Bot 发给管理员，回退主账号收藏夹） |
+| 平台 AI | `ctx.ai.chat/vision/generate_image`（平台统一保管密钥、选择主/备用模型、控制插件权限与并发） |
+| 管理员 ID | `ctx.owner_id`（平台管理员 Telegram 数字 ID，无主账号为 0） |
 | 配置 | `ctx.config`（dict） |
 | 键值存储 | `ctx.kv.get/set/delete/keys`（每插件私有） |
 | 可写目录 | `ctx.data_dir`（`Path`，每插件独立 `data/plugin_data/<id>/`） |
 | 日志 | `ctx.log.info/debug/warning/error`（自动带 `[插件id]` 前缀，前端日志页可见） |
 | 定时任务 | `ctx.schedule(fn, "interval", seconds=60)`（可传 `id="名称"`，自动归属本插件并显示在系统状态页） |
+| Webhook | `@ctx.on_webhook`（需 `__plugin__` 声明 `"webhook": True`；入站 `…/api/v1/plugin/<id>/webhook?apikey=<密钥>`，apikey 用平台统一的 `WEBHOOK_SECRET`，处理器收 `WebhookRequest`，返回 dict/str/None） |
 | 清理回调 | `ctx.add_cleanup(fn)` |
 
 `target`: `"user"` / `"bot"` / `"both"` / `"auto"`（按插件 scope 自动选择）。
 
-**多账号下的账号范围**：`scope=user`/`both` 的插件默认挂到**所有**已连接用户账号；用户可在插件卡片「账号」按钮里选择只应用到部分账号（前端 `PUT /api/plugins/<id>/accounts`，空数组=全部）。范围存于 `data/plugins_state.json` 的 `account_scope`，由 `ctx._resolve_targets` 按 client 的 session 名过滤。改动后自动重载重挂 handler。
+**group 隔离（防止互相"吃消息"）**：Pyrogram 在同一 group 内只执行第一个匹配的 handler 即跳出该组。平台为**每个插件分配独立的 group 基址**（`PluginRuntime._group_base_for`，步长 1000），`ctx.on_message/on_callback` 把插件写的 `group=` 当作「**插件内相对优先级**」平移到该区间。因此：① 不同插件监听同类消息互不抢占，都能收到；② 单个插件内部仍可用多个相对 group 排序（数值越小越先）。插件作者无需关心其它插件的 group。若插件希望"我处理后不让后续插件再处理"，在 handler 内 `raise ctx.StopPropagation`。
+
+**多账号下的账号范围**：`scope=user`/`both` 的插件默认挂到**所有**已连接用户账号；用户可在插件卡片「账号」按钮里选择只应用到部分账号（前端 `PUT /api/plugins/<id>/accounts`，空数组=全部）。范围存于 `data/plugins_state.json` 的 `account_scope`，由 `ctx._scoped_user_apps` 按 client 的 session 名统一过滤。改动后自动重载重挂 handler。
+
+该范围对 handler 挂载、`ctx.user`、`ctx.user_apps` **一致生效**（三者共用 `_scoped_user_apps`）：只勾选一个账号时，处理器只挂到该账号，主动发送类逻辑遍历 `ctx.user_apps` 也只拿到该账号，不会出现「只勾一个账号、两个账号都在发消息」。
+
+**多 Bot 下的 Bot 选择**：见 §8.2。平台在「系统设置 → 通知」为每个插件分配 Bot（`bot_choice`），该选择对 `ctx.notify` 投递、`ctx.bot`、`scope=bot`/`both` 的 handler 挂载（`target="bot"`/`"both"`）**一致生效**——三者都走 `ctx._chosen_bot()`。未分配则用管理员当前设置的默认 Bot。插件作者不感知也不选择 Bot，写 `ctx.bot.send(...)` / `ctx.notify(...)` 即可。
