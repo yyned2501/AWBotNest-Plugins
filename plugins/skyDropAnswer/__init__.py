@@ -39,10 +39,6 @@ __plugin__ = {
             "type": "boolean", "default": True, "label": "AI智能答题",
             "section": "答题奖励", "help": "未知题型时使用AI分析并回答", "order": 5
         },
-        "test_say": {
-            "type": "action", "label": "🎤 立即发言", "section": "操作",
-            "action": "test_say"
-        },
     },
 }
 
@@ -194,13 +190,6 @@ async def setup(ctx):
         ctx.log.info("[天空答题] 答题完成")
 
     ctx.log.info("天空答题已就绪")
-
-    # ── 测试按钮 ──
-    @ctx.action("test_say")
-    async def _test_say(req=None):
-        if not ctx.config.get("enable_reward_answer", False):
-            return {"ok": False, "message": "请先开启答题奖励"}
-        return {"ok": True, "message": "天空答题插件运行正常（数学题/找不同/映射记忆/AI兜底）"}
 
 
 async def teardown(ctx):
