@@ -28,6 +28,11 @@ const saving = ref(false)
 const cfg = reactive({ ...DEFAULTS })
 const templates = ref([])
 const tplLoading = ref(false)
+// 模板编辑态
+const editingId = ref(null)
+const editSaving = ref(false)
+const editError = ref('')
+const editForm = reactive({ regex: '', script_code: '' })
 
 onMounted(async () => {
   try {
@@ -85,6 +90,44 @@ async function clearTemplates() {
     loadTemplates()
   } catch (e) {
     props.host.toast.error('清空失败：' + (e.message || e))
+  }
+}
+
+function isBuiltin(tpl) {
+  return String(tpl.id || '').startsWith('builtin_')
+}
+
+function startEdit(tpl) {
+  editingId.value = tpl.id
+  editError.value = ''
+  editForm.regex = tpl.regex || ''
+  editForm.script_code = tpl.script_code || ''
+}
+
+function cancelEdit() {
+  editingId.value = null
+  editError.value = ''
+}
+
+async function saveEdit(tpl) {
+  editSaving.value = true
+  editError.value = ''
+  try {
+    const res = await props.host.callApi('/api/templates/save', {
+      method: 'POST',
+      body: { id: tpl.id, regex: editForm.regex, script_code: editForm.script_code },
+    })
+    if (res && res.ok) {
+      props.host.toast.success(res.message || '已保存')
+      editingId.value = null
+      loadTemplates()
+    } else {
+      editError.value = (res && res.message) || '保存失败'
+    }
+  } catch (e) {
+    editError.value = e.message || String(e)
+  } finally {
+    editSaving.value = false
   }
 }
 </script>
@@ -148,38 +191,65 @@ async function clearTemplates() {
           </div>
         </template>
 
-        <!-- ============ 学习模板 ============ -->
+        <!-- ============ 回答模板 ============ -->
         <template v-else-if="group === 'templates'">
-          <h3 class="det-title">学习模板</h3>
+          <h3 class="det-title">回答模板</h3>
           <div class="card">
-            <div class="card-h" style="display:flex;justify-content:space-between;align-items:center">
-              <span>已学模板（{{ templates.length }}）</span>
-              <button v-if="templates.length > 0" class="btn sm danger" @click="clearTemplates">清空全部</button>
+            <div class="card-h tpl-bar">
+              <span>模板（{{ templates.length }}）</span>
+              <button v-if="templates.length > 0" class="btn sm danger" @click="clearTemplates">清空学习模板</button>
             </div>
+            <p class="tpl-tip">AI 学会的与内置的模板都在此。正则匹配不上或答案不对时，点「编辑」直接微调正则与脚本，保存后立即生效。</p>
 
             <div v-if="tplLoading" class="muted">加载中…</div>
-            <div v-else-if="templates.length === 0" class="muted" style="padding:24px 0;text-align:center">
-              暂无学习模板<br />
-              <span style="font-size:12px;color:#7a8291">AI智能答题后自动生成，下次同类题直接命中</span>
+            <div v-else-if="templates.length === 0" class="muted empty">
+              暂无模板<br />
+              <span>AI 智能答题后自动生成，下次同类题直接命中</span>
             </div>
             <div v-else class="tpl-list">
-              <div v-for="tpl in templates" :key="tpl.id" class="tpl-card">
+              <div v-for="tpl in templates" :key="tpl.id" class="tpl-card" :class="{ editing: editingId === tpl.id }">
                 <div class="tpl-header">
                   <span class="tpl-type">{{ tpl.type || '未知' }}</span>
-                  <span class="tpl-count">命中 {{ tpl.count || 0 }} 次</span>
-                  <button class="btn xs" @click="deleteTemplate(tpl)">删除</button>
+                  <span class="badge" :class="tpl.status === 'verified' ? 'b-ok' : 'b-learn'">
+                    {{ tpl.status === 'verified' ? '已验证' : '学习中' }}
+                  </span>
+                  <span v-if="isBuiltin(tpl)" class="badge b-builtin">内置</span>
+                  <span class="tpl-count">命中 {{ tpl.count || 0 }}</span>
+                  <span class="tpl-actions">
+                    <button v-if="editingId !== tpl.id" class="btn xs" @click="startEdit(tpl)">编辑</button>
+                    <button v-if="!isBuiltin(tpl) && editingId !== tpl.id" class="btn xs danger" @click="deleteTemplate(tpl)">删除</button>
+                  </span>
                 </div>
-                <div class="tpl-row">
-                  <span class="tpl-label">正则</span>
-                  <code class="tpl-regex">{{ tpl.regex }}</code>
-                </div>
-                <div class="tpl-row">
-                  <span class="tpl-label">示例</span>
-                  <span class="tpl-sample">{{ tpl.sample || '—' }}</span>
-                </div>
-                <div class="tpl-row">
-                  <span class="tpl-label">答案</span>
-                  <span class="tpl-answer">{{ tpl.answer || '—' }}</span>
+
+                <!-- 查看态 -->
+                <template v-if="editingId !== tpl.id">
+                  <div class="tpl-row">
+                    <span class="tpl-label">正则</span>
+                    <code class="tpl-regex">{{ tpl.regex }}</code>
+                  </div>
+                  <div class="tpl-row">
+                    <span class="tpl-label">示例</span>
+                    <span class="tpl-sample">{{ (tpl.sample || '—').replace(/\n/g, ' ⏎ ') }}</span>
+                  </div>
+                </template>
+
+                <!-- 编辑态 -->
+                <div v-else class="editor">
+                  <label class="ed-fld">
+                    <span class="ed-lbl">正则表达式</span>
+                    <input v-model="editForm.regex" class="inp mono" spellcheck="false" />
+                  </label>
+                  <label class="ed-fld">
+                    <span class="ed-lbl">提取脚本 extract(text) —— 返回字符串答案</span>
+                    <textarea v-model="editForm.script_code" class="inp mono code" rows="9" spellcheck="false"></textarea>
+                  </label>
+                  <div v-if="editError" class="ed-error">⚠ {{ editError }}</div>
+                  <div class="ed-bar">
+                    <button class="btn sm" :disabled="editSaving" @click="cancelEdit">取消</button>
+                    <button class="btn sm primary" :disabled="editSaving" @click="saveEdit(tpl)">
+                      {{ editSaving ? '校验保存中…' : '保存' }}
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>
@@ -253,17 +323,28 @@ textarea.inp { resize: vertical; font-family: inherit; }
 .muted { font-size: 12px; color: var(--text-muted, #7a8291); }
 
 /* 模板卡片 */
+.tpl-bar { display: flex; justify-content: space-between; align-items: center; }
+.tpl-tip { margin: 0; font-size: 12px; color: var(--text-muted, #7a8291); line-height: 1.6; }
+.empty { padding: 24px 0; text-align: center; }
+.empty span { font-size: 12px; color: #7a8291; }
 .tpl-list { display: flex; flex-direction: column; gap: 8px; }
 .tpl-card {
   display: flex; flex-direction: column; gap: 6px; padding: 12px; border-radius: 8px;
   background: var(--bg-card, #12141c); border: 1px solid var(--border-light, #2a2e3a);
+  transition: border-color 0.15s, box-shadow 0.15s;
 }
-.tpl-header { display: flex; align-items: center; gap: 8px; }
+.tpl-card.editing { border-color: var(--accent, #6ea8fe); box-shadow: 0 0 0 1px var(--accent-dim, #1e3a5f); }
+.tpl-header { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .tpl-type {
   font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 4px;
   background: var(--accent-dim, #1e3a5f); color: var(--accent, #6ea8fe);
 }
-.tpl-count { font-size: 12px; color: var(--text-muted, #7a8291); margin-left: auto; }
+.badge { font-size: 11px; padding: 1px 8px; border-radius: 10px; font-weight: 500; }
+.b-ok { background: rgba(63, 185, 80, 0.15); color: #3fb950; }
+.b-learn { background: rgba(210, 153, 34, 0.15); color: #d29922; }
+.b-builtin { background: rgba(110, 168, 254, 0.15); color: #6ea8fe; }
+.tpl-count { font-size: 12px; color: var(--text-muted, #7a8291); }
+.tpl-actions { margin-left: auto; display: flex; gap: 6px; }
 .tpl-row { display: flex; align-items: flex-start; gap: 8px; font-size: 12px; }
 .tpl-label { color: var(--text-muted, #7a8291); flex: 0 0 40px; }
 .tpl-regex {
@@ -271,7 +352,22 @@ textarea.inp { resize: vertical; font-family: inherit; }
   font-size: 11px; color: #b5bd68; word-break: break-all; line-height: 1.5;
 }
 .tpl-sample { flex: 1; color: var(--text-secondary, #b9c0cc); word-break: break-all; }
-.tpl-answer { flex: 1; color: var(--text-primary, #e8ebf0); font-weight: 600; }
+
+/* 模板编辑器 */
+.editor {
+  display: flex; flex-direction: column; gap: 10px; margin-top: 4px;
+  padding-top: 12px; border-top: 1px dashed var(--border-light, #2a2e3a);
+}
+.ed-fld { display: flex; flex-direction: column; gap: 6px; }
+.ed-lbl { font-size: 12px; color: var(--text-secondary, #b9c0cc); }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.code { resize: vertical; line-height: 1.55; font-size: 12.5px; white-space: pre; overflow: auto; tab-size: 4; }
+.ed-error {
+  font-size: 12px; color: #e5534b; background: rgba(229, 83, 75, 0.1);
+  border: 1px solid rgba(229, 83, 75, 0.3); padding: 6px 10px; border-radius: 6px;
+  white-space: pre-wrap; word-break: break-all;
+}
+.ed-bar { display: flex; justify-content: flex-end; gap: 8px; }
 
 @container (max-width: 620px) {
   .layout { flex-direction: column; }

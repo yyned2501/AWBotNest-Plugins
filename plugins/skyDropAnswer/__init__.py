@@ -13,10 +13,10 @@ TZ = timezone(timedelta(hours=8))
 __plugin__ = {
     "name": "天空答题",
     "id": "skyDropAnswer",
-    "version": "1.9.0",
+    "version": "1.10.0",
     "author": "Yy",
     "description": "天空答题奖励，每题型独立.py文件，模板管理+验证循环，Vue配置面板。",
-    "changelog": "v1.9.0 更新内容：\n- 新增内置模板「找出指定符号位置」：动态提取题目里要找的符号并在序列中定位，任意符号通用（取代此前把 🔺/💎 等符号写死、一符号一模板的两个学习模板）\n- 强化 AI 学习提示：明确要求把会变化的符号/数字当变量动态解析、绝不写死，并给出正反例，从源头避免同题型重复生成模板",
+    "changelog": "v1.10.0 更新内容：\n- 模板支持在配置面板直接编辑：每个模板卡片加「编辑」，可调正则与 extract 脚本，保存前自动校验（语法错误/缺 extract/正则不合法会被拦下且不写坏文件），通过后落盘并立即对后续题目生效\n- 模板列表展示「已验证/学习中」「内置」徽章与命中数，内置模板不可删除\n- 修复模板文件重写时含换行/引号/emoji 的样例导致语法错误的往返缺陷（字符串字段统一用 repr 写入）",
     "scope": "user",
     "render_mode": "vue",
     "default_enabled": False,
@@ -95,6 +95,18 @@ def _load_template_namespace(filepath: Path) -> dict:
     return ns
 
 
+def _extract_script_code(filepath: Path) -> str:
+    """从模板文件里取出 extract 函数源码（从 def extract 行到文件尾），供前端编辑。"""
+    try:
+        lines = filepath.read_text(encoding="utf-8").split("\n")
+    except Exception:
+        return ""
+    for i, ln in enumerate(lines):
+        if ln.startswith("def extract"):
+            return "\n".join(lines[i:]).rstrip() + "\n"
+    return ""
+
+
 def _load_all_templates() -> list[dict]:
     """从 templates/ 目录加载所有 .py 模板"""
     _TEMPLATES_DIR.mkdir(exist_ok=True)
@@ -113,27 +125,35 @@ def _load_all_templates() -> list[dict]:
             "verify_count": ns.get("VERIFY_COUNT", 0),
             "count": ns.get("COUNT", 0),
             "sample": ns.get("SAMPLE", ""),
+            "script_code": _extract_script_code(f),
             "extract": ns["extract"],
         })
     return out
+
+
+def _build_template_content(tpl: dict) -> str:
+    """按模板字典拼出 .py 文件全文（元数据 + extract 脚本）。
+
+    字符串字段一律用 repr 写入，保证含换行/引号/emoji 的内容也能安全往返。
+    """
+    return (
+        f"# {tpl['id']}.py — {tpl['type']}\n"
+        f"TYPE = {tpl['type']!r}\n"
+        f"REGEX = {tpl['regex']!r}\n"
+        f"STATUS = {tpl['status']!r}\n"
+        f"VERIFY_COUNT = {tpl['verify_count']}\n"
+        f"SAMPLE = {tpl['sample']!r}\n"
+        f"COUNT = {tpl['count']}\n"
+        f"\n"
+        f"{tpl['script_code']}\n"
+    )
 
 
 def _write_template_file(tpl: dict):
     """将模板写入 .py 文件"""
     _TEMPLATES_DIR.mkdir(exist_ok=True)
     filepath = _TEMPLATES_DIR / f"{tpl['id']}.py"
-    content = (
-        f"# {tpl['id']}.py — {tpl['type']}，自动生成\n"
-        f'TYPE = "{tpl["type"]}"\n'
-        f'REGEX = r"{tpl["regex"]}"\n'
-        f'STATUS = "{tpl["status"]}"\n'
-        f'VERIFY_COUNT = {tpl["verify_count"]}\n'
-        f'SAMPLE = "{tpl["sample"]}"\n'
-        f'COUNT = {tpl["count"]}\n'
-        f'\n'
-        f'{tpl["script_code"]}\n'
-    )
-    filepath.write_text(content, encoding="utf-8")
+    filepath.write_text(_build_template_content(tpl), encoding="utf-8")
 
 
 def _delete_template_file(tpl_id: str):
@@ -449,7 +469,7 @@ async def _answer_and_submit(text, client, message, ctx, templates):
 
 
 async def setup(ctx):
-    ctx.log.info("天空答题插件已加载 (v1.9.0)")
+    ctx.log.info("天空答题插件已加载 (v1.10.0)")
 
     # 从 templates/ 目录加载所有 .py 模板文件，并合并历史遗留的同类重复模板
     templates = _dedup_templates(_load_all_templates(), ctx)
@@ -501,6 +521,44 @@ async def setup(ctx):
         return {"ok": True, "data": [
             {k: v for k, v in t.items() if k != "extract"} for t in templates
         ]}
+
+    # ── API: 编辑模板（微调正则 / extract 脚本） ──
+    @ctx.on_api("/api/templates/save", methods=["POST"])
+    async def _save_template(req):
+        import re as _re
+        data = req.json or {}
+        tid = data.get("id", "")
+        tpl = next((t for t in templates if t["id"] == tid), None)
+        if tpl is None:
+            return {"ok": False, "message": "模板不存在"}
+        new_regex = (data.get("regex") or "").strip()
+        new_code = data.get("script_code") or ""
+        if not new_regex:
+            return {"ok": False, "message": "正则不能为空"}
+        if "def extract" not in new_code:
+            return {"ok": False, "message": "脚本必须定义 extract(text) 函数"}
+        # 先校验后落盘：在内存执行确认脚本可用、正则合法，通过才写文件
+        candidate = dict(tpl)
+        candidate["regex"] = new_regex
+        candidate["script_code"] = new_code.rstrip() + "\n"
+        ns = {"__builtins__": __builtins__}
+        try:
+            exec(_build_template_content(candidate), ns)
+        except Exception as e:
+            return {"ok": False, "message": f"脚本/正则错误：{e}"}
+        if "extract" not in ns:
+            return {"ok": False, "message": "脚本执行后未生成 extract(text) 函数"}
+        try:
+            _re.compile(new_regex)
+        except _re.error as e:
+            return {"ok": False, "message": f"正则不合法：{e}"}
+        # 校验通过：落盘 + 更新内存（立即对后续题目生效）
+        tpl["regex"] = new_regex
+        tpl["script_code"] = candidate["script_code"]
+        tpl["extract"] = ns["extract"]
+        _write_template_file(tpl)
+        ctx.log.info("[天空答题] 模板已手动微调: %s", tid)
+        return {"ok": True, "message": "已保存，后续题目立即生效"}
 
     # ── API: 删除模板 ──
     @ctx.on_api("/api/templates", methods=["DELETE"])
