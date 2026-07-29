@@ -13,10 +13,10 @@ TZ = timezone(timedelta(hours=8))
 __plugin__ = {
     "name": "天空答题",
     "id": "skyDropAnswer",
-    "version": "1.10.2",
+    "version": "1.10.3",
     "author": "Yy",
     "description": "天空答题奖励，每题型独立.py文件，模板管理+验证循环，Vue配置面板。",
-    "changelog": "v1.10.2 更新内容：\n- 答题后通过 ctx.notify 推送通知到管理员\nv1.10.1 更新内容：\n- 防抖消息集合加 TTL 清理",
+    "changelog": "v1.10.3 更新内容：\n- 简化 _reply_to_own 使用 ctx.filters.outgoing 判断，去掉冗余 kv 缓存\nv1.10.2 更新内容：\n- 答题后通过 ctx.notify 推送通知到管理员",
     "scope": "user",
     "render_mode": "vue",
     "default_enabled": False,
@@ -48,7 +48,6 @@ __plugin__ = {
     },
 }
 
-_KV_PENDING = "auto_say_pending_rewards"
 _PROMPT_ANSWER = "你是Telegram答题助手，分析题目并给出答案。只输出答案内容，不要任何解释。"
 
 # 注意：{{ 和 }} 是 str.format() 的转义，代表一个字面 { 或 }
@@ -487,7 +486,7 @@ async def _answer_and_submit(text, client, message, ctx, templates):
 
 
 async def setup(ctx):
-    ctx.log.info("天空答题插件已加载 (v1.10.1)")
+    ctx.log.info("天空答题插件已加载 (v1.10.2)")
 
     # 从 templates/ 目录加载所有 .py 模板文件，并合并历史遗留的同类重复模板
     templates = _dedup_templates(_load_all_templates(), ctx)
@@ -497,24 +496,11 @@ async def setup(ctx):
     _processed_msg_ids: dict[int, float] = {}
     _DEDUP_TTL = 3600.0
 
-    # ── 记录用户自己发的消息 ──
-    @ctx.on_message(ctx.filters.outgoing & ctx.filters.text, group=3)
-    async def _user_msg_handler(client, message):
-        if not ctx.config.get("enable_reward_answer", False):
-            return
-        pending = ctx.kv.get(_KV_PENDING, [])
-        pending.append({"chat_id": message.chat.id, "msg_id": message.id, "time": time.time()})
-        ctx.kv.set(_KV_PENDING, pending[-20:])
-
     # ── 答题奖励 ──
     def _reply_to_own(_, __, message):
         if not message.reply_to_message_id:
             return False
-        pending = ctx.kv.get(_KV_PENDING, [])
-        return any(
-            p["chat_id"] == message.chat.id and p["msg_id"] == message.reply_to_message_id
-            for p in pending
-        )
+        return ctx.filters.outgoing(_, message.reply_to_message)
 
     @ctx.on_message(ctx.filters.group & ctx.filters.text & ctx.filters.create(_reply_to_own) & ctx.filters.regex(r"小秘想给你 \d+ 银元奖励。"), group=5)
     async def _reward_handler(client, message):
