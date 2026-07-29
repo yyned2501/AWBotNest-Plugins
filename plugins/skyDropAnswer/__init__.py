@@ -13,10 +13,10 @@ TZ = timezone(timedelta(hours=8))
 __plugin__ = {
     "name": "天空答题",
     "id": "skyDropAnswer",
-    "version": "1.10.1",
+    "version": "1.10.2",
     "author": "Yy",
     "description": "天空答题奖励，每题型独立.py文件，模板管理+验证循环，Vue配置面板。",
-    "changelog": "v1.10.0 更新内容：\n- 模板支持在配置面板直接编辑：每个模板卡片加「编辑」，可调正则与 extract 脚本，保存前自动校验（语法错误/缺 extract/正则不合法会被拦下且不写坏文件），通过后落盘并立即对后续题目生效\n- 模板列表展示「已验证/学习中」「内置」徽章与命中数，内置模板不可删除\n- 修复模板文件重写时含换行/引号/emoji 的样例导致语法错误的往返缺陷（字符串字段统一用 repr 写入）",
+    "changelog": "v1.10.2 更新内容：\n- 答题后通过 ctx.notify 推送通知到管理员\nv1.10.1 更新内容：\n- 防抖消息集合加 TTL 清理",
     "scope": "user",
     "render_mode": "vue",
     "default_enabled": False,
@@ -465,6 +465,24 @@ async def _answer_and_submit(text, client, message, ctx, templates):
             ctx.log.warning("[天空答题] 点击按钮失败: %r", e)
     else:
         ctx.log.warning("[天空答题] 未找到匹配答案 %s 的按钮，跳过", ans)
+
+    # 向出题机器人推送通知
+    try:
+        bot_user = message.from_user
+        if bot_user:
+            chat_title = getattr(message.chat, "title", "") if message.chat else ""
+            await ctx.notify(
+                f"🏠 所在群组\n   {chat_title}\n   群ID: {message.chat.id}\n\n"
+                f"📩 答题结果\n   答案: {ans}\n\n"
+                f"🔗 消息链接\n   {getattr(message, 'link', '')}",
+                level="success",
+                category="已答",
+                account=client,
+            )
+            ctx.log.info("[天空答题] 已向机器人推送答题结果")
+    except Exception as e:
+        ctx.log.warning("[天空答题] 向机器人推送通知失败: %r", e)
+
     ctx.log.info("[天空答题] 答题完成")
 
 
