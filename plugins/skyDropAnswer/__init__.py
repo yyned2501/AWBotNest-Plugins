@@ -16,13 +16,19 @@ TZ = timezone(timedelta(hours=8))
 __plugin__ = {
     "name": "天空答题",
     "id": "skyDropAnswer",
-    "version": "1.10.4",
+    "version": "1.10.5",
     "author": "Yy",
     "description": "天空答题奖励，每题型独立.py文件，模板管理+验证循环，Vue配置面板。",
     "changelog": (
-        "v1.10.4 更新内容：\n- 修复 _reply_to_own 改用 ctx.filters.create 包装 is_self 判断，恢复 filter 层的正确拦截\n"
-        "v1.10.3 更新内容：\n- 简化 _reply_to_own 使用 ctx.filters.outgoing 判断，去掉冗余 kv 缓存\n"
-        "v1.10.2 更新内容：\n- 答题后通过 ctx.notify 推送通知到管理员"
+        "v1.10.5 更新内容：\n"
+        "- 模板命中次数改用 ctx.kv 存储，不再写入 .py 模板文件，重启后保留计数\n"
+        "- 启动时自动清理已删除模板的过期计数\n"
+        "v1.10.4 更新内容：\n"
+        "- 修复 _reply_to_own 改用 ctx.filters.create 包装 is_self 判断，恢复 filter 层的正确拦截\n"
+        "v1.10.3 更新内容：\n"
+        "- 简化 _reply_to_own 使用 ctx.filters.outgoing 判断，去掉冗余 kv 缓存\n"
+        "v1.10.2 更新内容：\n"
+        "- 答题后通过 ctx.notify 推送通知到管理员"
     ),
     "scope": "user",
     "render_mode": "vue",
@@ -179,7 +185,6 @@ def _build_template_content(tpl: dict) -> str:
         f"STATUS = {tpl['status']!r}\n"
         f"VERIFY_COUNT = {tpl['verify_count']}\n"
         f"SAMPLE = {tpl['sample']!r}\n"
-        f"COUNT = {tpl['count']}\n"
         f"\n"
         f"{tpl['script_code']}\n"
     )
@@ -197,6 +202,37 @@ def _delete_template_file(tpl_id: str) -> None:
     filepath = _TEMPLATES_DIR / f"{tpl_id}.py"
     if filepath.exists():
         filepath.unlink()
+
+
+_KV_COUNT_PREFIX = "tpl_count:"
+
+
+def _save_template_count(tpl_id: str, count: int, ctx: object) -> None:
+    """保存模板命中次数到 ctx.kv"""
+    ctx.kv.set(f"{_KV_COUNT_PREFIX}{tpl_id}", count)
+
+
+def _load_template_counts(ctx: object) -> dict[str, int]:
+    """从 ctx.kv 读取所有模板的命中次数"""
+    counts: dict[str, int] = {}
+    for key in ctx.kv.keys():
+        if key.startswith(_KV_COUNT_PREFIX):
+            tpl_id = key[len(_KV_COUNT_PREFIX) :]
+            val = ctx.kv.get(key, 0)
+            if isinstance(val, (int, float)):
+                counts[tpl_id] = int(val)
+    return counts
+
+
+def _cleanup_stale_counts(templates: list[dict], ctx: object) -> None:
+    """清理已删除模板的 kv 计数"""
+    active_ids = {t["id"] for t in templates}
+    for key in ctx.kv.keys():
+        if key.startswith(_KV_COUNT_PREFIX):
+            tpl_id = key[len(_KV_COUNT_PREFIX) :]
+            if tpl_id not in active_ids:
+                ctx.kv.delete(key)
+                ctx.log.info("清理已删除模板的计数: %s", tpl_id)
 
 
 def _match_templates(text: str, templates: list[dict]) -> tuple[str | None, dict | None]:
@@ -301,7 +337,7 @@ def _dedup_templates(templates: list[dict], ctx: object) -> list[dict]:
             continue
         survivor = max(grp, key=_rank)
         survivor["count"] = sum(x.get("count", 0) for x in grp)
-        _update_template_file(survivor, count=survivor["count"])
+        _save_template_count(survivor["id"], survivor["count"], ctx)
         for x in grp:
             if x is not survivor:
                 _delete_template_file(x["id"])
@@ -332,7 +368,8 @@ async def _learn_template(text: str, ans: str, ctx: object, templates: list[dict
         if hit:
             hit["count"] = hit.get("count", 0) + 1
             hit["sample"] = data.get("sample", text[:50])
-            _update_template_file(hit, count=hit["count"], sample=hit["sample"])
+            _save_template_count(hit["id"], hit["count"], ctx)
+            _update_template_file(hit, sample=hit["sample"])
             ctx.log.info("同类题归并到已有模板 %s（不新建）", hit["id"])
             return
 
@@ -446,7 +483,7 @@ async def _answer_and_submit(
             if ans:
                 ctx.log.info("模板命中(verified): %s → %s", tpl["type"], ans)
                 tpl["count"] = tpl.get("count", 0) + 1
-                _update_template_file(tpl, count=tpl["count"])
+                _save_template_count(tpl["id"], tpl["count"], ctx)
 
         elif status == "learning":
             script_ans = extract_fn(text) if extract_fn else None
@@ -470,7 +507,7 @@ async def _answer_and_submit(
 
             if ans:
                 tpl["count"] = tpl.get("count", 0) + 1
-                _update_template_file(tpl, count=tpl["count"])
+                _save_template_count(tpl["id"], tpl["count"], ctx)
 
     # AI 兜底（无模板命中时）
     if not ans and ctx.config.get("use_ai_fallback", True) and ctx.ai.available:
@@ -534,6 +571,17 @@ async def setup(ctx: object) -> None:
     # 从 templates/ 目录加载所有 .py 模板文件，并合并历史遗留的同类重复模板
     templates = _dedup_templates(_load_all_templates(), ctx)
     ctx.log.info("加载 %d 个模板文件", len(templates))
+
+    # 从 kv 读取模板命中次数，合并到模板字典（优先级高于 .py 文件中的残留 COUNT）
+    # 同时清理已删除模板的过期计数
+    _cleanup_stale_counts(templates, ctx)
+    kv_counts = _load_template_counts(ctx)
+    for tpl in templates:
+        kv_val = kv_counts.get(tpl["id"])
+        if kv_val is not None:
+            tpl["count"] = kv_val
+    if kv_counts:
+        ctx.log.info("从 kv 恢复 %d 个模板的命中次数", len(kv_counts))
 
     # 防抖：记录已处理的消息 ID（带时间戳，TTL 清理防无界增长）
     _processed_msg_ids: dict[int, float] = {}

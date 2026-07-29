@@ -24,6 +24,25 @@
 
 **命令型用户插件过滤器选错** — 插件加载成功但命令永不触发。对用户命令插件，`ctx.filters.outgoing & ctx.filters.text` + 手动文本匹配往往比猜 `ctx.filters.command(...)` 稳。先看相似在用插件怎么触发。
 
+**`ctx.filters.create()` 传入 `async def` 函数** — 插件加载成功、handler 注册了，但 filter 永远不匹配（因为平台/filters.create 期望同步函数）。`ctx.filters.create(fn)` 的 `fn` 必须是同步 `def`，不能是 `async def`。
+
+**`ctx.filters.outgoing` 在 `ctx.filters.create(fn)` 内部不工作** — 在 filter 函数里调 `ctx.filters.outgoing(_, __, m)` 或类似方式判断消息是否自己发的，结果不可靠。正确做法：用 `message.reply_to_message.from_user.is_self`（Pyrogram 原生属性，同步判断），放在 sync `def` 里经 `ctx.filters.create()` 包装。别用 kv/缓存记录自己发的消息来判断回复。参考模式：
+
+```python
+def _reply_to_own_filter(_, __, m):
+    return bool(
+        m.reply_to_message
+        and m.reply_to_message.from_user
+        and m.reply_to_message.from_user.is_self
+    )
+
+_filter = ctx.filters.text & ctx.filters.create(_reply_to_own_filter)
+
+@ctx.on_message(_filter)
+async def handler(client, message):
+    ...
+```
+
 ## Vue 类
 
 **前端配置与后端默认值漂移** — 配置页一套字段/默认值，运行时另一套。以后端 `DEFAULTS` 为权威形状，Vue 字段与之对齐；改键名后复查 `ctx.config.get(...)`。
