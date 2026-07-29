@@ -220,7 +220,6 @@ async def setup(ctx: object) -> None:
         ctx.kv.set(f"{_KV_CLICKED_PREFIX}{key}", time.time())
 
         row, col = btn_pos
-        chat_title = getattr(message.chat, "title", "") if message.chat else ""
         msg_link = getattr(message, "link", "")
         msg_date = getattr(message, "date", None)
         msg_ts = msg_date.timestamp() if msg_date else 0
@@ -239,7 +238,7 @@ async def setup(ctx: object) -> None:
         if result_text is None:
             ctx.log.warning("首次点击抢红包失败 chat=%s msg=%s", chat_id, message.id)
             await ctx.notify(
-                f"🏠 所在群组\n   {chat_title}\n   群ID: {chat_id}\n\n⚠️ 首次点击失败\n\n🔗 消息链接\n   {msg_link}",
+                f"🏠 群ID: {chat_id}\n\n⚠️ 抢红包失败（首次点击无效）\n\n🔗 消息链接\n   {msg_link}",
                 level="error",
                 category="失败",
                 account=client,
@@ -251,12 +250,25 @@ async def setup(ctx: object) -> None:
         # 判断是否被拒（30 秒限制）
         for attempt in range(_MAX_RETRIES):
             if "仅限最近" not in result_text and "30秒" not in result_text:
-                break  # 没有限制提示，说明抢到了或已过期
+                # 没有限制提示，说明抢到了
+                await ctx.notify(
+                    f"🏠 群ID: {chat_id}\n\n📩 抢包结果\n   {result_text}\n\n🔗 消息链接\n   {msg_link}",
+                    level="success",
+                    category="已抢",
+                    account=client,
+                )
+                return
 
             wait_seconds = _parse_wait_seconds(result_text)
             if wait_seconds is None:
                 ctx.log.info("无法解析等待时间，放弃重试 chat=%s msg=%s", chat_id, message.id)
-                break
+                await ctx.notify(
+                    f"🏠 群ID: {chat_id}\n\n📩 抢包结果\n   {result_text}\n\n🔗 消息链接\n   {msg_link}",
+                    level="success",
+                    category="已抢",
+                    account=client,
+                )
+                return
 
             # 计算重试时间：红包发送时间 + n 秒 - 提前量
             if msg_ts > 0:
@@ -281,7 +293,13 @@ async def setup(ctx: object) -> None:
             result_text = await _try_snatch(client, message, row, col)
             if result_text is None:
                 ctx.log.warning("重试点击失败 chat=%s msg=%s", chat_id, message.id)
-                break
+                await ctx.notify(
+                    f"🏠 群ID: {chat_id}\n\n⚠️ 抢红包失败（重试点击无效）\n\n🔗 消息链接\n   {msg_link}",
+                    level="error",
+                    category="失败",
+                    account=client,
+                )
+                return
 
             ctx.log.info(
                 "重试结果 chat=%s msg=%s attempt=%d %s",
@@ -291,12 +309,10 @@ async def setup(ctx: object) -> None:
                 result_text,
             )
 
-        ctx.log.info("抢包完成 chat=%s msg=%s 结果=%s", chat_id, message.id, result_text)
+        # 重试耗尽，推送最终结果
         await ctx.notify(
-            f"🏠 所在群组\n   {chat_title}\n   群ID: {chat_id}\n\n"
-            f"📩 抢包结果\n   {result_text}\n\n"
-            f"🔗 消息链接\n   {msg_link}",
-            level="success",
+            f"🏠 群ID: {chat_id}\n\n📩 抢包结果\n   {result_text}\n\n🔗 消息链接\n   {msg_link}",
+            level="success" if result_text and "抢到" in result_text else "warning",
             category="已抢",
             account=client,
         )
