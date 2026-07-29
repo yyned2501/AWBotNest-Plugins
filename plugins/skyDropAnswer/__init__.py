@@ -486,7 +486,7 @@ async def _answer_and_submit(text, client, message, ctx, templates):
 
 
 async def setup(ctx):
-    ctx.log.info("天空答题插件已加载 (v1.10.2)")
+    ctx.log.info("天空答题插件已加载 (v%s)", __plugin__["version"])
 
     # 从 templates/ 目录加载所有 .py 模板文件，并合并历史遗留的同类重复模板
     templates = _dedup_templates(_load_all_templates(), ctx)
