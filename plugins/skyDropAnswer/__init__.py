@@ -20,7 +20,7 @@ __plugin__ = {
     "author": "Yy",
     "description": "天空答题奖励，每题型独立.py文件，模板管理+验证循环，Vue配置面板。",
     "changelog": (
-        "v1.10.4 更新内容：\n- 修复 _reply_to_own 改用 message.reply_to_message.from_user.is_self 判断\n"
+        "v1.10.4 更新内容：\n- 修复 _reply_to_own 改用 ctx.filters.create 包装 is_self 判断，恢复 filter 层的正确拦截\n"
         "v1.10.3 更新内容：\n- 简化 _reply_to_own 使用 ctx.filters.outgoing 判断，去掉冗余 kv 缓存\n"
         "v1.10.2 更新内容：\n- 答题后通过 ctx.notify 推送通知到管理员"
     ),
@@ -305,7 +305,7 @@ def _dedup_templates(templates: list[dict], ctx: object) -> list[dict]:
         for x in grp:
             if x is not survivor:
                 _delete_template_file(x["id"])
-                ctx.log.info("[天空答题] 启动去重：模板 %s 归并到 %s", x["id"], survivor["id"])
+                ctx.log.info("启动去重：模板 %s 归并到 %s", x["id"], survivor["id"])
         kept.append(survivor)
     return kept
 
@@ -333,7 +333,7 @@ async def _learn_template(text: str, ans: str, ctx: object, templates: list[dict
             hit["count"] = hit.get("count", 0) + 1
             hit["sample"] = data.get("sample", text[:50])
             _update_template_file(hit, count=hit["count"], sample=hit["sample"])
-            ctx.log.info("[天空答题] 同类题归并到已有模板 %s（不新建）", hit["id"])
+            ctx.log.info("同类题归并到已有模板 %s（不新建）", hit["id"])
             return
 
         # 新模板
@@ -354,13 +354,11 @@ async def _learn_template(text: str, ans: str, ctx: object, templates: list[dict
         ns = _load_template_namespace(_TEMPLATES_DIR / f"{filename}.py")
         tpl["extract"] = ns.get("extract", lambda t: None)
         templates.append(tpl)
-        ctx.log.info(
-            "[天空答题] 学习新模板: %s | %s | status=learning | 共%d个", tpl["type"], regex[:40], len(templates)
-        )
+        ctx.log.info("学习新模板: %s | %s | status=learning | 共%d个", tpl["type"], regex[:40], len(templates))
     except Exception as e:
-        ctx.log.warning("[天空答题] 模板学习失败: %r", e)
+        ctx.log.warning("模板学习失败: %r", e)
         try:
-            ctx.log.warning("[天空答题] AI原始响应(前200字): %s", result[:200])
+            ctx.log.warning("AI原始响应(前200字): %s", result[:200])
         except Exception:
             pass
 
@@ -371,7 +369,7 @@ async def _verify_template(ai_ans: str, script_ans: str | None, tpl: dict, ctx: 
         tpl["verify_count"] = tpl.get("verify_count", 0) + 1
         if tpl["verify_count"] >= 3:
             tpl["status"] = "verified"
-            ctx.log.info("[天空答题] 模板升级 verified: %s", tpl["id"])
+            ctx.log.info("模板升级 verified: %s", tpl["id"])
         _update_template_file(tpl, verify_count=tpl["verify_count"], status=tpl["status"])
         return script_ans
     else:
@@ -446,7 +444,7 @@ async def _answer_and_submit(
         if status == "verified":
             ans = extract_fn(text) if extract_fn else None
             if ans:
-                ctx.log.info("[天空答题] 模板命中(verified): %s → %s", tpl["type"], ans)
+                ctx.log.info("模板命中(verified): %s → %s", tpl["type"], ans)
                 tpl["count"] = tpl.get("count", 0) + 1
                 _update_template_file(tpl, count=tpl["count"])
 
@@ -460,12 +458,12 @@ async def _answer_and_submit(
                         result = await _verify_template(ai_ans, script_ans, tpl, ctx)
                         if result:
                             ans = result
-                            ctx.log.info("[天空答题] 验证通过(%d/3): %s", tpl["verify_count"], ans)
+                            ctx.log.info("验证通过(%d/3): %s", tpl["verify_count"], ans)
                         else:
                             ans = ai_ans
-                            ctx.log.info("[天空答题] 验证不一致，使用AI答案: %s (script=%s)", ans, script_ans)
+                            ctx.log.info("验证不一致，使用AI答案: %s (script=%s)", ans, script_ans)
                 except Exception as e:
-                    ctx.log.warning("[天空答题] 验证AI调用失败: %r", e)
+                    ctx.log.warning("验证AI调用失败: %r", e)
                     ans = script_ans
             else:
                 ans = script_ans
@@ -477,21 +475,21 @@ async def _answer_and_submit(
     # AI 兜底（无模板命中时）
     if not ans and ctx.config.get("use_ai_fallback", True) and ctx.ai.available:
         try:
-            ctx.log.info("[天空答题] 无模板命中，使用AI分析: %s", text[:60])
+            ctx.log.info("无模板命中，使用AI分析: %s", text[:60])
             ai_ans = await ctx.ai.chat(f"{_PROMPT_ANSWER}\n\n题目: {text}")
             ai_ans = (ai_ans.strip() or "")[:20]
             if ai_ans:
                 ans = ai_ans
-                ctx.log.info("[天空答题] AI回答: %s", ans)
+                ctx.log.info("AI回答: %s", ans)
                 await _learn_template(text, ans, ctx, templates)
         except Exception as e:
-            ctx.log.warning("[天空答题] AI分析失败: %r", e)
+            ctx.log.warning("AI分析失败: %r", e)
 
     if not ans:
-        ctx.log.info("[天空答题] 无法解答，跳过")
+        ctx.log.info("无法解答，跳过")
         return
 
-    ctx.log.info("[天空答题] 最终答案: %s", ans)
+    ctx.log.info("最终答案: %s", ans)
     d_min = int(ctx.config.get("reward_delay_min", 2) or 2)
     d_max = int(ctx.config.get("reward_delay_max", 5) or 5)
     if d_min >= d_max:
@@ -504,11 +502,11 @@ async def _answer_and_submit(
         row, col = pos
         try:
             await message.click(x=col, y=row)
-            ctx.log.info("[天空答题] 点击按钮 (%d,%d)，答案 %s", row, col, ans)
+            ctx.log.info("点击按钮 (%d,%d)，答案 %s", row, col, ans)
         except Exception as e:
-            ctx.log.warning("[天空答题] 点击按钮失败: %r", e)
+            ctx.log.warning("点击按钮失败: %r", e)
     else:
-        ctx.log.warning("[天空答题] 未找到匹配答案 %s 的按钮，跳过", ans)
+        ctx.log.warning("未找到匹配答案 %s 的按钮，跳过", ans)
 
     # 向出题机器人推送通知
     try:
@@ -523,11 +521,11 @@ async def _answer_and_submit(
                 category="已答",
                 account=client,
             )
-            ctx.log.info("[天空答题] 已向机器人推送答题结果")
+            ctx.log.info("已向机器人推送答题结果")
     except Exception as e:
-        ctx.log.warning("[天空答题] 向机器人推送通知失败: %r", e)
+        ctx.log.warning("向机器人推送通知失败: %r", e)
 
-    ctx.log.info("[天空答题] 答题完成")
+    ctx.log.info("答题完成")
 
 
 async def setup(ctx: object) -> None:
@@ -535,27 +533,25 @@ async def setup(ctx: object) -> None:
 
     # 从 templates/ 目录加载所有 .py 模板文件，并合并历史遗留的同类重复模板
     templates = _dedup_templates(_load_all_templates(), ctx)
-    ctx.log.info("[天空答题] 加载 %d 个模板文件", len(templates))
+    ctx.log.info("加载 %d 个模板文件", len(templates))
 
     # 防抖：记录已处理的消息 ID（带时间戳，TTL 清理防无界增长）
     _processed_msg_ids: dict[int, float] = {}
     _dedup_ttl = 3600.0
 
     # ── 答题奖励 ──
-    def _reply_to_own(_: object, __: object, message: object) -> bool:
-        replied = getattr(message, "reply_to_message", None)
-        if not replied:
-            return False
-        sender = getattr(replied, "from_user", None)
-        if not sender:
-            return False
-        return getattr(sender, "is_self", False)
+    def _reply_to_own_filter(_: object, __: object, m: object) -> bool:
+        return bool(
+            getattr(m, "reply_to_message", None)
+            and getattr(m.reply_to_message, "from_user", None)
+            and getattr(m.reply_to_message.from_user, "is_self", False)
+        )
 
     _reward_filter = (
         ctx.filters.group
         & ctx.filters.text
-        & ctx.filters.create(_reply_to_own)
         & ctx.filters.regex(r"小秘想给你 \d+ 银元奖励。")
+        & ctx.filters.create(_reply_to_own_filter)
     )
 
     @ctx.on_message(_reward_filter, group=5)
@@ -569,7 +565,7 @@ async def setup(ctx: object) -> None:
             for k in stale:
                 _processed_msg_ids.pop(k, None)
         if message.id in _processed_msg_ids:
-            ctx.log.info("[天空答题] 跳过重复消息: %s", message.id)
+            ctx.log.info("跳过重复消息: %s", message.id)
             return
         _processed_msg_ids[message.id] = now
         reward_bots = str(ctx.config.get("reward_bot_ids", "") or "").strip()
@@ -622,7 +618,7 @@ async def setup(ctx: object) -> None:
         tpl["script_code"] = candidate["script_code"]
         tpl["extract"] = ns["extract"]
         _write_template_file(tpl)
-        ctx.log.info("[天空答题] 模板已手动微调: %s", tid)
+        ctx.log.info("模板已手动微调: %s", tid)
         return {"ok": True, "message": "已保存，后续题目立即生效"}
 
     # ── API: 删除模板 ──
@@ -638,7 +634,7 @@ async def setup(ctx: object) -> None:
             if t["id"] == tid:
                 templates.pop(i)
                 break
-        ctx.log.info("[天空答题] 删除模板: %s", tid)
+        ctx.log.info("删除模板: %s", tid)
         return {"ok": True, "message": "已删除"}
 
     # ── API: 清空模板（保留内置） ──
@@ -650,7 +646,7 @@ async def setup(ctx: object) -> None:
             _delete_template_file(t["id"])
         templates.clear()
         templates.extend(kept)
-        ctx.log.info("[天空答题] 清空 %d 个学习模板", len(removed))
+        ctx.log.info("清空 %d 个学习模板", len(removed))
         return {"ok": True, "message": f"已清空，保留 {len(kept)} 个内置模板"}
 
     ctx.log.info("天空答题已就绪")
