@@ -12,7 +12,7 @@ def should_participate(
     chat_id: int,
     message_text: str,
     cfg: AiConfig,
-    kv,
+    kv: object,
 ) -> tuple[bool, str | None]:
     """决定是否参与该消息的讨论。
 

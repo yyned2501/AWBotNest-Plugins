@@ -45,7 +45,8 @@ def _extract_json(text: str) -> dict | None:
 
 # ── 画像访问 ─────────────────────────────────────────────────────
 
-def get_profile(chat_id: int, kv) -> dict:
+
+def get_profile(chat_id: int, kv: object) -> dict:
     return kv.get(_PROFILE_KEY.format(chat_id), {})
 
 
@@ -54,7 +55,8 @@ def get_profile(chat_id: int, kv) -> dict:
 
 # ── 缓冲操作 ────────────────────────────────────────────────────────
 
-def push_own_message(chat_id: int, text: str, kv):
+
+def push_own_message(chat_id: int, text: str, kv: object) -> None:
     buf = _msg_buf.setdefault(chat_id, deque(maxlen=_BUF_MAX))
     buf.append(text)
     cnt = _buf_counter.get(chat_id, 0) + 1
@@ -62,7 +64,7 @@ def push_own_message(chat_id: int, text: str, kv):
     kv.set(_COUNTER_KEY.format(chat_id), cnt)
 
 
-def push_all_message(chat_id: int, text: str, user_id: int, name: str, is_bot: bool = False):
+def push_all_message(chat_id: int, text: str, user_id: int, name: str, is_bot: bool = False) -> None:
     """推入全量缓冲（仅由 Handler 2 调用，只存人类文本）。"""
     buf = _all_buf.setdefault(chat_id, deque(maxlen=_ALL_MAX))
     buf.append({"text": text, "user_id": user_id, "name": name, "is_bot": is_bot, "ts": time.time()})
@@ -82,12 +84,11 @@ def _build_context_str(chat_id: int, n: int) -> str:
     return "\n".join(lines)
 
 
-def get_message_count(kv, chat_id: int) -> int:
+def get_message_count(kv: object, chat_id: int) -> int:
     return _buf_counter.get(chat_id, 0)
 
 
-
-def reset_counter(chat_id: int, kv):
+def reset_counter(chat_id: int, kv: object) -> None:
     _buf_counter[chat_id] = 0
     kv.set(_COUNTER_KEY.format(chat_id), 0)
 
@@ -126,18 +127,19 @@ def get_context_lines(chat_id: int, n: int) -> list[str]:
     human_msgs = [m for m in buf if not m.get("is_bot")]
     if len(human_msgs) < 2:
         return []
-    recent = human_msgs[-(n + 1):-1]
+    recent = human_msgs[-(n + 1) : -1]
     return [m.get("text", "") for m in recent if m.get("text")]
 
 
-def _safe_str(v) -> str:
+def _safe_str(v: object) -> str:
     """将任意类型的值安全转为去除首尾空白的字符串。"""
     return str(v or "").strip()
 
 
 # ── LLM 总结（关键词 + 风格一起出）────────────────────────────────────
 
-async def summarize(chat_id: int, kv, cfg, own_messages: list[str]) -> dict | None:
+
+async def summarize(chat_id: int, kv: object, cfg: object, own_messages: list[str]) -> dict | None:
     """对该群做一次 LLM 总结 + 说话风格分析，**合并**保有画像。
 
     合并策略：
@@ -247,13 +249,13 @@ async def summarize(chat_id: int, kv, cfg, own_messages: list[str]) -> dict | No
     return profile
 
 
-def clear():
+def clear() -> None:
     _msg_buf.clear()
     _all_buf.clear()
     _buf_counter.clear()
 
 
-def _prune_inplace(profile: dict, max_keywords: int):
+def _prune_inplace(profile: dict, max_keywords: int) -> None:
     """对内存中的 profile dict 执行关键词裁剪（不读写 KV）。
 
     评分公式：count × 10 + 最近使用奖赏(0~5)
@@ -291,7 +293,7 @@ def _prune_inplace(profile: dict, max_keywords: int):
     profile["keyword_heat"] = {k: v for k, v in heat.items() if k in kept}
 
 
-def update_keyword_heat(chat_id: int, kv, matched_keyword: str):
+def update_keyword_heat(chat_id: int, kv: object, matched_keyword: str) -> None:
     """关键词参与热度+1，更新最后参与时间。"""
     profile = get_profile(chat_id, kv)
     if not profile:
@@ -309,7 +311,7 @@ def update_keyword_heat(chat_id: int, kv, matched_keyword: str):
     kv.set(_PROFILE_KEY.format(chat_id), profile)
 
 
-def update_manual_keyword_heat(chat_id: int, kv, text: str, extra_keywords: list[str] | None = None) -> dict:
+def update_manual_keyword_heat(chat_id: int, kv: object, text: str, extra_keywords: list[str] | None = None) -> dict:
     """手动消息热词追踪：从群聊文本中匹配关键词并累积 manual_count。
 
     对传入文本（群聊上下文/话题来源）做关键词提取，与画像 keywords 做
@@ -343,9 +345,7 @@ def update_manual_keyword_heat(chat_id: int, kv, text: str, extra_keywords: list
 
     for kw in kw_list:
         kw_lower = kw.lower()
-        matched = kw_lower in text_lower or any(
-            kw_lower in mk or mk in kw_lower for mk in msg_tokens
-        )
+        matched = kw_lower in text_lower or any(kw_lower in mk or mk in kw_lower for mk in msg_tokens)
         if matched:
             entry = heat.get(kw)
             if entry:
@@ -355,8 +355,10 @@ def update_manual_keyword_heat(chat_id: int, kv, text: str, extra_keywords: list
                 matched_kws.append(kw)
             else:
                 heat[kw] = {
-                    "count": 0, "manual_count": 1,
-                    "last_use": now, "last_manual_use": now,
+                    "count": 0,
+                    "manual_count": 1,
+                    "last_use": now,
+                    "last_manual_use": now,
                     "created_ts": now,
                 }
                 new_kws.append(kw)

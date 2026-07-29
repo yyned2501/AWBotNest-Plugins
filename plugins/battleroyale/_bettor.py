@@ -11,7 +11,7 @@ if TYPE_CHECKING:
 class AutoBettor:
     """自动下注逻辑：判断时机、选择目标、执行下注。"""
 
-    def __init__(self, state: GameState, ctx) -> None:
+    def __init__(self, state: GameState, ctx: object) -> None:
         self.state = state
         self.ctx = ctx
 
@@ -73,7 +73,10 @@ class AutoBettor:
         remaining = (self.state.deadline - datetime.now()).total_seconds()
         self.ctx.log.info(
             "[倒计时] 第%u圈 距结算%.0f秒 策略=%s 时机=%u秒前",
-            self.state.round, remaining, strategy, timing,
+            self.state.round,
+            remaining,
+            strategy,
+            timing,
         )
         if remaining <= 0:
             return

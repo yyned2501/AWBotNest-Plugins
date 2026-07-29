@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 @dataclass
 class AiConfig:
     """AI 智能参与插件全部配置，字段与 __plugin__['config_schema'] 对应。"""
+
     # —— 学习 ——
     summarize_gap: int = 10
     max_context_lines: int = 5
@@ -27,7 +28,7 @@ class AiConfig:
         "上下文（群聊最近的几条消息）：\n{context}\n\n"
         "我的发言：\n{my_messages}\n\n"
         "输出格式（JSON）：\n"
-        '{{\n'
+        "{{\n"
         '  "voice": {{\n'
         '    "tone": "语气特征（随意/正经/幽默/暴躁等）",\n'
         '    "avg_words": 平均每句话字数（数字）,\n'
@@ -35,7 +36,7 @@ class AiConfig:
         '    "punctuation": "标点使用习惯",\n'
         '    "emoji_freq": "emoji 使用频率（很少/偶尔/经常/几乎每条）",\n'
         '    "style_prompt": "一段可读的中文文本，完整描述这个人的说话风格，供 LLM 模仿"\n'
-        '  }},\n'
+        "  }},\n"
         '  "keywords": ["关键词1", "关键词2"],\n'
         '  "summary": "一句话总结当前兴趣"\n'
         "}}"
@@ -56,7 +57,7 @@ def parse_ids(raw: str) -> list[int]:
     return out
 
 
-def to_int(v, default: int) -> int:
+def to_int(v: object, default: int) -> int:
     try:
         return int(v)
     except (ValueError, TypeError):
@@ -79,11 +80,7 @@ def parse_config(raw: dict) -> AiConfig:
     """
     global _cache_raw, _cache_value, _cache_ts
     now = time.monotonic()
-    if (
-        _cache_value is not None
-        and _cache_raw == raw
-        and now - _cache_ts < _CONFIG_CACHE_TTL
-    ):
+    if _cache_value is not None and _cache_raw == raw and now - _cache_ts < _CONFIG_CACHE_TTL:
         return _cache_value
 
     cfg = AiConfig(

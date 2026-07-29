@@ -2,7 +2,6 @@
 # 学习插件：参与回复生成器（模拟用户风格）
 # =============================================================================
 import logging
-from typing import Any
 
 from ._ai import generate
 from ._profiler import get_profile
@@ -18,11 +17,11 @@ _DEFAULT_VOICE = (
 
 
 async def participate(
-    client,
+    client: object,
     chat_id: int,
     message_text: str,
-    cfg: Any,
-    kv,
+    cfg: object,
+    kv: object,
     context_lines: list[str] | None = None,
 ) -> str | None:
     """针对匹配到的群消息，模拟用户风格生成自然回复并直接发送。
@@ -39,19 +38,14 @@ async def participate(
     if not voice_prompt:
         voice_prompt = _DEFAULT_VOICE
 
-    system = (
-        f"{voice_prompt}\n\n"
-        f"【你就是一个有自己的人设和说话风格的真实用户，按照上面的风格自然回复。】"
-    )
+    system = f"{voice_prompt}\n\n【你就是一个有自己的人设和说话风格的真实用户，按照上面的风格自然回复。】"
 
     # 构建上文
     ctx_block = ""
     if context_lines:
-        ctx_lines = "\n".join(f"- {l}" for l in context_lines if l.strip())
+        ctx_lines = "\n".join(f"- {line}" for line in context_lines if line.strip())
         if ctx_lines:
-            ctx_block = (
-                f"\n\n群聊最近的上下文（你还没说话之前）：\n{ctx_lines}\n\n"
-            )
+            ctx_block = f"\n\n群聊最近的上下文（你还没说话之前）：\n{ctx_lines}\n\n"
 
     pref_hint = ""
     if summary:

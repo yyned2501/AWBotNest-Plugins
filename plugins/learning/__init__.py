@@ -1,6 +1,6 @@
 # =============================================================================
 # AWBotNest 插件：智能学习参与（learning）
-#\n# 通过学习你的聊天偏好和说话风格，在匹配关键词的群聊中智能参与对话。
+# \n# 通过学习你的聊天偏好和说话风格，在匹配关键词的群聊中智能参与对话。
 # 冷启动：未学到偏好前不参与任何群聊。
 #
 # 工作流程：
@@ -15,10 +15,9 @@
 # =============================================================================
 import asyncio
 import time
-import traceback
 
-from ._config import parse_config
 from ._ai import init_ai
+from ._config import parse_config
 from ._judger import should_participate
 from ._participator import participate
 from ._profiler import (
@@ -41,68 +40,96 @@ from ._social import record
 __plugin__ = {
     "name": "智能学习",
     "id": "learning",
-    "version": "3.1.0",
+    "version": "3.1.1",
     "author": "Yy",
-    "description": (
-        "学习你的聊天偏好和说话风格，在匹配关键词的群聊中智能参与对话。"
-        "冷启动：未学到偏好前不参与。"
-    ),
+    "description": ("学习你的聊天偏好和说话风格，在匹配关键词的群聊中智能参与对话。冷启动：未学到偏好前不参与。"),
     "scope": "user",
     "default_enabled": False,
     "render_mode": "vue",
     "config_schema": {
         # —— 学习 ——
         "summarize_gap": {
-            "type": "slider", "default": 10, "label": "总结间隔(条)",
-            "min": 3, "max": 100, "step": 1, "section": "学习",
+            "type": "slider",
+            "default": 10,
+            "label": "总结间隔(条)",
+            "min": 3,
+            "max": 100,
+            "step": 1,
+            "section": "学习",
             "help": "每发这么多条消息，就总结一次关键词偏好。越小越灵敏、越费 token。",
         },
         "max_context_lines": {
-            "type": "slider", "default": 5, "label": "总结上下文行数",
-            "min": 1, "max": 20, "step": 1, "section": "学习",
+            "type": "slider",
+            "default": 5,
+            "label": "总结上下文行数",
+            "min": 1,
+            "max": 20,
+            "step": 1,
+            "section": "学习",
             "help": "总结时读取每条自己消息前 N 条群聊上下文作为参考。",
         },
         # —— 群组 ——
         "target_groups": {
-            "type": "text", "default": "",
+            "type": "text",
+            "default": "",
             "label": "监听群组",
             "section": "群组",
-            "help": (
-                "监听这些群组的消息来学习和参与。\n"
-                "每个群 ID 一行，也兼容逗号分隔。\n"
-                "留空 = 不监听任何群。"
-            ),
+            "help": ("监听这些群组的消息来学习和参与。\n每个群 ID 一行，也兼容逗号分隔。\n留空 = 不监听任何群。"),
         },
         # —— 参与 ——
         "enable_participation": {
-            "type": "boolean", "default": True, "label": "启用智能参与",
+            "type": "boolean",
+            "default": True,
+            "label": "启用智能参与",
             "section": "参与",
         },
         "participation_rate": {
-            "type": "slider", "default": 20, "label": "参与概率(%)",
-            "min": 1, "max": 100, "step": 1, "section": "参与",
+            "type": "slider",
+            "default": 20,
+            "label": "参与概率(%)",
+            "min": 1,
+            "max": 100,
+            "step": 1,
+            "section": "参与",
             "show_if": {"enable_participation": True},
             "help": "匹配到关键词偏好时，按此概率实际参与回复。20 = 20%概率。",
         },
         "participation_context_lines": {
-            "type": "slider", "default": 5, "label": "参与时读取上文(条)",
-            "min": 1, "max": 20, "step": 1, "section": "参与",
+            "type": "slider",
+            "default": 5,
+            "label": "参与时读取上文(条)",
+            "min": 1,
+            "max": 20,
+            "step": 1,
+            "section": "参与",
             "show_if": {"enable_participation": True},
             "help": "触发关键词参与时，读取最近 N 条群聊上文给 LLM 参考，减少乱说话。",
         },
         "min_participation_gap": {
-            "type": "slider", "default": 60, "label": "发言冷却(秒)",
-            "min": 10, "max": 600, "step": 10, "section": "参与",
+            "type": "slider",
+            "default": 60,
+            "label": "发言冷却(秒)",
+            "min": 10,
+            "max": 600,
+            "step": 10,
+            "section": "参与",
             "help": "每个群两次参与发言（含你自己发的消息）的最小时间间隔，防止刷屏。",
         },
         "participation_msg_gap": {
-            "type": "slider", "default": 5, "label": "消息条数间隔",
-            "min": 1, "max": 50, "step": 1, "section": "参与",
+            "type": "slider",
+            "default": 5,
+            "label": "消息条数间隔",
+            "min": 1,
+            "max": 50,
+            "step": 1,
+            "section": "参与",
             "help": "上一条发言（含你自己发的）之后，需攒够 N 条别人消息才能再次自动参与。防止群活跃时刷屏。",
         },
         # —— 关键词（手动补充） ——
         "keywords": {
-            "type": "text", "default": "", "label": "关键词（手动补充）",
+            "type": "text",
+            "default": "",
+            "label": "关键词（手动补充）",
             "section": "关键词",
             "help": (
                 "补充你关心的关键词，每行或逗号分隔。\n"
@@ -112,8 +139,13 @@ __plugin__ = {
         },
         # —— 关键词 ——
         "max_keywords": {
-            "type": "slider", "default": 20, "label": "关键词上限",
-            "min": 5, "max": 100, "step": 5, "section": "关键词",
+            "type": "slider",
+            "default": 20,
+            "label": "关键词上限",
+            "min": 5,
+            "max": 100,
+            "step": 5,
+            "section": "关键词",
             "help": "自动学习的关键词数量上限。超出时按参与热度淘汰低频关键词。",
         },
         "keyword_display": {
@@ -148,7 +180,7 @@ __plugin__ = {
                 "⚠ 注意：keywords 只从「上下文」中提取，不要从我的发言中提取；\\n"
                 "voice 字段（tone/habits/avg_words/punctuation/emoji_freq/style_prompt）只从我的发言中分析。\\n\\n"
                 "输出格式（JSON）：\n"
-                '{{\n'
+                "{{\n"
                 '  "voice": {{\n'
                 '    "tone": "语气特征（随意/正经/幽默/暴躁等）",\n'
                 '    "avg_words": 平均每句话字数（数字）,\n'
@@ -156,14 +188,17 @@ __plugin__ = {
                 '    "punctuation": "标点使用习惯",\n'
                 '    "emoji_freq": "emoji 使用频率（很少/偶尔/经常/几乎每条）",\n'
                 '    "style_prompt": "一段可读的中文文本，完整描述这个人的说话风格，供 LLM 模仿"\n'
-                '  }},\n'
+                "  }},\n"
                 '  "keywords": ["关键词1", "关键词2"],\\n'
                 '  "summary": "一句话总结当前兴趣"\n'
                 "}}"
             ),
             "label": "画像总结模板",
             "section": "身份模拟",
-            "help": "占位符：{context} = 上下文，{my_messages} = 我自己的发言。⚠ keywords 从上下文提取，voice 从我的发言提取。",
+            "help": (
+                "占位符：{context} = 上下文，{my_messages} = 我自己的发言。\n"
+                "⚠ keywords 从上下文提取，voice 从我的发言提取。"
+            ),
         },
     },
 }
@@ -217,7 +252,7 @@ def _format_profile_display(profile: dict) -> str:
     return "\n\n".join(parts)
 
 
-def _build_profile_display(kv) -> str:
+def _build_profile_display(kv: object) -> str:
     """跨所有活跃群构建画像展示，每个群独立标注。"""
     parts = []
     for gid in sorted(_active_groups):
@@ -230,7 +265,7 @@ def _build_profile_display(kv) -> str:
     return "\n\n".join(parts) if parts else "（尚未学习到任何画像，发送消息后自动生成）"
 
 
-def _build_keyword_display(kv, cfg=None) -> str:
+def _build_keyword_display(kv: object, cfg: object | None = None) -> str:
     """跨所有活跃群构建带热度的关键词展示。
 
     合并 profile.keyword_heat 和 cfg.keywords（手动补充）。
@@ -253,14 +288,14 @@ def _build_keyword_display(kv, cfg=None) -> str:
     return "\n\n".join(entries) if entries else "（暂无关键词）"
 
 
-def _group_allowed(chat_id: int, cfg) -> bool:
+def _group_allowed(chat_id: int, cfg: object) -> bool:
     """检查 chat_id 是否在目标群组中（白名单模式）。"""
     if cfg.target_groups and chat_id not in cfg.target_groups:
         return False
     return True
 
 
-def _update_config(ctx, **updates):
+def _update_config(ctx: object, **updates: object) -> None:
     """写入插件配置到持久存储（asyncio 防抖：最后一次调用后 5 秒合并写入）。
 
     ctx.config['x'] = y 不会持久化（ctx.config 是只读 property），
@@ -276,7 +311,7 @@ def _update_config(ctx, **updates):
     _config_debounce_task = asyncio.create_task(_flush_config_updates(ctx))
 
 
-async def _flush_config_updates(ctx):
+async def _flush_config_updates(ctx: object) -> None:
     """等待防抖窗口后，把累积的配置更新一次性写入 registry。"""
     await asyncio.sleep(_CONFIG_DEBOUNCE)
     updates = dict(_config_pending)
@@ -289,13 +324,13 @@ async def _flush_config_updates(ctx):
     reg.set_config(ctx.plugin_id, current)
 
 
-async def setup(ctx):
+async def setup(ctx: object) -> None:
     kv = ctx.kv
     init_ai(ctx.ai)
 
     # ── 处理器 1：自己发的消息 → 学习（仅限 target_groups 中的群）──
     @ctx.on_message(ctx.filters.outgoing, group=-11)
-    async def on_own_messages(client, message):
+    async def on_own_messages(client: object, message: object) -> None:
         try:
             cfg = parse_config(ctx.config)
             if not ctx.ai.available or not cfg.target_groups:
@@ -315,11 +350,9 @@ async def setup(ctx):
             _active_groups.add(chat_id)
             ctx.log.info(
                 "[学习] 收到手动消息: 群 %s | %s…",
-                chat_id, text[:60],
+                chat_id,
+                text[:60],
             )
-
-            fu = message.from_user
-            me_name = getattr(fu, "first_name", "") if fu else ""
 
             # 社交：回复了某人则记录
             if message.reply_to_message:
@@ -338,14 +371,19 @@ async def setup(ctx):
                 ctx_lines = get_recent_context(chat_id, cfg.max_context_lines or 5)
                 if ctx_lines:
                     trigger_text = "\n".join(ctx_lines)
-                    manual_kws = [kw.strip().lower() for kw in cfg.keywords.replace("\n", ",").split(",") if kw.strip()] if cfg.keywords else []
+                    manual_kws = (
+                        [kw.strip().lower() for kw in cfg.keywords.replace("\n", ",").split(",") if kw.strip()]
+                        if cfg.keywords
+                        else []
+                    )
                     hresult = update_manual_keyword_heat(chat_id, kv, trigger_text, extra_keywords=manual_kws)
                     _update_config(ctx, keyword_display=_build_keyword_display(kv, cfg))
                     reason = hresult.get("reason")
                     if reason:
                         ctx.log.info(
                             "[学习] 群 %s 手动热词跳过: %s",
-                            chat_id, reason,
+                            chat_id,
+                            reason,
                         )
                     else:
                         matched = hresult.get("matched", [])
@@ -364,7 +402,9 @@ async def setup(ctx):
             cnt = get_message_count(kv, chat_id)
             ctx.log.info(
                 "[学习] 群 %s 手动消息计数: %d/%d (当前/阈值)",
-                chat_id, cnt, cfg.summarize_gap,
+                chat_id,
+                cnt,
+                cfg.summarize_gap,
             )
             if cnt >= cfg.summarize_gap:
                 own_msgs = get_recent_own_messages(chat_id, cfg.summarize_gap)
@@ -373,20 +413,25 @@ async def setup(ctx):
                     if profile:
                         ctx.log.info(
                             "[学习] 群 %s 画像已更新: keywords=%s",
-                            chat_id, profile.get("keywords", []),
+                            chat_id,
+                            profile.get("keywords", []),
                         )
-                        _update_config(ctx, profile_display=_build_profile_display(kv), keyword_display=_build_keyword_display(kv, cfg))
+                        _update_config(
+                            ctx,
+                            profile_display=_build_profile_display(kv),
+                            keyword_display=_build_keyword_display(kv, cfg),
+                        )
                         reset_counter(chat_id, kv)
                         ctx.log.info(
                             "[学习] 群 %s 画像已更新，风格描述已写入 profile.voice.style_prompt",
                             chat_id,
                         )
-        except Exception:
-            ctx.log.error("[学习] on_own_messages 异常:\n%s", traceback.format_exc())
+        except Exception as e:
+            ctx.log.error("[学习] on_own_messages 异常:\n%s", e)
 
     # ── 处理器 2：所有人消息 → 全量缓冲 ──
     @ctx.on_message(~ctx.filters.outgoing, group=11)
-    async def on_all_messages(client, message):
+    async def on_all_messages(client: object, message: object) -> None:
         cfg = parse_config(ctx.config)
         if not ctx.ai.available:
             return
@@ -410,7 +455,7 @@ async def setup(ctx):
 
     # ── 处理器 3：判定是否参与 ──
     @ctx.on_message(ctx.filters.group & ctx.filters.text & ~ctx.filters.outgoing, group=12)
-    async def on_participate(client, message):
+    async def on_participate(client: object, message: object) -> None:
         cfg = parse_config(ctx.config)
         if not ctx.ai.available or not cfg.enable_participation:
             return
@@ -443,7 +488,9 @@ async def setup(ctx):
 
         ctx.log.info(
             "[学习] 群 %s 触发参与 (关键词: %s): %s…",
-            chat_id, matched_kw, text[:30],
+            chat_id,
+            matched_kw,
+            text[:30],
         )
         context_lines = get_context_lines(chat_id, cfg.participation_context_lines)
         _auto_sending_chats.add(chat_id)
@@ -458,7 +505,7 @@ async def setup(ctx):
             _update_config(ctx, keyword_display=_build_keyword_display(kv, cfg))
 
     # ── 定时兜底：检查未总结的群 ──
-    async def summary_tick():
+    async def summary_tick() -> None:
         cfg = parse_config(ctx.config)
         if not ctx.ai.available:
             return
@@ -469,26 +516,32 @@ async def setup(ctx):
                 if own_msgs:
                     profile = await summarize(chat_id, kv, cfg, own_msgs)
                     if profile:
-                        _update_config(ctx, profile_display=_build_profile_display(kv), keyword_display=_build_keyword_display(kv, cfg))
+                        _update_config(
+                            ctx,
+                            profile_display=_build_profile_display(kv),
+                            keyword_display=_build_keyword_display(kv, cfg),
+                        )
                         reset_counter(chat_id, kv)
 
     ctx.schedule(summary_tick, "interval", minutes=5, id="AI学习总结")
 
     # ── on_api 端点 ──
     @ctx.on_api("/status", methods=["GET"])
-    async def status_api(req):
+    async def status_api(req: object) -> dict:
         """返回插件当前运行状态。"""
         cfg = parse_config(ctx.config)
         groups_info = []
         for gid in sorted(_active_groups):
             profile = get_profile(gid, kv)
             cnt = get_message_count(kv, gid)
-            groups_info.append({
-                "chat_id": gid,
-                "message_count": cnt,
-                "has_profile": bool(profile and profile.get("ready")),
-                "keywords": (profile.get("keywords", []) if profile else [])[:10],
-            })
+            groups_info.append(
+                {
+                    "chat_id": gid,
+                    "message_count": cnt,
+                    "has_profile": bool(profile and profile.get("ready")),
+                    "keywords": (profile.get("keywords", []) if profile else [])[:10],
+                }
+            )
         return {
             "ai_available": ctx.ai.available,
             "ai_models": ctx.ai.available_models("text") if ctx.ai.available else [],
@@ -499,7 +552,7 @@ async def setup(ctx):
         }
 
     @ctx.on_api("/profile", methods=["GET"])
-    async def profile_api(req):
+    async def profile_api(req: object) -> dict:
         """返回指定群组的画像。"""
         chat_id = req.query.get("chat_id", "")
         if not chat_id:
@@ -522,7 +575,7 @@ async def setup(ctx):
         }
 
 
-async def teardown(ctx):
+async def teardown(ctx: object) -> None:
     global _config_debounce_task
     # 取消防抖定时器，但把累积的配置更新立即落盘，防止丢失最后一次展示更新
     if _config_debounce_task is not None and not _config_debounce_task.done():

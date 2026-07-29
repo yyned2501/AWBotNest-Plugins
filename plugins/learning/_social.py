@@ -11,12 +11,12 @@ _SAVE_KEY_TPL = "social:{}"  # social:<chat_id> → list
 _dirty_chats: set[int] = set()
 
 
-def _ensure(chat_id: int):
+def _ensure(chat_id: int) -> None:
     if chat_id not in _cache:
         _cache[chat_id] = {}
 
 
-def record(chat_id: int, user_id: int, name: str, kv):
+def record(chat_id: int, user_id: int, name: str, kv: object) -> None:
     """记录一次与 user 的互动。
 
     只更新内存缓存并标记脏位，不立即写 KV（延迟刷盘，由 flush() 统一落盘）。
@@ -37,7 +37,7 @@ def record(chat_id: int, user_id: int, name: str, kv):
     _dirty_chats.add(chat_id)
 
 
-async def flush(kv):
+async def flush(kv: object) -> None:
     """将脏缓存刷回 KV（teardown / 定时任务调用）。
 
     无脏数据时直接返回，避免无谓 IO。
@@ -49,18 +49,18 @@ async def flush(kv):
     _dirty_chats.clear()
 
 
-def get_frequent(chat_id: int, kv, min_count: int = 3) -> list[dict]:
+def get_frequent(chat_id: int, kv: object, min_count: int = 3) -> list[dict]:
     """获取聊天超过 min_count 次的活跃联系人。"""
     raw = _load(chat_id, kv)
     return [u for u in raw if u.get("count", 0) >= min_count]
 
 
-def get_all(chat_id: int, kv) -> list[dict]:
+def get_all(chat_id: int, kv: object) -> list[dict]:
     """获取该群的所有社交记录。"""
     return _load(chat_id, kv)
 
 
-def cross_group_frequent(kv, chat_ids: list[int], min_count: int = 3) -> dict[int, dict]:
+def cross_group_frequent(kv: object, chat_ids: list[int], min_count: int = 3) -> dict[int, dict]:
     """跨群汇总：返回 {user_id: {total_count, groups, name}}。"""
     summary: dict[int, dict] = {}
     for cid in chat_ids:
@@ -71,11 +71,10 @@ def cross_group_frequent(kv, chat_ids: list[int], min_count: int = 3) -> dict[in
             summary[uid]["total_count"] += u.get("count", 0)
             summary[uid]["groups"].add(cid)
     # 过滤低频
-    return {uid: info for uid, info in summary.items()
-            if info["total_count"] >= min_count}
+    return {uid: info for uid, info in summary.items() if info["total_count"] >= min_count}
 
 
-def _load(chat_id: int, kv) -> list[dict]:
+def _load(chat_id: int, kv: object) -> list[dict]:
     """从 kv 加载社交数据到缓存（如已缓存则跳过）。"""
     if chat_id not in _cache:
         raw = kv.get(_SAVE_KEY_TPL.format(chat_id), [])
@@ -83,12 +82,12 @@ def _load(chat_id: int, kv) -> list[dict]:
     return list(_cache[chat_id].values())
 
 
-def _persist(chat_id: int, kv):
+def _persist(chat_id: int, kv: object) -> None:
     """将缓存刷回 kv。"""
     raw = list(_cache.get(chat_id, {}).values())
     kv.set(_SAVE_KEY_TPL.format(chat_id), raw)
 
 
-def clear():
+def clear() -> None:
     _cache.clear()
     _dirty_chats.clear()

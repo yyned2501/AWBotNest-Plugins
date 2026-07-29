@@ -28,7 +28,7 @@ class GameState:
     def extract_deadline(text: str) -> datetime | None:
         """从消息提取结算时间，如「22:35左右」→ datetime"""
         text = str(text)
-        m = re.search(r'(\d{1,2})[:.](\d{1,2})\s*[左右前後以]', text)
+        m = re.search(r"(\d{1,2})[:.](\d{1,2})\s*[左右前後以]", text)
         if m:
             now = datetime.now()
             h, mi = int(m.group(1)), int(m.group(2))
@@ -45,19 +45,19 @@ class GameState:
         idx = text.find("参与口令")
         if idx >= 0:
             text = text[idx:]
-        m = re.findall(r'「(.+?)」', text)
+        m = re.findall(r"「(.+?)」", text)
         return m[:2] if len(m) >= 2 else []
 
     @staticmethod
     def extract_round(text: str) -> int:
         """从消息提取圈数，如「第3圈」→ 3"""
-        rm = re.search(r'第(\d+)圈', text)
+        rm = re.search(r"第(\d+)圈", text)
         return int(rm.group(1)) if rm else 0
 
     @staticmethod
     def extract_result(text: str) -> str | None:
         """从结算消息提取胜利口令"""
-        rm = re.search(r'口令「(.+?)」胜利', text)
+        rm = re.search(r"口令「(.+?)」胜利", text)
         return rm.group(1) if rm else None
 
     @staticmethod

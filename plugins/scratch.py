@@ -6,6 +6,8 @@
 # 赢一把自动在群里发 /scratch 连锁下一张；连续亏损自动停止，关闭插件再开重置。
 # =============================================================================
 
+from __future__ import annotations
+
 import asyncio
 import random
 import re
@@ -14,47 +16,63 @@ import time
 __plugin__ = {
     "name": "🎰天空刮奖",
     "id": "scratch",
-    "version": "1.6.0",
+    "version": "1.6.1",
     "author": "Yy",
     "description": "散财童子刮刮乐自动挂机。按钮点击+发送命令双重试，filter 层过滤 Bot+回复，每轮自动连锁。",
     "scope": "user",
     "config_schema": {
         "target_group": {
-            "type": "string", "default": "-1001326208894",
-            "label": "目标群组ID", "section": "基础",
+            "type": "string",
+            "default": "-1001326208894",
+            "label": "目标群组ID",
+            "section": "基础",
             "help": "Bot 所在群组，发 /scratch 和监听都在此群。",
         },
         "bot_id": {
-            "type": "number", "default": 0,
-            "label": "Bot 的 Telegram ID", "section": "基础",
+            "type": "number",
+            "default": 0,
+            "label": "Bot 的 Telegram ID",
+            "section": "基础",
             "help": "@lucifer_hdsky_bot 的数字 ID。填 0 = 不按 Bot 过滤（会处理群内所有刮刮乐）。",
-            "min": 0, "max": 9999999999,
+            "min": 0,
+            "max": 9999999999,
         },
         "click_delay": {
-            "type": "slider", "default": 0.6,
-            "label": "点击间隔(秒)", "section": "防封",
-            "min": 0.3, "max": 2.0, "step": 0.1,
+            "type": "slider",
+            "default": 0.6,
+            "label": "点击间隔(秒)",
+            "section": "防封",
+            "min": 0.3,
+            "max": 2.0,
+            "step": 0.1,
             "help": "每格点击之间的等待时间，加 ±20% 随机抖动。",
         },
         "card_cooldown": {
-            "type": "slider", "default": 5,
-            "label": "卡间冷却(秒)", "section": "防封",
-            "min": 2, "max": 30, "step": 1,
+            "type": "slider",
+            "default": 5,
+            "label": "卡间冷却(秒)",
+            "section": "防封",
+            "min": 2,
+            "max": 30,
+            "step": 1,
             "help": "上一张结束后等 N 秒再发 /scratch，随机加 0~3 秒。",
         },
         "max_consecutive_loss": {
-            "type": "number", "default": 5,
-            "label": "连续亏损自动停止", "section": "策略",
+            "type": "number",
+            "default": 5,
+            "label": "连续亏损自动停止",
+            "section": "策略",
             "help": "连续 N 张净亏损后自动停止刮奖。关闭插件再开即可重置。",
-            "min": 1, "max": 20,
+            "min": 1,
+            "max": 20,
         },
     },
 }
 
 # ── 模块级状态 ──────────────────────────────────────
-_playing: bool = False           # 防止同时玩多张卡
-_consecutive_loss: int = 0       # 连续亏损计数
-_auto_stopped: bool = False      # 连续亏损后自动停止
+_playing: bool = False  # 防止同时玩多张卡
+_consecutive_loss: int = 0  # 连续亏损计数
+_auto_stopped: bool = False  # 连续亏损后自动停止
 
 # 去重
 _seen: dict[str, float] = {}
@@ -62,6 +80,7 @@ _SEEN_TTL: float = 300
 
 
 # ── 工具函数 ────────────────────────────────────────
+
 
 def _parse_group(raw: str) -> int | None:
     raw = (raw or "").strip()
@@ -73,7 +92,7 @@ def _parse_group(raw: str) -> int | None:
         return None
 
 
-def _is_scratch_card(message) -> bool:
+def _is_scratch_card(message: object) -> bool:
     text = message.text or message.caption or ""
     if "刮刮乐" not in text:
         return False
@@ -88,7 +107,7 @@ def _is_scratch_card(message) -> bool:
     return False
 
 
-def _parse_card(message) -> tuple:
+def _parse_card(message: object) -> tuple:
     markup = message.reply_markup
     card_id: int | None = None
     cells: dict[int, tuple[int, int]] = {}
@@ -140,7 +159,9 @@ def _prune_seen() -> None:
 # ── 重试工具 ────────────────────────────────────────
 
 
-async def _click_btn(ctx, client, chat_id, msg_id, row, col, label="格子") -> str | None:
+async def _click_btn(
+    ctx: object, client: object, chat_id: int, msg_id: int, row: int, col: int, label: str = "格子"
+) -> str | None:
     """点击按钮，带重试。返回 callback_answer.message 文本（含"获得 X 银元"），失败返回 None。"""
     for attempt in range(3):
         try:
@@ -177,7 +198,9 @@ async def _click_btn(ctx, client, chat_id, msg_id, row, col, label="格子") -> 
                 if attempt < 2:
                     ctx.log.warning(
                         "点击%s失败 (attempt %d/3): %s，1s后重试",
-                        label, attempt + 1, e,
+                        label,
+                        attempt + 1,
+                        e,
                     )
                     await asyncio.sleep(1)
                 else:
@@ -185,7 +208,7 @@ async def _click_btn(ctx, client, chat_id, msg_id, row, col, label="格子") -> 
     return None
 
 
-async def _send_scratch(ctx, chat_id, label="") -> bool:
+async def _send_scratch(ctx: object, chat_id: int, label: str = "") -> bool:
     """发送 /scratch，带重试。返回 True=成功。"""
     for attempt in range(3):
         try:
@@ -202,7 +225,9 @@ async def _send_scratch(ctx, chat_id, label="") -> bool:
             else:
                 ctx.log.warning(
                     "发送 /scratch 失败 (attempt %d/3)%s: %s",
-                    attempt + 1, label, e,
+                    attempt + 1,
+                    label,
+                    e,
                 )
                 if attempt < 2:
                     await asyncio.sleep(2)
@@ -211,7 +236,8 @@ async def _send_scratch(ctx, chat_id, label="") -> bool:
 
 # ── 刮奖策略 ────────────────────────────────────────
 
-async def _play_card(ctx, client, message, cfg) -> dict | None:
+
+async def _play_card(ctx: object, client: object, message: object, cfg: dict) -> dict | None:
     chat_id = message.chat.id
     msg_id = message.id
     chat_title = getattr(message.chat, "title", "") if message.chat else ""
@@ -287,7 +313,12 @@ async def _play_card(ctx, client, message, cfg) -> dict | None:
 
         ctx.log.info(
             "卡#%s 格%s %d/9 获得%d 累计%d 成本%d",
-            card_id, cell_num, cells_revealed, cell_val, cum_payout, cells_revealed * 100,
+            card_id,
+            cell_num,
+            cells_revealed,
+            cell_val,
+            cum_payout,
+            cells_revealed * 100,
         )
 
         if cum_payout >= cells_revealed * 100:
@@ -307,7 +338,9 @@ async def _play_card(ctx, client, message, cfg) -> dict | None:
                 f"   累计{cum_payout} | 成本{cells_revealed * 100} | 净{net:+d}\n"
                 f"   ✅ 回本就停\n\n"
                 f"🔗 消息链接\n   {msg_link}",
-                level="success", category="回本", account=client,
+                level="success",
+                category="回本",
+                account=client,
             )
             return {
                 "card_id": card_id,
@@ -325,7 +358,12 @@ async def _play_card(ctx, client, message, cfg) -> dict | None:
 
     ctx.log.info(
         "卡#%s %s %d格 累计%d 成本%d 净%d",
-        card_id, tag, cells_revealed, cum_payout, cost, net,
+        card_id,
+        tag,
+        cells_revealed,
+        cum_payout,
+        cost,
+        net,
     )
 
     await ctx.notify(
@@ -335,7 +373,8 @@ async def _play_card(ctx, client, message, cfg) -> dict | None:
         f"   {emoji} {tag}\n\n"
         f"🔗 消息链接\n   {msg_link}",
         level="success" if net >= 0 else "warning",
-        category=tag, account=client,
+        category=tag,
+        account=client,
     )
     return {
         "card_id": card_id,
@@ -348,7 +387,8 @@ async def _play_card(ctx, client, message, cfg) -> dict | None:
 
 # ── setup / teardown ────────────────────────────────
 
-async def setup(ctx):
+
+async def setup(ctx: object) -> None:
     global _playing, _consecutive_loss, _auto_stopped
     _playing = False
     _auto_stopped = False
@@ -371,16 +411,18 @@ async def setup(ctx):
         ctx.log.warning("bot_id=0，将处理目标群内所有刮刮乐（不按 Bot 过滤）")
 
     if owner_id:
-        def _reply_to_me(_, __, message):
+
+        def _reply_to_me(_: object, __: object, message: object) -> bool:
             rt = getattr(message, "reply_to_message", None)
             return bool(rt and getattr(rt, "from_user", None) and rt.from_user.id == owner_id)
+
         msg_filter = msg_filter & ctx.filters.create(_reply_to_me)
         ctx.log.info("回复过滤已启用 owner_id=%s", owner_id)
     else:
         ctx.log.warning("ctx.owner_id=0，不检查回复")
 
     @ctx.on_message(msg_filter, group=-9)
-    async def on_scratch_card(client, message):
+    async def on_scratch_card(client: object, message: object) -> None:
         global _playing, _consecutive_loss, _auto_stopped
 
         tg = _parse_group(cfg.get("target_group", ""))
@@ -422,16 +464,15 @@ async def setup(ctx):
             if _consecutive_loss >= max_loss:
                 _auto_stopped = True
                 ctx.log.warning("🛑 连续亏损达上限，自动停止")
-                chat_title = (
-                    getattr(message.chat, "title", "")
-                    if message.chat else ""
-                )
+                chat_title = getattr(message.chat, "title", "") if message.chat else ""
                 await ctx.notify(
                     f"🛑 天空刮奖已自动停止\n\n"
                     f"🏠 群组\n   {chat_title}\n   群ID: {tg}\n\n"
                     f"⚠️ 原因\n   连续 {_consecutive_loss} 张亏损\n\n"
                     f"💡 重新开始\n   在插件管理关闭再开启「🎰天空刮奖」",
-                    level="warning", category="自动停止", account=client,
+                    level="warning",
+                    category="自动停止",
+                    account=client,
                 )
                 return  # 不连锁
 
@@ -449,5 +490,5 @@ async def setup(ctx):
             _playing = False
 
 
-async def teardown(ctx):
+async def teardown(ctx: object) -> None:
     ctx.log.info("天空刮奖插件已停用")

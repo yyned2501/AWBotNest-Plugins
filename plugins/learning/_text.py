@@ -4,22 +4,70 @@
 # =============================================================================
 
 # 中文标点/分隔符集合
-DELIMITERS = set(
-    ' \t\n\r,，。！？、；：""\'\''
-    '（）()'
-    '[]【】'
-    '/\\|@#'
-    '$%^&*+=~`<>《》'
-)
+DELIMITERS = set(" \t\n\r,，。！？、；：\"\"''（）()[]【】/\\|@#$%^&*+=~`<>《》")
 
 # 停用词表
 _STOPWORDS = {
-    "的", "了", "在", "是", "我", "有", "和", "就", "不", "人", "都", "一",
-    "个", "上", "也", "很", "到", "说", "要", "去", "你", "会", "着",
-    "没有", "看", "好", "自己", "这", "他", "她", "它", "们", "那",
-    "什么", "怎么", "为啥", "吗", "呢", "啊", "吧", "嗯", "哦",
-    "the", "a", "an", "is", "are", "was", "were", "it", "this",
-    "that", "to", "in", "of", "for", "on", "and", "or", "with",
+    "的",
+    "了",
+    "在",
+    "是",
+    "我",
+    "有",
+    "和",
+    "就",
+    "不",
+    "人",
+    "都",
+    "一",
+    "个",
+    "上",
+    "也",
+    "很",
+    "到",
+    "说",
+    "要",
+    "去",
+    "你",
+    "会",
+    "着",
+    "没有",
+    "看",
+    "好",
+    "自己",
+    "这",
+    "他",
+    "她",
+    "它",
+    "们",
+    "那",
+    "什么",
+    "怎么",
+    "为啥",
+    "吗",
+    "呢",
+    "啊",
+    "吧",
+    "嗯",
+    "哦",
+    "the",
+    "a",
+    "an",
+    "is",
+    "are",
+    "was",
+    "were",
+    "it",
+    "this",
+    "that",
+    "to",
+    "in",
+    "of",
+    "for",
+    "on",
+    "and",
+    "or",
+    "with",
 }
 
 
@@ -34,12 +82,12 @@ def extract_keywords(text: str) -> set[str]:
     for ch in text:
         if ch in DELIMITERS:
             if current:
-                tokens.append(''.join(current))
+                tokens.append("".join(current))
                 current = []
         else:
             current.append(ch)
     if current:
-        tokens.append(''.join(current))
+        tokens.append("".join(current))
 
     result: set[str] = set()
     for t in tokens:

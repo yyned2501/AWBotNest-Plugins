@@ -1,28 +1,28 @@
 {
   "battleroyale": {
     "name": "大逃杀助手",
-    "version": "1.0.1",
+    "version": "1.0.2",
     "author": "Yy",
     "description": "监听 @NextFunBot 大逃杀游戏，自动跟踪投票统计、每圈结算通知、自动下注（以少胜多规则）。",
     "path": "plugins/battleroyale/"
   },
   "skyRedPacket": {
     "name": "天空红包",
-    "version": "2.3.0",
+    "version": "2.4.0",
     "author": "Yy",
-    "description": "天空小秘（bot 8907007783）拼手气红包自动抢：追踪群内最近发言数，已发言快抢、未发言慢抢，自适应延迟 + 随机抖动防检测。",
+    "description": "天空小秘（bot 8907007783）拼手气红包自动抢：按 msgid 追踪最近 20 位发言人，已发言快抢、未发言慢抢，自适应延迟 + 随机抖动防检测。",
     "path": "plugins/skyRedPacket/"
   },
   "learning": {
     "name": "智能学习",
-    "version": "3.1.0",
+    "version": "3.1.1",
     "author": "Yy",
     "description": "学习你的聊天偏好和说话风格，在匹配关键词的群聊中智能参与对话。冷启动：未学到偏好前不参与。",
     "path": "plugins/learning/"
   },
   "scratch": {
     "name": "天空刮奖",
-    "version": "1.6.0",
+    "version": "1.6.1",
     "author": "Yy",
     "description": "散财童子刮刮乐自动挂机。回调文本直接累加奖金（无需等消息编辑），双重试，filter 层 Bot+回复过滤。",
     "path": "plugins/scratch.py"

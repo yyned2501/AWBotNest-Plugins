@@ -6,7 +6,7 @@
 _ai = None
 
 
-def init_ai(ai):
+def init_ai(ai: object) -> None:
     """初始化 AI 实例（由 setup(ctx) 调用）。"""
     global _ai
     _ai = ai

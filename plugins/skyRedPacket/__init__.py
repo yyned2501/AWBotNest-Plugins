@@ -6,12 +6,12 @@
 # 消息含「拼手气红包」关键字，内联键盘有「抢红包」按钮，
 # 点击按钮抢红包。
 #
-# 策略（v2.3）：
-# 1. 追踪用户自己的发言，按群维护最近 30 秒滚动发言窗口
+# 策略（v2.4）：
+# 1. 追踪群内所有发言，按 msgid 维护最近 20 位不重复发言者
 # 2. 检测到拼手气红包时：
-#    - 最近 30 秒发言条数 >= recent_msg_count → 已发言 → 等 spoken_delay 秒
-#    - 否则 → 未发言 → 等 no_speech_delay 秒
-#    - 再叠加 random.uniform(0, random_delay_max) 随机延迟，避免规律被检测
+#    - 是最近 20 位发言人之一 → 已发言 → 等 spoken_delay 秒
+#    - 否则 → 未发言 → 等 no_speech_delay 秒（等 30 秒限制解除）
+#    - 再叠加 random.uniform(0, random_delay_max) 随机延迟
 # 3. 点击「抢红包」按钮并通知结果
 # 4. 去重缓存持久化到 ctx.kv，热重载后不重复抢包
 # =============================================================================
@@ -25,12 +25,14 @@ import time
 __plugin__ = {
     "name": "天空红包",
     "id": "skyRedPacket",
-    "version": "2.3.0",
+    "version": "2.4.0",
     "author": "Yy",
-    "description": "天空小秘（bot 8907007783）拼手气红包自动抢：追踪群内最近发言数，"
+    "description": "天空小秘（bot 8907007783）拼手气红包自动抢：按 msgid 追踪最近 20 位发言人，"
     "已发言快抢、未发言慢抢，自适应延迟 + 随机抖动防检测。",
     "scope": "user",
     "changelog": (
+        "v2.4.0 更新内容：\n"
+        "- 发言判断改为按 msgid 追踪最近 20 位发言人，不再用时间窗口\n"
         "v2.3.0 更新内容：\n"
         "- 项目重命名为 skyRedPacket，从单文件改为目录插件\n"
         "v2.2.0 更新内容：\n"
@@ -49,9 +51,9 @@ __plugin__ = {
         "recent_msg_count": {
             "type": "number",
             "default": 20,
-            "label": "最近发言条数",
+            "label": "最近发言人数",
             "section": "策略",
-            "help": "最近30秒内发言条数阈值，低于此视为未发言。",
+            "help": "按 msgid 追踪最近 N 位不重复发言人。红包前 30 秒仅限最近 20 位领取。",
         },
         "no_speech_delay": {
             "type": "slider",
@@ -88,14 +90,12 @@ __plugin__ = {
 
 BOT_ID = 8907007783
 _CLICKED_TTL = 3600
-_SPEECH_WINDOW = 30  # 发言统计滚动窗口（秒）
-_SPEECH_TTL = 300  # 发言记录保留时长，整键过期清理（秒）
 _KV_CLICKED_PREFIX = "clicked:"
 
 # 去重缓存（内存级，启动时从 ctx.kv 恢复）
 _clicked: dict[str, float] = {}
-# 发言日志："owner_id:chat_id" -> 发言时间戳列表（仅内存，无需持久化）
-_speech_log: dict[str, list[float]] = {}
+# 发言追踪："chat_id" -> 有序列表 [user_id, ...]，按接收顺序保留最近 N 位不重复发言人
+_speakers: dict[int, list[int]] = {}
 
 
 def _parse_groups(raw: str) -> list[int]:
@@ -141,29 +141,23 @@ def _load_clicked_from_kv(ctx: object) -> dict[str, float]:
     return clicked
 
 
-def _record_speech(owner_id: int, chat_id: int) -> None:
-    """记录一条发言时间戳，并裁剪 30 秒窗口外的旧记录。"""
-    now = time.time()
-    key = f"{owner_id}:{chat_id}"
-    stamps = _speech_log.get(key, [])
-    stamps.append(now)
-    cutoff = now - _SPEECH_WINDOW
-    _speech_log[key] = [ts for ts in stamps if ts >= cutoff]
+def _record_speaker(chat_id: int, user_id: int, max_speakers: int = 20) -> None:
+    """记录一条消息发送者，按 msgid 顺序维护最近 max_speakers 位不重复发言人。"""
+    speakers = _speakers.setdefault(chat_id, [])
+    # 如果已存在，先移除旧位置
+    if user_id in speakers:
+        speakers.remove(user_id)
+    # 追加到末尾（最新发言）
+    speakers.append(user_id)
+    # 裁剪超出部分
+    if len(speakers) > max_speakers:
+        speakers[:] = speakers[-max_speakers:]
 
 
-def _prune_speech_log() -> None:
-    """清理过期发言记录（窗口内已无记录且超过保留时长的键整体删除）。"""
-    now = time.time()
-    stale = [k for k, stamps in _speech_log.items() if not stamps or now - stamps[-1] > _SPEECH_TTL]
-    for k in stale:
-        _speech_log.pop(k, None)
-
-
-def _count_recent_speech(owner_id: int, chat_id: int) -> int:
-    """统计最近 _SPEECH_WINDOW 窗口内的发言条数。"""
-    cutoff = time.time() - _SPEECH_WINDOW
-    stamps = _speech_log.get(f"{owner_id}:{chat_id}", [])
-    return sum(1 for ts in stamps if ts >= cutoff)
+def _is_recent_speaker(chat_id: int, user_id: int, threshold: int = 20) -> bool:
+    """判断 user_id 是否在最近 threshold 位发言人中。"""
+    speakers = _speakers.get(chat_id, [])
+    return user_id in speakers[-threshold:]
 
 
 def _find_snatch_button(message: object) -> tuple[int, int] | None:
@@ -199,20 +193,26 @@ async def setup(ctx: object) -> None:
     _prune_clicked_kv(ctx)
     ctx.log.info("从 kv 恢复 %d 条去重记录", len(_clicked))
 
-    # ─── 发言追踪 Handler（用户自己的 outgoing 消息）────────────────
+    # ─── 发言追踪 Handler（群内所有消息，不限于自己）────────────────
     @ctx.on_message(
-        ctx.filters.outgoing & ctx.filters.text,
+        ctx.filters.text,
         group=-10,
     )
-    async def track_outgoing_speech(client: object, message: object) -> None:
-        """追踪用户自己的发言，按群维护滚动发言窗口。"""
+    async def track_speakers(client: object, message: object) -> None:
+        """追踪群内所有消息发送者，按 msgid 维护最近发言人列表。"""
         chat = getattr(message, "chat", None)
         chat_id = getattr(chat, "id", 0)
         if chat_id >= 0:
-            return  # 只追踪群聊，私聊不计入
-        owner_id = getattr(client, "_owner_id", 0)
-        _record_speech(owner_id, chat_id)
-        _prune_speech_log()
+            return  # 只追踪群聊
+        # 只追踪配置的群组
+        groups = _parse_groups(cfg.get("enabled_groups", ""))
+        if groups and chat_id not in groups:
+            return
+        fu = message.from_user
+        if not fu or fu.is_bot:
+            return
+        threshold = int(cfg.get("recent_msg_count", 20))
+        _record_speaker(chat_id, fu.id, threshold)
 
     # ─── 抢红包 Handler ────────────────────────────────
     @ctx.on_message(
@@ -243,10 +243,11 @@ async def setup(ctx: object) -> None:
         _clicked[key] = time.time()
         ctx.kv.set(f"{_KV_CLICKED_PREFIX}{key}", time.time())
 
-        # ── 自适应延迟：按最近发言数决定快抢/慢抢 ──
-        threshold = float(cfg.get("recent_msg_count", 20))
-        recent = _count_recent_speech(owner_id, chat_id)
-        if recent >= threshold:
+        # ── 自适应延迟：按是否为最近发言人来决定快抢/慢抢 ──
+        owner_id = getattr(client, "_owner_id", 0)
+        threshold = int(cfg.get("recent_msg_count", 20))
+        is_recent = _is_recent_speaker(chat_id, owner_id, threshold)
+        if is_recent:
             base_delay = float(cfg.get("spoken_delay", 1))
             speech_state = "已发言"
         else:
@@ -261,8 +262,7 @@ async def setup(ctx: object) -> None:
         try:
             if delay > 0:
                 ctx.log.info(
-                    "最近30秒发言%d条（%s），等待 %.1fs 后抢 chat=%s msg=%s",
-                    recent,
+                    "最近发言人中%s，等待 %.1fs 后抢 chat=%s msg=%s",
                     speech_state,
                     delay,
                     chat_id,

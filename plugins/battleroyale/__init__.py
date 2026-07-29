@@ -13,7 +13,6 @@
 from __future__ import annotations
 
 import asyncio
-import traceback
 from datetime import datetime
 
 from ._bettor import AutoBettor
@@ -25,54 +24,68 @@ _loop = None
 __plugin__ = {
     "name": "大逃杀助手",
     "id": "battleroyale",
-    "version": "1.0.1",
+    "version": "1.0.2",
     "author": "Yy",
-    "description": (
-        "监听 @NextFunBot 大逃杀游戏，自动跟踪投票统计、"
-        "每圈结算通知、自动下注（以少胜多规则）。"
-    ),
+    "description": ("监听 @NextFunBot 大逃杀游戏，自动跟踪投票统计、每圈结算通知、自动下注（以少胜多规则）。"),
     "scope": "user",
     "default_enabled": False,
     "render_mode": "vue",
     "config_schema": {
         # —— 监听 ——
         "chat_id": {
-            "type": "string", "default": "", "label": "监听群组",
+            "type": "string",
+            "default": "",
+            "label": "监听群组",
             "section": "监听",
             "help": "监听的群组 chat_id（如 -1003808371287）",
         },
         "bot_id": {
-            "type": "number", "default": 8835151149, "label": "游戏 Bot ID",
+            "type": "number",
+            "default": 8835151149,
+            "label": "游戏 Bot ID",
             "section": "监听",
             "help": "@NextFunBot 的 user_id",
         },
         # —— 自动下注 ——
         "auto_bet": {
-            "type": "boolean", "default": True, "label": "启用自动下注",
+            "type": "boolean",
+            "default": True,
+            "label": "启用自动下注",
             "section": "自动下注",
         },
         "bet_timing": {
-            "type": "slider", "default": 5, "min": 0, "max": 30, "step": 1,
-            "label": "结算前下注(秒)", "section": "自动下注",
+            "type": "slider",
+            "default": 5,
+            "min": 0,
+            "max": 30,
+            "step": 1,
+            "label": "结算前下注(秒)",
+            "section": "自动下注",
             "show_if": {"auto_bet": True},
             "help": "距结算多少秒时下注。0=结算时刻。",
         },
         "bet_strategy": {
-            "type": "select", "default": "少",
+            "type": "select",
+            "default": "少",
             "options": [
                 {"value": "少", "label": "人少（以少胜多规则）"},
                 {"value": "多", "label": "人多（跟风策略）"},
             ],
-            "label": "下注策略", "section": "自动下注",
+            "label": "下注策略",
+            "section": "自动下注",
             "show_if": {"auto_bet": True},
         },
         # —— 通知 ——
         "notify_round": {
-            "type": "boolean", "default": True, "label": "每圈结算通知",
+            "type": "boolean",
+            "default": True,
+            "label": "每圈结算通知",
             "section": "通知",
         },
         "notify_summary": {
-            "type": "boolean", "default": True, "label": "游戏结束总结",
+            "type": "boolean",
+            "default": True,
+            "label": "游戏结束总结",
             "section": "通知",
         },
     },
@@ -97,7 +110,8 @@ def _get_chat_id(cfg: dict) -> int | None:
 
 # ── 启动恢复扫描 ──
 
-async def _resume_game(ctx):
+
+async def _resume_game(ctx: object) -> None:
     """启动时扫描历史消息，恢复进行中的游戏状态"""
     global _state, _monitored_keywords
     cfg = ctx.config
@@ -154,7 +168,8 @@ async def _resume_game(ctx):
                     _monitored_keywords = list(options)
                     ctx.log.info(
                         "[启动] 恢复游戏第%u圈，距结算%.0f秒",
-                        _state.round, (deadline - now).total_seconds(),
+                        _state.round,
+                        (deadline - now).total_seconds(),
                     )
                     if cfg.get("auto_bet", True):
                         bettor = AutoBettor(_state, ctx)
@@ -199,7 +214,7 @@ async def _resume_game(ctx):
         ctx.log.error("[启动] 恢复失败: %s", e, exc_info=True)
 
 
-async def _startup_scan(ctx):
+async def _startup_scan(ctx: object) -> None:
     """等待 userbot 就绪后启动恢复扫描"""
     for _ in range(60):
         if ctx.user and ctx.user.is_connected:
@@ -212,7 +227,8 @@ async def _startup_scan(ctx):
 
 # ── 消息处理器 ──
 
-async def setup(ctx):
+
+async def setup(ctx: object) -> None:
     global _state, _monitored_keywords
 
     # ── 启动恢复扫描 ──
@@ -220,7 +236,7 @@ async def setup(ctx):
 
     # ── 处理器 1：游戏 Bot 消息（游戏启动/结算/结束）──
     @ctx.on_message(ctx.filters.text, group=0)
-    async def game_handler(client, message):
+    async def game_handler(client: object, message: object) -> None:
         global _state, _monitored_keywords
         cfg = ctx.config
         chat_id = _get_chat_id(cfg)
@@ -247,14 +263,16 @@ async def setup(ctx):
             _monitored_keywords = list(state.options)
             ctx.log.info(
                 "[游戏] 第1圈 options=%s deadline=%s",
-                state.options, state.deadline,
+                state.options,
+                state.deadline,
             )
 
             opt_str = " / ".join(state.options)
             dl_str = state.deadline.strftime("%H:%M") if state.deadline else "?"
             await ctx.notify(
                 f"大逃杀游戏开始!\n选项: {opt_str}\n首圈结算: {dl_str}",
-                level="info", category="大逃杀",
+                level="info",
+                category="大逃杀",
             )
 
             if state.deadline and cfg.get("auto_bet", True):
@@ -274,12 +292,16 @@ async def setup(ctx):
             mutation = "基因突变" if GameState.has_gene_mutation(text) else ""
             ctx.log.info(
                 "[游戏] 结算 第%u圈 结果=%s%s",
-                state.round, result, f" {mutation}" if mutation else "",
+                state.round,
+                result,
+                f" {mutation}" if mutation else "",
             )
 
             vote_detail = ", ".join(
-                f"{k}={len(v)}" for k, v in sorted(
-                    state.votes.items(), key=lambda x: -len(x[1]),
+                f"{k}={len(v)}"
+                for k, v in sorted(
+                    state.votes.items(),
+                    key=lambda x: -len(x[1]),
                 )
             )
 
@@ -295,9 +317,7 @@ async def setup(ctx):
 
             if cfg.get("notify_round", True):
                 await ctx.notify(
-                    f"第{state.round}圈结算 {mutation}\n"
-                    f"结果: {result}\n"
-                    f"投票: {vote_detail}",
+                    f"第{state.round}圈结算 {mutation}\n结果: {result}\n投票: {vote_detail}",
                     level="info" if not mutation else "warning",
                     category="大逃杀",
                 )
@@ -307,7 +327,11 @@ async def setup(ctx):
             next_options = GameState.extract_options(text)
 
             state.reset_round()
-            state.round = GameState.extract_round(text) + 1 if GameState.extract_round(text) else (state.round + 1 if state.round else 1)
+            state.round = (
+                GameState.extract_round(text) + 1
+                if GameState.extract_round(text)
+                else (state.round + 1 if state.round else 1)
+            )
             state.target_msg_id = message.id
             state.deadline = next_deadline
             state.options = next_options
@@ -333,13 +357,13 @@ async def setup(ctx):
 
             if cfg.get("notify_summary", True):
                 summary_lines = "\n".join(
-                    f"  · 第{h['round']}圈: {h['result']} "
-                    f"投票: {', '.join(f'{k}={v}' for k, v in h['votes'].items())}"
+                    f"  · 第{h['round']}圈: {h['result']} 投票: {', '.join(f'{k}={v}' for k, v in h['votes'].items())}"
                     for h in state.history
                 )
                 await ctx.notify(
                     f"游戏结束!\n共 {total_rounds} 圈\n{summary_lines}",
-                    level="info", category="大逃杀",
+                    level="info",
+                    category="大逃杀",
                 )
 
             state.reset_all()
@@ -347,7 +371,7 @@ async def setup(ctx):
 
     # ── 处理器 2：投票跟踪 ──
     @ctx.on_message(ctx.filters.text, group=1)
-    async def vote_tracker(client, message):
+    async def vote_tracker(client: object, message: object) -> None:
         global _state, _monitored_keywords
         cfg = ctx.config
         chat_id = _get_chat_id(cfg)
@@ -376,42 +400,44 @@ async def setup(ctx):
         state.votes.setdefault(text, set()).add(uid)
         ctx.log.info(
             "[投票] %s(%s) → %s  当前: %s",
-            fu.first_name or "?", uid, text,
+            fu.first_name or "?",
+            uid,
+            text,
             {k: len(v) for k, v in state.votes.items()},
         )
 
     # ── on_api 端点（setup 顶层注册，插件启用即可用，不依赖是否收到过投票）──
     @ctx.on_api
-    async def api_handler(req):
+    async def api_handler(req: object) -> dict:
         cfg = ctx.config
-        path = req.method + ' ' + req.path.rstrip('/')
-        if path == 'GET /status':
+        path = req.method + " " + req.path.rstrip("/")
+        if path == "GET /status":
             return _state.to_dict()
-        if path == 'GET /history':
+        if path == "GET /history":
             return _state.history
-        if path == 'POST /force_bet':
+        if path == "POST /force_bet":
             if not _state.is_active or not _state.options:
-                return {'ok': False, 'message': '没有进行中的游戏'}
+                return {"ok": False, "message": "没有进行中的游戏"}
             if _state.bet_placed:
-                return {'ok': False, 'message': '本圈已下注'}
+                return {"ok": False, "message": "本圈已下注"}
             chat_id = _get_chat_id(cfg)
             if not chat_id:
-                return {'ok': False, 'message': '未配置群组'}
-            strategy = cfg.get('bet_strategy', '少')
+                return {"ok": False, "message": "未配置群组"}
+            strategy = cfg.get("bet_strategy", "少")
             bettor = AutoBettor(_state, ctx)
             target = bettor.determine_target(strategy)
             if not target:
-                return {'ok': False, 'message': '无法确定下注目标'}
+                return {"ok": False, "message": "无法确定下注目标"}
             await bettor.execute_bet(target, chat_id)
-            return {'ok': True, 'message': f'已下注「{target}」'}
-        if path == 'POST /reset':
+            return {"ok": True, "message": f"已下注「{target}」"}
+        if path == "POST /reset":
             _state.reset_all()
             _monitored_keywords.clear()
-            return {'ok': True, 'message': '游戏状态已重置'}
-        return {'ok': False, 'message': '未知路径'}
+            return {"ok": True, "message": "游戏状态已重置"}
+        return {"ok": False, "message": "未知路径"}
 
 
-async def teardown(ctx):
+async def teardown(ctx: object) -> None:
     global _state, _monitored_keywords
     if _state._task and not _state._task.done():
         _state._task.cancel()
