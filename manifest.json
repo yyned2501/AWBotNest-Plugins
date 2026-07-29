@@ -6,12 +6,12 @@
     "description": "监听 @NextFunBot 大逃杀游戏，自动跟踪投票统计、每圈结算通知、自动下注（以少胜多规则）。",
     "path": "plugins/battleroyale/"
   },
-  "hdsky": {
+  "skyRedPacket": {
     "name": "天空红包",
-    "version": "2.2.0",
+    "version": "2.3.0",
     "author": "Yy",
-    "description": "天空小秘（bot 8907007783）拼手气红包自动抢：检测「抢红包」按钮即时点击，遇10秒限制自动等够重试。",
-    "path": "plugins/hdsky.py"
+    "description": "天空小秘（bot 8907007783）拼手气红包自动抢：追踪群内最近发言数，已发言快抢、未发言慢抢，自适应延迟 + 随机抖动防检测。",
+    "path": "plugins/skyRedPacket/"
   },
   "learning": {
     "name": "智能学习",

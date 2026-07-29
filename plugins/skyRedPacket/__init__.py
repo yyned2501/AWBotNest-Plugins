@@ -1,12 +1,12 @@
 # =============================================================================
-# AWBotNest 插件：天空红包（hdsky）
+# AWBotNest 插件：天空红包（skyRedPacket）
 #
 # 由 tgbot-n/plugins/user/red_packet/hdsky.py 迁移适配。
 # 天空小秘（bot ID 8907007783）在群组发拼手气红包，
 # 消息含「拼手气红包」关键字，内联键盘有「抢红包」按钮，
 # 点击按钮抢红包。
 #
-# 策略（v2.2）：
+# 策略（v2.3）：
 # 1. 追踪用户自己的发言，按群维护最近 30 秒滚动发言窗口
 # 2. 检测到拼手气红包时：
 #    - 最近 30 秒发言条数 >= recent_msg_count → 已发言 → 等 spoken_delay 秒
@@ -24,13 +24,15 @@ import time
 
 __plugin__ = {
     "name": "天空红包",
-    "id": "hdsky",
-    "version": "2.2.0",
+    "id": "skyRedPacket",
+    "version": "2.3.0",
     "author": "Yy",
     "description": "天空小秘（bot 8907007783）拼手气红包自动抢：追踪群内最近发言数，"
     "已发言快抢、未发言慢抢，自适应延迟 + 随机抖动防检测。",
     "scope": "user",
     "changelog": (
+        "v2.3.0 更新内容：\n"
+        "- 项目重命名为 skyRedPacket，从单文件改为目录插件\n"
         "v2.2.0 更新内容：\n"
         "- 去重缓存改用 ctx.kv 持久化，热重载后不重复抢包\n"
         "- 延迟参数改用 slider 类型，更直观\n"
