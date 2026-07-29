@@ -16,10 +16,12 @@ TZ = timezone(timedelta(hours=8))
 __plugin__ = {
     "name": "天空答题",
     "id": "skyDropAnswer",
-    "version": "1.10.5",
+    "version": "1.10.6",
     "author": "Yy",
     "description": "天空答题奖励，每题型独立.py文件，模板管理+验证循环，Vue配置面板。",
     "changelog": (
+        "v1.10.6 更新内容：\n"
+        "- 推送通知时附带题目原文，方便管理员验证答案正确性\n"
         "v1.10.5 更新内容：\n"
         "- 模板命中次数改用 ctx.kv 存储，不再写入 .py 模板文件，重启后保留计数\n"
         "- 启动时自动清理已删除模板的过期计数\n"
@@ -550,8 +552,10 @@ async def _answer_and_submit(
         bot_user = message.from_user
         if bot_user:
             chat_title = getattr(message.chat, "title", "") if message.chat else ""
+            question_preview = text[:300] + ("..." if len(text) > 300 else "")
             await ctx.notify(
                 f"🏠 所在群组\n   {chat_title}\n   群ID: {message.chat.id}\n\n"
+                f"❓ 题目\n   {question_preview}\n\n"
                 f"📩 答题结果\n   答案: {ans}\n\n"
                 f"🔗 消息链接\n   {getattr(message, 'link', '')}",
                 level="success",
