@@ -6,31 +6,30 @@
 # 消息含「拼手气红包」关键字，内联键盘有「抢红包」按钮，
 # 点击按钮抢红包。
 #
-# 策略（v2.4）：
-# 1. 追踪群内所有发言，按 msgid 维护最近 20 位不重复发言者
-# 2. 检测到拼手气红包时：
-#    - 是最近 20 位发言人之一 → 已发言 → 等 spoken_delay 秒
-#    - 否则 → 未发言 → 等 no_speech_delay 秒（等 30 秒限制解除）
-#    - 再叠加 random.uniform(0, random_delay_max) 随机延迟
-# 3. 点击「抢红包」按钮并通知结果
-# 4. 去重缓存持久化到 ctx.kv，热重载后不重复抢包
+# 策略（v2.5）：
+# 1. 检测到拼手气红包 → 等随机初始延迟 → 点击「抢红包」
+# 2. 如果回调提示"红包前 30 秒仅限最近 20 位发言人领取"，
+#    从回调文本解析等待秒数 n，计算 message.date + n 重试
+# 3. 去重缓存持久化到 ctx.kv，热重载后不重复抢包
 # =============================================================================
 
 from __future__ import annotations
 
 import asyncio
-import random
+import re
 import time
 
 __plugin__ = {
     "name": "天空红包",
     "id": "skyRedPacket",
-    "version": "2.4.0",
+    "version": "2.5.0",
     "author": "Yy",
-    "description": "天空小秘（bot 8907007783）拼手气红包自动抢：按 msgid 追踪最近 20 位发言人，"
-    "已发言快抢、未发言慢抢，自适应延迟 + 随机抖动防检测。",
+    "description": "天空小秘（bot 8907007783）拼手气红包自动抢：先抢再重试策略，被拒后从回调解析等待时间自动重试。",
     "scope": "user",
     "changelog": (
+        "v2.5.0 更新内容：\n"
+        "- 重构为 retry 策略：先抢，被拒后从回调解析等待时间自动重试\n"
+        "- 移除发言追踪逻辑，不再需要预判发言状态\n"
         "v2.4.0 更新内容：\n"
         "- 发言判断改为按 msgid 追踪最近 20 位发言人，不再用时间窗口\n"
         "v2.3.0 更新内容：\n"
@@ -48,42 +47,35 @@ __plugin__ = {
             "section": "群组",
             "help": "要监听的群组ID，每行一个。空 = 所有群。",
         },
-        "recent_msg_count": {
-            "type": "number",
-            "default": 20,
-            "label": "最近发言人数",
-            "section": "策略",
-            "help": "按 msgid 追踪最近 N 位不重复发言人。红包前 30 秒仅限最近 20 位领取。",
-        },
-        "no_speech_delay": {
+        "initial_delay": {
             "type": "slider",
-            "default": 8,
-            "label": "未发言延迟(秒)",
-            "section": "策略",
-            "min": 1,
-            "max": 60,
-            "step": 1,
-            "help": "未发言时抢红包前等待秒数。",
-        },
-        "spoken_delay": {
-            "type": "slider",
-            "default": 1,
-            "label": "已发言延迟(秒)",
+            "default": 2,
+            "label": "初始延迟(秒)",
             "section": "策略",
             "min": 0,
             "max": 30,
             "step": 1,
-            "help": "已发言时抢红包前等待秒数。",
+            "help": "检测到红包后首次点击的等待时间，叠加随机抖动。",
         },
         "random_delay_max": {
             "type": "slider",
             "default": 3,
-            "label": "随机延迟上限(秒)",
+            "label": "随机抖动上限(秒)",
             "section": "策略",
             "min": 0,
             "max": 30,
             "step": 1,
-            "help": "在基础延迟上额外叠加的随机延迟上限，避免规律被检测。",
+            "help": "在初始延迟上额外叠加的随机延迟上限，避免规律被检测。",
+        },
+        "retry_offset": {
+            "type": "slider",
+            "default": 1,
+            "label": "重试提前量(秒)",
+            "section": "策略",
+            "min": 0,
+            "max": 10,
+            "step": 1,
+            "help": "计算出的重试时间前 N 秒提前点击，避免刚好错过。",
         },
     },
 }
@@ -94,8 +86,8 @@ _KV_CLICKED_PREFIX = "clicked:"
 
 # 去重缓存（内存级，启动时从 ctx.kv 恢复）
 _clicked: dict[str, float] = {}
-# 发言追踪："chat_id" -> 有序列表 [user_id, ...]，按接收顺序保留最近 N 位不重复发言人
-_speakers: dict[int, list[int]] = {}
+# 最大重试次数
+_MAX_RETRIES = 5
 
 
 def _parse_groups(raw: str) -> list[int]:
@@ -141,23 +133,19 @@ def _load_clicked_from_kv(ctx: object) -> dict[str, float]:
     return clicked
 
 
-def _record_speaker(chat_id: int, user_id: int, max_speakers: int = 20) -> None:
-    """记录一条消息发送者，按 msgid 顺序维护最近 max_speakers 位不重复发言人。"""
-    speakers = _speakers.setdefault(chat_id, [])
-    # 如果已存在，先移除旧位置
-    if user_id in speakers:
-        speakers.remove(user_id)
-    # 追加到末尾（最新发言）
-    speakers.append(user_id)
-    # 裁剪超出部分
-    if len(speakers) > max_speakers:
-        speakers[:] = speakers[-max_speakers:]
+def _parse_wait_seconds(callback_text: str) -> int | None:
+    """从回调文本解析需要等待的秒数。
 
-
-def _is_recent_speaker(chat_id: int, user_id: int, threshold: int = 20) -> bool:
-    """判断 user_id 是否在最近 threshold 位发言人中。"""
-    speakers = _speakers.get(chat_id, [])
-    return user_id in speakers[-threshold:]
+    例： "红包前 30 秒仅限最近 20 位发言人领取，请在 12 秒后重试" → 12
+         "距红包可抢还有 5 秒" → 5
+    """
+    if not callback_text:
+        return None
+    # 尝试匹配 "请在 X 秒后重试"、"X 秒后"、"还有 X 秒" 等模式
+    m = re.search(r"(\d+)\s*秒", callback_text)
+    if m:
+        return int(m.group(1))
+    return None
 
 
 def _find_snatch_button(message: object) -> tuple[int, int] | None:
@@ -183,6 +171,15 @@ def _is_lucky_packet(message: object) -> bool:
     return False
 
 
+async def _try_snatch(client: object, message: object, row: int, col: int, timeout: int = 10) -> str | None:
+    """点击抢红包按钮，返回回调文本。失败返回 None。"""
+    try:
+        result = await message.click(x=col, y=row, timeout=timeout)
+        return getattr(result, "message", None) or str(result)
+    except Exception:
+        return None
+
+
 async def setup(ctx: object) -> None:
     cfg = ctx.config
     ctx.log.info("天空红包插件已启用")
@@ -193,34 +190,13 @@ async def setup(ctx: object) -> None:
     _prune_clicked_kv(ctx)
     ctx.log.info("从 kv 恢复 %d 条去重记录", len(_clicked))
 
-    # ─── 发言追踪 Handler（群内所有消息，不限于自己）────────────────
-    @ctx.on_message(
-        ctx.filters.text,
-        group=-10,
-    )
-    async def track_speakers(client: object, message: object) -> None:
-        """追踪群内所有消息发送者，按 msgid 维护最近发言人列表。"""
-        chat = getattr(message, "chat", None)
-        chat_id = getattr(chat, "id", 0)
-        if chat_id >= 0:
-            return  # 只追踪群聊
-        # 只追踪配置的群组
-        groups = _parse_groups(cfg.get("enabled_groups", ""))
-        if groups and chat_id not in groups:
-            return
-        fu = message.from_user
-        if not fu or fu.is_bot:
-            return
-        threshold = int(cfg.get("recent_msg_count", 20))
-        _record_speaker(chat_id, fu.id, threshold)
-
     # ─── 抢红包 Handler ────────────────────────────────
     @ctx.on_message(
         ctx.filters.group & ctx.filters.user(BOT_ID),
         group=-9,
     )
     async def snatch_red_packet(client: object, message: object) -> None:
-        """检测拼手气红包消息，按发言状态自适应延迟后点击「抢红包」按钮。"""
+        """检测拼手气红包，先抢再重试，被拒后解析等待时间自动重试。"""
         chat_id = message.chat.id
         groups = _parse_groups(cfg.get("enabled_groups", ""))
         if groups and chat_id not in groups:
@@ -243,53 +219,87 @@ async def setup(ctx: object) -> None:
         _clicked[key] = time.time()
         ctx.kv.set(f"{_KV_CLICKED_PREFIX}{key}", time.time())
 
-        # ── 自适应延迟：按是否为最近发言人来决定快抢/慢抢 ──
-        owner_id = getattr(client, "_owner_id", 0)
-        threshold = int(cfg.get("recent_msg_count", 20))
-        is_recent = _is_recent_speaker(chat_id, owner_id, threshold)
-        if is_recent:
-            base_delay = float(cfg.get("spoken_delay", 1))
-            speech_state = "已发言"
-        else:
-            base_delay = float(cfg.get("no_speech_delay", 8))
-            speech_state = "未发言"
-        delay = base_delay + random.uniform(0, float(cfg.get("random_delay_max", 3)))
-
         row, col = btn_pos
         chat_title = getattr(message.chat, "title", "") if message.chat else ""
         msg_link = getattr(message, "link", "")
+        msg_date = getattr(message, "date", None)
+        msg_ts = msg_date.timestamp() if msg_date else 0
 
-        try:
-            if delay > 0:
-                ctx.log.info(
-                    "最近发言人中%s，等待 %.1fs 后抢 chat=%s msg=%s",
-                    speech_state,
-                    delay,
-                    chat_id,
-                    message.id,
-                )
-                await asyncio.sleep(delay)
+        initial_delay = float(cfg.get("initial_delay", 2))
+        random_delay_max = float(cfg.get("random_delay_max", 3))
+        retry_offset = float(cfg.get("retry_offset", 1))
 
-            result = await message.click(x=col, y=row, timeout=10)
-            result_text = getattr(result, "message", None) or str(result)
+        # 首次尝试
+        delay = initial_delay + (random_delay_max * __import__("random").random())
+        if delay > 0:
+            ctx.log.info("初始延迟 %.1fs 后抢 chat=%s msg=%s", delay, chat_id, message.id)
+            await asyncio.sleep(delay)
 
-            ctx.log.info("已点击抢红包 chat=%s msg=%s 结果=%s", chat_id, message.id, result_text)
+        result_text = await _try_snatch(client, message, row, col)
+        if result_text is None:
+            ctx.log.warning("首次点击抢红包失败 chat=%s msg=%s", chat_id, message.id)
             await ctx.notify(
-                f"🏠 所在群组\n   {chat_title}\n   群ID: {chat_id}\n\n"
-                f"📩 抢包结果\n   {result_text}\n\n"
-                f"🔗 消息链接\n   {msg_link}",
-                level="success",
-                category="已抢",
-                account=client,
-            )
-        except Exception as e:
-            ctx.log.warning("点击抢红包失败 chat=%s msg=%s: %s", chat_id, message.id, e)
-            await ctx.notify(
-                f"🏠 所在群组\n   {chat_title}\n   群ID: {chat_id}\n\n⚠️ 错误信息\n   {e}\n\n🔗 消息链接\n   {msg_link}",
+                f"🏠 所在群组\n   {chat_title}\n   群ID: {chat_id}\n\n⚠️ 首次点击失败\n\n🔗 消息链接\n   {msg_link}",
                 level="error",
                 category="失败",
                 account=client,
             )
+            return
+
+        ctx.log.info("首次抢包结果 chat=%s msg=%s %s", chat_id, message.id, result_text)
+
+        # 判断是否被拒（30 秒限制）
+        for attempt in range(_MAX_RETRIES):
+            if "仅限最近" not in result_text and "30秒" not in result_text:
+                break  # 没有限制提示，说明抢到了或已过期
+
+            wait_seconds = _parse_wait_seconds(result_text)
+            if wait_seconds is None:
+                ctx.log.info("无法解析等待时间，放弃重试 chat=%s msg=%s", chat_id, message.id)
+                break
+
+            # 计算重试时间：红包发送时间 + n 秒 - 提前量
+            if msg_ts > 0:
+                retry_at = msg_ts + wait_seconds - retry_offset
+                now = time.time()
+                wait = retry_at - now
+                if wait < 0:
+                    wait = 0.5  # 至少等 0.5 秒
+            else:
+                wait = float(wait_seconds)
+
+            ctx.log.info(
+                "被拒，等待 %.1fs 后重试（attempt %d/%d）chat=%s msg=%s",
+                wait,
+                attempt + 1,
+                _MAX_RETRIES,
+                chat_id,
+                message.id,
+            )
+            await asyncio.sleep(wait)
+
+            result_text = await _try_snatch(client, message, row, col)
+            if result_text is None:
+                ctx.log.warning("重试点击失败 chat=%s msg=%s", chat_id, message.id)
+                break
+
+            ctx.log.info(
+                "重试结果 chat=%s msg=%s attempt=%d %s",
+                chat_id,
+                message.id,
+                attempt + 1,
+                result_text,
+            )
+
+        ctx.log.info("抢包完成 chat=%s msg=%s 结果=%s", chat_id, message.id, result_text)
+        await ctx.notify(
+            f"🏠 所在群组\n   {chat_title}\n   群ID: {chat_id}\n\n"
+            f"📩 抢包结果\n   {result_text}\n\n"
+            f"🔗 消息链接\n   {msg_link}",
+            level="success",
+            category="已抢",
+            account=client,
+        )
 
 
 async def teardown(ctx: object) -> None:

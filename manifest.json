@@ -8,9 +8,9 @@
   },
   "skyRedPacket": {
     "name": "天空红包",
-    "version": "2.4.0",
+    "version": "2.5.0",
     "author": "Yy",
-    "description": "天空小秘（bot 8907007783）拼手气红包自动抢：按 msgid 追踪最近 20 位发言人，已发言快抢、未发言慢抢，自适应延迟 + 随机抖动防检测。",
+    "description": "天空小秘（bot 8907007783）拼手气红包自动抢：先抢再重试，被拒后从回调解析等待时间自动重试。",
     "path": "plugins/skyRedPacket/"
   },
   "learning": {
