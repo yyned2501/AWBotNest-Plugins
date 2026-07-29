@@ -1,12 +1,15 @@
 # -*- coding: utf-8 -*-
 # AWBotNest 插件：天空答题 (skyDropAnswer)
 
+from __future__ import annotations
+
 import asyncio
 import json
 import random
 import time
-from datetime import datetime, timezone, timedelta
+from datetime import timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 TZ = timezone(timedelta(hours=8))
 
@@ -16,34 +19,64 @@ __plugin__ = {
     "version": "1.10.3",
     "author": "Yy",
     "description": "天空答题奖励，每题型独立.py文件，模板管理+验证循环，Vue配置面板。",
-    "changelog": "v1.10.3 更新内容：\n- 简化 _reply_to_own 使用 ctx.filters.outgoing 判断，去掉冗余 kv 缓存\nv1.10.2 更新内容：\n- 答题后通过 ctx.notify 推送通知到管理员",
+    "changelog": (
+        "v1.10.3 更新内容：\n- 简化 _reply_to_own 使用 ctx.filters.outgoing 判断，去掉冗余 kv 缓存\n"
+        "v1.10.2 更新内容：\n- 答题后通过 ctx.notify 推送通知到管理员"
+    ),
     "scope": "user",
     "render_mode": "vue",
     "default_enabled": False,
     "config_schema": {
         "enable_reward_answer": {
-            "type": "boolean", "default": False, "label": "开启答题奖励",
-            "section": "答题奖励", "order": 1
+            "type": "boolean",
+            "default": False,
+            "label": "开启答题奖励",
+            "section": "答题奖励",
+            "order": 1,
         },
         "reward_bot_ids": {
-            "type": "string", "default": "", "label": "答题机器人",
-            "section": "答题奖励", "help": "@机器人用户名，逗号分隔", "order": 2
+            "type": "string",
+            "default": "",
+            "label": "答题机器人",
+            "section": "答题奖励",
+            "help": "@机器人用户名，逗号分隔",
+            "order": 2,
         },
         "reward_delay_min": {
-            "type": "number", "default": 2, "label": "延迟最小",
-            "section": "答题奖励", "min": 1, "max": 30, "help": "秒", "order": 3
+            "type": "number",
+            "default": 2,
+            "label": "延迟最小",
+            "section": "答题奖励",
+            "min": 1,
+            "max": 30,
+            "help": "秒",
+            "order": 3,
         },
         "reward_delay_max": {
-            "type": "number", "default": 5, "label": "延迟最大",
-            "section": "答题奖励", "min": 1, "max": 60, "help": "秒", "order": 4
+            "type": "number",
+            "default": 5,
+            "label": "延迟最大",
+            "section": "答题奖励",
+            "min": 1,
+            "max": 60,
+            "help": "秒",
+            "order": 4,
         },
         "use_ai_fallback": {
-            "type": "boolean", "default": True, "label": "AI智能答题",
-            "section": "答题奖励", "help": "未知题型时使用AI分析并回答", "order": 5
+            "type": "boolean",
+            "default": True,
+            "label": "AI智能答题",
+            "section": "答题奖励",
+            "help": "未知题型时使用AI分析并回答",
+            "order": 5,
         },
         "enable_template_learning": {
-            "type": "boolean", "default": True, "label": "AI学习模板",
-            "section": "答题奖励", "help": "AI答完题后自动生成模板.py文件，下次同类题直接脚本答", "order": 6
+            "type": "boolean",
+            "default": True,
+            "label": "AI学习模板",
+            "section": "答题奖励",
+            "help": "AI答完题后自动生成模板.py文件，下次同类题直接脚本答",
+            "order": 6,
         },
     },
 }
@@ -53,32 +86,33 @@ _PROMPT_ANSWER = "你是Telegram答题助手，分析题目并给出答案。只
 # 注意：{{ 和 }} 是 str.format() 的转义，代表一个字面 { 或 }
 # {text} / {existing} 是真正的格式占位符
 _PROMPT_LEARN = (
-    '分析以下题目，生成一个可复用的 Python 答题模板。只输出JSON，不要其他文字。\n\n'
-    '题目: {text}\n\n'
-    '已有模板列表（若本题属于其中某一类，必须复用其 filename 和 type，切勿新建）:\n'
-    '{existing}\n\n'
-    '生成要求:\n'
-    '1. regex 要宽松、只抓题型结构，不要硬编码题目里的具体数字或符号：'
-    '数字用 \\d+，空白用 \\s*，可变内容用 .*?。须兼容 re.DOTALL。\n'
-    '2. filename 是稳定的英文标识，同一题型务必始终相同（如 math_arithmetic、find_odd_one）。\n'
-    '3. extract(text) 只做纯文本提取并返回字符串答案；答案若是选项序号就返回序号字符串。\n'
-    '4. 【最重要】题目中会变化的内容（要找的符号、具体数字、关键词等）必须当作变量动态解析，'
-    '绝不把某一个具体值写死进 regex 或 extract——否则同一题型换个符号就会被误判成全新题型而重复生成模板。'
-    '做法：regex 里用捕获组 (.+?) 或 \\d+ 占位，extract 里先解析出这个变量再用它求解。'
-    '例：「找出“🔺”出现的位置，点击它的位置：🍉 🐶 🔺 ⭐ 🐱」这类题，'
-    '应先用 找出\\s*(.+?)\\s*出现的位置 提取引号里的目标符号（此处是 🔺，但下一题会变成别的），'
-    '再在符号序列里找该符号的 1-based 位置返回；切勿把 🔺 写死。\n\n'
-    '输出JSON: {{\n'
+    "分析以下题目，生成一个可复用的 Python 答题模板。只输出JSON，不要其他文字。\n\n"
+    "题目: {text}\n\n"
+    "已有模板列表（若本题属于其中某一类，必须复用其 filename 和 type，切勿新建）:\n"
+    "{existing}\n\n"
+    "生成要求:\n"
+    "1. regex 要宽松、只抓题型结构，不要硬编码题目里的具体数字或符号："
+    "数字用 \\d+，空白用 \\s*，可变内容用 .*?。须兼容 re.DOTALL。\n"
+    "2. filename 是稳定的英文标识，同一题型务必始终相同（如 math_arithmetic、find_odd_one）。\n"
+    "3. extract(text) 只做纯文本提取并返回字符串答案；答案若是选项序号就返回序号字符串。\n"
+    "4. 【最重要】题目中会变化的内容（要找的符号、具体数字、关键词等）必须当作变量动态解析，"
+    "绝不把某一个具体值写死进 regex 或 extract——否则同一题型换个符号就会被误判成全新题型而重复生成模板。"
+    "做法：regex 里用捕获组 (.+?) 或 \\d+ 占位，extract 里先解析出这个变量再用它求解。"
+    "例：「找出“🔺”出现的位置，点击它的位置：🍉 🐶 🔺 ⭐ 🐱」这类题，"
+    "应先用 找出\\s*(.+?)\\s*出现的位置 提取引号里的目标符号（此处是 🔺，但下一题会变成别的），"
+    "再在符号序列里找该符号的 1-based 位置返回；切勿把 🔺 写死。\n\n"
+    "输出JSON: {{\n"
     '  "filename": "稳定英文标识",\n'
     '  "type": "题型中文名",\n'
     '  "regex": "宽松正则表达式",\n'
     '  "sample": "题目示例(前50字)",\n'
     '  "has_options": true,\n'
     '  "script_code": "def extract(text):\\n    import re\\n    # 纯文本提取逻辑，无IO\\n    return str(<答案>)"\n'
-    '}}'
+    "}}"
 )
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
+
 
 def _load_template_namespace(filepath: Path) -> dict:
     """加载单个 .py 模板文件到 namespace dict。
@@ -89,7 +123,7 @@ def _load_template_namespace(filepath: Path) -> dict:
     ns = {"__builtins__": __builtins__}
     try:
         exec(filepath.read_text(encoding="utf-8"), ns)
-    except Exception as e:
+    except Exception:
         return {}
     return ns
 
@@ -116,17 +150,19 @@ def _load_all_templates() -> list[dict]:
         ns = _load_template_namespace(f)
         if "extract" not in ns or "REGEX" not in ns:
             continue
-        out.append({
-            "id": f.stem,
-            "type": ns.get("TYPE", "未知"),
-            "regex": ns["REGEX"],
-            "status": ns.get("STATUS", "verified"),
-            "verify_count": ns.get("VERIFY_COUNT", 0),
-            "count": ns.get("COUNT", 0),
-            "sample": ns.get("SAMPLE", ""),
-            "script_code": _extract_script_code(f),
-            "extract": ns["extract"],
-        })
+        out.append(
+            {
+                "id": f.stem,
+                "type": ns.get("TYPE", "未知"),
+                "regex": ns["REGEX"],
+                "status": ns.get("STATUS", "verified"),
+                "verify_count": ns.get("VERIFY_COUNT", 0),
+                "count": ns.get("COUNT", 0),
+                "sample": ns.get("SAMPLE", ""),
+                "script_code": _extract_script_code(f),
+                "extract": ns["extract"],
+            }
+        )
     return out
 
 
@@ -148,14 +184,14 @@ def _build_template_content(tpl: dict) -> str:
     )
 
 
-def _write_template_file(tpl: dict):
+def _write_template_file(tpl: dict) -> None:
     """将模板写入 .py 文件"""
     _TEMPLATES_DIR.mkdir(exist_ok=True)
     filepath = _TEMPLATES_DIR / f"{tpl['id']}.py"
     filepath.write_text(_build_template_content(tpl), encoding="utf-8")
 
 
-def _delete_template_file(tpl_id: str):
+def _delete_template_file(tpl_id: str) -> None:
     """删除模板文件"""
     filepath = _TEMPLATES_DIR / f"{tpl_id}.py"
     if filepath.exists():
@@ -165,6 +201,7 @@ def _delete_template_file(tpl_id: str):
 def _match_templates(text: str, templates: list[dict]) -> tuple[str | None, dict | None]:
     """遍历模板列表，返回 (extract_fn, tpl_dict) 或 (None, None)"""
     import re
+
     for t in templates:
         regex = t.get("regex", "")
         if not regex:
@@ -177,7 +214,7 @@ def _match_templates(text: str, templates: list[dict]) -> tuple[str | None, dict
     return (None, None)
 
 
-def _update_template_file(tpl: dict, **kwargs):
+def _update_template_file(tpl: dict, **kwargs: Any) -> None:
     """更新模板的元数据字段并重写文件"""
     for k, v in kwargs.items():
         if k in tpl:
@@ -190,7 +227,7 @@ def _update_template_file(tpl: dict, **kwargs):
         changed = False
         for k, v in kwargs.items():
             if line.startswith(f"{k} =") or line.startswith(f"{k}="):
-                new_lines.append(f'{k} = {v!r}' if isinstance(v, str) else f'{k} = {v}')
+                new_lines.append(f"{k} = {v!r}" if isinstance(v, str) else f"{k} = {v}")
                 changed = True
                 break
         if not changed:
@@ -201,6 +238,7 @@ def _update_template_file(tpl: dict, **kwargs):
 def _norm_regex(rx: str) -> str:
     """归一化正则用于比较：去空白、统一全/半角常见等价写法。"""
     import re
+
     rx = re.sub(r"\s+", "", rx or "")
     return rx.replace("（", "(").replace("）", ")").replace("：", ":").replace("，", ",")
 
@@ -219,6 +257,7 @@ def _same_type(a: dict, b: dict) -> bool:
     兜底信号：双方正则能互相匹配对方样例（双向，降低误判）。
     """
     import re
+
     fa, ta, ra = _identity(a)
     fb, tb, rb = _identity(b)
     if fa and fa == fb:
@@ -244,7 +283,7 @@ def _rank(t: dict) -> tuple:
     return (1 if t.get("status") == "verified" else 0, t.get("verify_count", 0), t.get("count", 0))
 
 
-def _dedup_templates(templates: list[dict], ctx) -> list[dict]:
+def _dedup_templates(templates: list[dict], ctx: object) -> list[dict]:
     """启动时合并同类模板：聚类后每组保留最优者（_rank 最高），命中数累加，
     其余模板删除文件。返回去重后的列表。"""
     groups: list[list[dict]] = []
@@ -270,7 +309,7 @@ def _dedup_templates(templates: list[dict], ctx) -> list[dict]:
     return kept
 
 
-async def _learn_template(text: str, ans: str, ctx, templates: list[dict]):
+async def _learn_template(text: str, ans: str, ctx: object, templates: list[dict]) -> None:
     """AI 分析题目 → 生成 .py 模板文件 → 加载到内存"""
     cfg = ctx.config
     if not cfg.get("enable_template_learning", True):
@@ -314,8 +353,9 @@ async def _learn_template(text: str, ans: str, ctx, templates: list[dict]):
         ns = _load_template_namespace(_TEMPLATES_DIR / f"{filename}.py")
         tpl["extract"] = ns.get("extract", lambda t: None)
         templates.append(tpl)
-        ctx.log.info("[天空答题] 学习新模板: %s | %s | status=learning | 共%d个",
-                     tpl["type"], regex[:40], len(templates))
+        ctx.log.info(
+            "[天空答题] 学习新模板: %s | %s | status=learning | 共%d个", tpl["type"], regex[:40], len(templates)
+        )
     except Exception as e:
         ctx.log.warning("[天空答题] 模板学习失败: %r", e)
         try:
@@ -324,7 +364,7 @@ async def _learn_template(text: str, ans: str, ctx, templates: list[dict]):
             pass
 
 
-async def _verify_template(ai_ans: str, script_ans: str | None, tpl: dict, ctx) -> str | None:
+async def _verify_template(ai_ans: str, script_ans: str | None, tpl: dict, ctx: object) -> str | None:
     """验证循环：script vs AI → 一致则 verify_count++，3 次达标升 verified"""
     if script_ans and ai_ans and script_ans == ai_ans:
         tpl["verify_count"] = tpl.get("verify_count", 0) + 1
@@ -340,14 +380,14 @@ async def _verify_template(ai_ans: str, script_ans: str | None, tpl: dict, ctx) 
         return None
 
 
-def _update_config(ctx, **updates):
+def _update_config(ctx: object, **updates: object) -> None:
     reg = ctx._registry
     current = reg.get_config(ctx.plugin_id)
     current.update(updates)
     reg.set_config(ctx.plugin_id, current)
 
 
-def _match_button(message, ans):
+def _match_button(message: object, ans: str) -> tuple[int, int] | None:
     """在内联键盘里找与答案匹配的按钮，返回 (row, col) 或 None。
 
     匹配优先级：文本精确相等 > 数值相等 > 文本包含答案。
@@ -363,9 +403,7 @@ def _match_button(message, ans):
     if not ans_s:
         return None
     buttons = [
-        (r, c, (getattr(btn, "text", "") or "").strip())
-        for r, row in enumerate(keyboard)
-        for c, btn in enumerate(row)
+        (r, c, (getattr(btn, "text", "") or "").strip()) for r, row in enumerate(keyboard) for c, btn in enumerate(row)
     ]
     # 1) 文本精确相等
     for r, c, text in buttons:
@@ -390,7 +428,13 @@ def _match_button(message, ans):
     return None
 
 
-async def _answer_and_submit(text, client, message, ctx, templates):
+async def _answer_and_submit(
+    text: str,
+    client: object,
+    message: object,
+    ctx: object,
+    templates: list[dict],
+) -> None:
     """答题主逻辑：模板匹配 → 验证循环/AI兜底 → 提交"""
     ans = None
     extract_fn, tpl = _match_templates(text, templates)
@@ -485,7 +529,7 @@ async def _answer_and_submit(text, client, message, ctx, templates):
     ctx.log.info("[天空答题] 答题完成")
 
 
-async def setup(ctx):
+async def setup(ctx: object) -> None:
     ctx.log.info("天空答题插件已加载 (v%s)", __plugin__["version"])
 
     # 从 templates/ 目录加载所有 .py 模板文件，并合并历史遗留的同类重复模板
@@ -494,22 +538,29 @@ async def setup(ctx):
 
     # 防抖：记录已处理的消息 ID（带时间戳，TTL 清理防无界增长）
     _processed_msg_ids: dict[int, float] = {}
-    _DEDUP_TTL = 3600.0
+    _dedup_ttl = 3600.0
 
     # ── 答题奖励 ──
-    def _reply_to_own(_, __, message):
+    def _reply_to_own(_: object, __: object, message: object) -> bool:
         if not message.reply_to_message_id:
             return False
         return ctx.filters.outgoing(_, message.reply_to_message)
 
-    @ctx.on_message(ctx.filters.group & ctx.filters.text & ctx.filters.create(_reply_to_own) & ctx.filters.regex(r"小秘想给你 \d+ 银元奖励。"), group=5)
-    async def _reward_handler(client, message):
+    _reward_filter = (
+        ctx.filters.group
+        & ctx.filters.text
+        & ctx.filters.create(_reply_to_own)
+        & ctx.filters.regex(r"小秘想给你 \d+ 银元奖励。")
+    )
+
+    @ctx.on_message(_reward_filter, group=5)
+    async def _reward_handler(client: object, message: object) -> None:
         if not ctx.config.get("enable_reward_answer", False):
             return
         # 防抖：同一消息只处理一次（顺带清理过期记录，防集合无界增长）
         now = time.time()
         if len(_processed_msg_ids) > 500:
-            stale = [k for k, ts in _processed_msg_ids.items() if now - ts > _DEDUP_TTL]
+            stale = [k for k, ts in _processed_msg_ids.items() if now - ts > _dedup_ttl]
             for k in stale:
                 _processed_msg_ids.pop(k, None)
         if message.id in _processed_msg_ids:
@@ -527,15 +578,14 @@ async def setup(ctx):
 
     # ── API: 获取模板列表 ──
     @ctx.on_api("/api/templates", methods=["GET"])
-    async def _get_templates(req):
-        return {"ok": True, "data": [
-            {k: v for k, v in t.items() if k != "extract"} for t in templates
-        ]}
+    async def _get_templates(req: object) -> dict:
+        return {"ok": True, "data": [{k: v for k, v in t.items() if k != "extract"} for t in templates]}
 
     # ── API: 编辑模板（微调正则 / extract 脚本） ──
     @ctx.on_api("/api/templates/save", methods=["POST"])
-    async def _save_template(req):
+    async def _save_template(req: object) -> dict:
         import re as _re
+
         data = req.json or {}
         tid = data.get("id", "")
         tpl = next((t for t in templates if t["id"] == tid), None)
@@ -572,7 +622,7 @@ async def setup(ctx):
 
     # ── API: 删除模板 ──
     @ctx.on_api("/api/templates", methods=["DELETE"])
-    async def _delete_template(req):
+    async def _delete_template(req: object) -> dict:
         data = req.json or {}
         tid = data.get("id", "")
         if not tid:
@@ -588,7 +638,7 @@ async def setup(ctx):
 
     # ── API: 清空模板（保留内置） ──
     @ctx.on_api("/api/templates/clear", methods=["POST"])
-    async def _clear_templates(req):
+    async def _clear_templates(req: object) -> dict:
         kept = [t for t in templates if t["id"].startswith("builtin_")]
         removed = [t for t in templates if not t["id"].startswith("builtin_")]
         for t in removed:
@@ -601,5 +651,5 @@ async def setup(ctx):
     ctx.log.info("天空答题已就绪")
 
 
-async def teardown(ctx):
+async def teardown(ctx: object) -> None:
     ctx.log.info("天空答题已卸载")

@@ -1,0 +1,20 @@
+[project]
+name = "awbotnest-plugins"
+version = "0.1.0"
+requires-python = ">=3.12"
+
+[tool.ruff]
+line-length = 120
+exclude = [".claude", "plugins/_TEMPLATE.py", "plugins/skyDropAnswer/templates"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "ANN"]
+ignore = ["ANN401"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.16.0",
+]
