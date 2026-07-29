@@ -6,13 +6,14 @@
 # 消息含「拼手气红包」关键字，内联键盘有「抢红包」按钮，
 # 点击按钮抢红包。
 #
-# 策略（v2.1）：
+# 策略（v2.2）：
 # 1. 追踪用户自己的发言，按群维护最近 30 秒滚动发言窗口
 # 2. 检测到拼手气红包时：
 #    - 最近 30 秒发言条数 >= recent_msg_count → 已发言 → 等 spoken_delay 秒
 #    - 否则 → 未发言 → 等 no_speech_delay 秒
 #    - 再叠加 random.uniform(0, random_delay_max) 随机延迟，避免规律被检测
 # 3. 点击「抢红包」按钮并通知结果
+# 4. 去重缓存持久化到 ctx.kv，热重载后不重复抢包
 # =============================================================================
 
 from __future__ import annotations
@@ -22,41 +23,62 @@ import random
 import time
 
 __plugin__ = {
-    "name": "🧧天空红包",
+    "name": "天空红包",
     "id": "hdsky",
-    "version": "2.1.0",
+    "version": "2.2.0",
     "author": "Yy",
-    "description": "天空小秘（bot 8907007783）拼手气红包自动抢：追踪群内最近发言数，已发言快抢、未发言慢抢，自适应延迟 + 随机抖动防检测。",
+    "description": "天空小秘（bot 8907007783）拼手气红包自动抢：追踪群内最近发言数，"
+    "已发言快抢、未发言慢抢，自适应延迟 + 随机抖动防检测。",
     "scope": "user",
+    "changelog": (
+        "v2.2.0 更新内容：\n"
+        "- 去重缓存改用 ctx.kv 持久化，热重载后不重复抢包\n"
+        "- 延迟参数改用 slider 类型，更直观\n"
+        "- 移除 emoji 命名，符合规范"
+    ),
     "config_schema": {
         "enabled_groups": {
-            "type": "string", "default": "-1001326208894",
+            "type": "string",
+            "default": "-1001326208894",
             "label": "监听群组（一行一个ID）",
             "section": "群组",
             "help": "要监听的群组ID，每行一个。空 = 所有群。",
         },
         "recent_msg_count": {
-            "type": "number", "default": 20,
+            "type": "number",
+            "default": 20,
             "label": "最近发言条数",
             "section": "策略",
             "help": "最近30秒内发言条数阈值，低于此视为未发言。",
         },
         "no_speech_delay": {
-            "type": "number", "default": 8,
+            "type": "slider",
+            "default": 8,
             "label": "未发言延迟(秒)",
             "section": "策略",
+            "min": 1,
+            "max": 60,
+            "step": 1,
             "help": "未发言时抢红包前等待秒数。",
         },
         "spoken_delay": {
-            "type": "number", "default": 1,
+            "type": "slider",
+            "default": 1,
             "label": "已发言延迟(秒)",
             "section": "策略",
+            "min": 0,
+            "max": 30,
+            "step": 1,
             "help": "已发言时抢红包前等待秒数。",
         },
         "random_delay_max": {
-            "type": "number", "default": 3,
+            "type": "slider",
+            "default": 3,
             "label": "随机延迟上限(秒)",
             "section": "策略",
+            "min": 0,
+            "max": 30,
+            "step": 1,
             "help": "在基础延迟上额外叠加的随机延迟上限，避免规律被检测。",
         },
     },
@@ -64,12 +86,13 @@ __plugin__ = {
 
 BOT_ID = 8907007783
 _CLICKED_TTL = 3600
-_SPEECH_WINDOW = 30   # 发言统计滚动窗口（秒）
-_SPEECH_TTL = 300     # 发言记录保留时长，整键过期清理（秒）
+_SPEECH_WINDOW = 30  # 发言统计滚动窗口（秒）
+_SPEECH_TTL = 300  # 发言记录保留时长，整键过期清理（秒）
+_KV_CLICKED_PREFIX = "clicked:"
 
-# 去重缓存（内存级，插件重载时重置）
+# 去重缓存（内存级，启动时从 ctx.kv 恢复）
 _clicked: dict[str, float] = {}
-# 发言日志："owner_id:chat_id" -> 发言时间戳列表
+# 发言日志："owner_id:chat_id" -> 发言时间戳列表（仅内存，无需持久化）
 _speech_log: dict[str, list[float]] = {}
 
 
@@ -87,11 +110,33 @@ def _parse_groups(raw: str) -> list[int]:
 
 
 def _prune_clicked() -> None:
-    """清理过期的去重记录。"""
+    """清理过期的内存去重记录。"""
     now = time.time()
     stale = [k for k, ts in _clicked.items() if now - ts > _CLICKED_TTL]
     for k in stale:
         _clicked.pop(k, None)
+
+
+def _prune_clicked_kv(ctx: object) -> None:
+    """清理过期的 kv 去重记录。"""
+    now = time.time()
+    for key in ctx.kv.keys():
+        if key.startswith(_KV_CLICKED_PREFIX):
+            val = ctx.kv.get(key, 0)
+            if isinstance(val, (int, float)) and now - float(val) > _CLICKED_TTL:
+                ctx.kv.delete(key)
+
+
+def _load_clicked_from_kv(ctx: object) -> dict[str, float]:
+    """从 ctx.kv 恢复去重记录到内存。"""
+    clicked: dict[str, float] = {}
+    for key in ctx.kv.keys():
+        if key.startswith(_KV_CLICKED_PREFIX):
+            msg_key = key[len(_KV_CLICKED_PREFIX) :]
+            val = ctx.kv.get(key, 0)
+            if isinstance(val, (int, float)):
+                clicked[msg_key] = float(val)
+    return clicked
 
 
 def _record_speech(owner_id: int, chat_id: int) -> None:
@@ -107,10 +152,7 @@ def _record_speech(owner_id: int, chat_id: int) -> None:
 def _prune_speech_log() -> None:
     """清理过期发言记录（窗口内已无记录且超过保留时长的键整体删除）。"""
     now = time.time()
-    stale = [
-        k for k, stamps in _speech_log.items()
-        if not stamps or now - stamps[-1] > _SPEECH_TTL
-    ]
+    stale = [k for k, stamps in _speech_log.items() if not stamps or now - stamps[-1] > _SPEECH_TTL]
     for k in stale:
         _speech_log.pop(k, None)
 
@@ -122,7 +164,7 @@ def _count_recent_speech(owner_id: int, chat_id: int) -> int:
     return sum(1 for ts in stamps if ts >= cutoff)
 
 
-def _find_snatch_button(message) -> tuple[int, int] | None:
+def _find_snatch_button(message: object) -> tuple[int, int] | None:
     """在消息内联键盘里找「抢红包」按钮，返回 (row, col) 或 None。"""
     markup = getattr(message, "reply_markup", None)
     if not markup or not getattr(markup, "inline_keyboard", None):
@@ -135,7 +177,7 @@ def _find_snatch_button(message) -> tuple[int, int] | None:
     return None
 
 
-def _is_lucky_packet(message) -> bool:
+def _is_lucky_packet(message: object) -> bool:
     """判断是否为拼手气红包消息。"""
     text = message.text or message.caption or ""
     if "拼手气红包" in text:
@@ -145,16 +187,22 @@ def _is_lucky_packet(message) -> bool:
     return False
 
 
-async def setup(ctx):
+async def setup(ctx: object) -> None:
     cfg = ctx.config
     ctx.log.info("天空红包插件已启用")
+
+    # 从 ctx.kv 恢复去重记录，热重载后不重复抢包
+    global _clicked
+    _clicked = _load_clicked_from_kv(ctx)
+    _prune_clicked_kv(ctx)
+    ctx.log.info("从 kv 恢复 %d 条去重记录", len(_clicked))
 
     # ─── 发言追踪 Handler（用户自己的 outgoing 消息）────────────────
     @ctx.on_message(
         ctx.filters.outgoing & ctx.filters.text,
         group=-10,
     )
-    async def track_outgoing_speech(client, message):
+    async def track_outgoing_speech(client: object, message: object) -> None:
         """追踪用户自己的发言，按群维护滚动发言窗口。"""
         chat = getattr(message, "chat", None)
         chat_id = getattr(chat, "id", 0)
@@ -166,11 +214,10 @@ async def setup(ctx):
 
     # ─── 抢红包 Handler ────────────────────────────────
     @ctx.on_message(
-        ctx.filters.group
-        & ctx.filters.user(BOT_ID),
+        ctx.filters.group & ctx.filters.user(BOT_ID),
         group=-9,
     )
-    async def snatch_red_packet(client, message):
+    async def snatch_red_packet(client: object, message: object) -> None:
         """检测拼手气红包消息，按发言状态自适应延迟后点击「抢红包」按钮。"""
         chat_id = message.chat.id
         groups = _parse_groups(cfg.get("enabled_groups", ""))
@@ -192,6 +239,7 @@ async def setup(ctx):
         if key in _clicked:
             return
         _clicked[key] = time.time()
+        ctx.kv.set(f"{_KV_CLICKED_PREFIX}{key}", time.time())
 
         # ── 自适应延迟：按最近发言数决定快抢/慢抢 ──
         threshold = float(cfg.get("recent_msg_count", 20))
@@ -211,8 +259,12 @@ async def setup(ctx):
         try:
             if delay > 0:
                 ctx.log.info(
-                    "天空红包 最近30秒发言%d条（%s），等待 %.1fs 后抢 chat=%s msg=%s",
-                    recent, speech_state, delay, chat_id, message.id,
+                    "最近30秒发言%d条（%s），等待 %.1fs 后抢 chat=%s msg=%s",
+                    recent,
+                    speech_state,
+                    delay,
+                    chat_id,
+                    message.id,
                 )
                 await asyncio.sleep(delay)
 
@@ -231,14 +283,12 @@ async def setup(ctx):
         except Exception as e:
             ctx.log.warning("点击抢红包失败 chat=%s msg=%s: %s", chat_id, message.id, e)
             await ctx.notify(
-                f"🏠 所在群组\n   {chat_title}\n   群ID: {chat_id}\n\n"
-                f"⚠️ 错误信息\n   {e}\n\n"
-                f"🔗 消息链接\n   {msg_link}",
+                f"🏠 所在群组\n   {chat_title}\n   群ID: {chat_id}\n\n⚠️ 错误信息\n   {e}\n\n🔗 消息链接\n   {msg_link}",
                 level="error",
                 category="失败",
                 account=client,
             )
 
 
-async def teardown(ctx):
+async def teardown(ctx: object) -> None:
     ctx.log.info("天空红包插件已停用")

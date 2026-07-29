@@ -8,7 +8,7 @@
   },
   "hdsky": {
     "name": "天空红包",
-    "version": "2.1.0",
+    "version": "2.2.0",
     "author": "Yy",
     "description": "天空小秘（bot 8907007783）拼手气红包自动抢：检测「抢红包」按钮即时点击，遇10秒限制自动等够重试。",
     "path": "plugins/hdsky.py"
