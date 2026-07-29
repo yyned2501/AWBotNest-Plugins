@@ -29,7 +29,7 @@
   },
   "skyDropAnswer": {
     "name": "天空答题",
-    "version": "1.10.3",
+    "version": "1.10.4",
     "author": "Yy",
     "description": "天空答题奖励，自动回复机器人的数学题/找不同/映射记忆，AI兜底未知题型。",
     "path": "plugins/skyDropAnswer/"

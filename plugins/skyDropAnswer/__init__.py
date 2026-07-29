@@ -16,10 +16,11 @@ TZ = timezone(timedelta(hours=8))
 __plugin__ = {
     "name": "天空答题",
     "id": "skyDropAnswer",
-    "version": "1.10.3",
+    "version": "1.10.4",
     "author": "Yy",
     "description": "天空答题奖励，每题型独立.py文件，模板管理+验证循环，Vue配置面板。",
     "changelog": (
+        "v1.10.4 更新内容：\n- 修复 _reply_to_own 改用 message.reply_to_message.from_user.is_self 判断\n"
         "v1.10.3 更新内容：\n- 简化 _reply_to_own 使用 ctx.filters.outgoing 判断，去掉冗余 kv 缓存\n"
         "v1.10.2 更新内容：\n- 答题后通过 ctx.notify 推送通知到管理员"
     ),
@@ -542,9 +543,13 @@ async def setup(ctx: object) -> None:
 
     # ── 答题奖励 ──
     def _reply_to_own(_: object, __: object, message: object) -> bool:
-        if not message.reply_to_message_id:
+        replied = getattr(message, "reply_to_message", None)
+        if not replied:
             return False
-        return ctx.filters.outgoing(_, message.reply_to_message)
+        sender = getattr(replied, "from_user", None)
+        if not sender:
+            return False
+        return getattr(sender, "is_self", False)
 
     _reward_filter = (
         ctx.filters.group
