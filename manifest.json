@@ -4,6 +4,7 @@
     "version": "1.0.2",
     "author": "Yy",
     "description": "监听 @NextFunBot 大逃杀游戏，自动跟踪投票统计、每圈结算通知、自动下注（以少胜多规则）。",
+    "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/battleroyale.svg",
     "path": "plugins/battleroyale/"
   },
   "skyRedPacket": {
@@ -11,6 +12,7 @@
     "version": "2.5.0",
     "author": "Yy",
     "description": "天空小秘（bot 8907007783）拼手气红包自动抢：先抢再重试，被拒后从回调解析等待时间自动重试。",
+    "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/skyRedPacket.svg",
     "path": "plugins/skyRedPacket/"
   },
   "learning": {
@@ -18,6 +20,7 @@
     "version": "3.1.1",
     "author": "Yy",
     "description": "学习你的聊天偏好和说话风格，在匹配关键词的群聊中智能参与对话。冷启动：未学到偏好前不参与。",
+    "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/learning.svg",
     "path": "plugins/learning/"
   },
   "scratch": {
@@ -25,6 +28,7 @@
     "version": "1.6.1",
     "author": "Yy",
     "description": "散财童子刮刮乐自动挂机。回调文本直接累加奖金（无需等消息编辑），双重试，filter 层 Bot+回复过滤。",
+    "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/scratch.svg",
     "path": "plugins/scratch.py"
   },
   "skyDropAnswer": {
@@ -32,6 +36,7 @@
     "version": "1.10.6",
     "author": "Yy",
     "description": "天空答题奖励，自动回复机器人的数学题/找不同/映射记忆，AI兜底未知题型。",
+    "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/skyDropAnswer.svg",
     "path": "plugins/skyDropAnswer/"
   }
 }
