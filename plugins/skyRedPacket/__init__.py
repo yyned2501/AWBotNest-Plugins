@@ -22,12 +22,14 @@ import time
 __plugin__ = {
     "name": "天空红包",
     "id": "skyRedPacket",
-    "version": "2.5.0",
+    "version": "2.5.1",
     "author": "Yy",
     "description": "天空小秘（bot 8907007783）拼手气红包自动抢：先抢再重试策略，被拒后从回调解析等待时间自动重试。",
     "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/skyRedPacket.svg",
     "scope": "user",
     "changelog": (
+        "v2.5.1 更新内容：\n"
+        "- 已结束的红包不再推送为 success/已抢，改走 warning/已结束\n"
         "v2.5.0 更新内容：\n"
         "- 重构为 retry 策略：先抢，被拒后从回调解析等待时间自动重试\n"
         "- 移除发言追踪逻辑，不再需要预判发言状态\n"
@@ -250,6 +252,17 @@ async def setup(ctx: object) -> None:
 
         # 判断是否被拒（30 秒限制）
         for attempt in range(_MAX_RETRIES):
+            # 红包已结束，不再重试
+            if "已结束" in result_text or "已过期" in result_text or "已失效" in result_text:
+                ctx.log.info("红包已结束，放弃 chat=%s msg=%s", chat_id, message.id)
+                await ctx.notify(
+                    f"🏠 群ID: {chat_id}\n\n📩 抢包结果\n   {result_text}\n\n🔗 消息链接\n   {msg_link}",
+                    level="warning",
+                    category="已结束",
+                    account=client,
+                )
+                return
+
             if "仅限最近" not in result_text and "30秒" not in result_text:
                 # 没有限制提示，说明抢到了
                 await ctx.notify(
@@ -311,10 +324,16 @@ async def setup(ctx: object) -> None:
             )
 
         # 重试耗尽，推送最终结果
+        if "已结束" in result_text or "已过期" in result_text or "已失效" in result_text:
+            level = "warning"
+            category = "已结束"
+        else:
+            level = "success" if "抢到" in result_text else "warning"
+            category = "已抢"
         await ctx.notify(
             f"🏠 群ID: {chat_id}\n\n📩 抢包结果\n   {result_text}\n\n🔗 消息链接\n   {msg_link}",
-            level="success" if result_text and "抢到" in result_text else "warning",
-            category="已抢",
+            level=level,
+            category=category,
             account=client,
         )
 
