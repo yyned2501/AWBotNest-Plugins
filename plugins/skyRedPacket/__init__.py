@@ -6,11 +6,11 @@
 # 消息含「拼手气红包」关键字，内联键盘有「抢红包」按钮，
 # 点击按钮抢红包。
 #
-# 策略（v2.5）：
+# 策略：
 # 1. 检测到拼手气红包 → 等随机初始延迟 → 点击「抢红包」
 # 2. 如果回调提示"红包前 30 秒仅限最近 20 位发言人领取"，
 #    从回调文本解析等待秒数 n，计算 message.date + n 重试
-# 3. 去重缓存持久化到 ctx.kv，热重载后不重复抢包
+# 3. 如果提示已抢过/已结束，直接跳过，不做去重
 # =============================================================================
 
 from __future__ import annotations
@@ -22,12 +22,14 @@ import time
 __plugin__ = {
     "name": "天空红包",
     "id": "skyRedPacket",
-    "version": "2.5.2",
+    "version": "2.5.3",
     "author": "Yy",
     "description": "天空小秘（bot 8907007783）拼手气红包自动抢：先抢再重试策略，被拒后从回调解析等待时间自动重试。",
     "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/skyRedPacket.svg",
     "scope": "user",
     "changelog": (
+        "v2.5.3 更新内容：\n"
+        "- 移除全部去重逻辑，见到新红包就抢，已抢过/已结束由回调提示处理\n"
         "v2.5.2 更新内容：\n"
         "- 移除 ctx.kv 持久化去重（热重载不频繁，内存去重已够用）\n"
         "v2.5.1 更新内容：\n"
@@ -86,10 +88,6 @@ __plugin__ = {
 }
 
 BOT_ID = 8907007783
-_CLICKED_TTL = 3600
-
-# 去重缓存（内存级，仅用于同 session 防重复）
-_clicked: dict[str, float] = {}
 # 最大重试次数
 _MAX_RETRIES = 5
 
@@ -105,14 +103,6 @@ def _parse_groups(raw: str) -> list[int]:
             except ValueError:
                 pass
     return groups
-
-
-def _prune_clicked() -> None:
-    """清理过期的内存去重记录。"""
-    now = time.time()
-    stale = [k for k, ts in _clicked.items() if now - ts > _CLICKED_TTL]
-    for k in stale:
-        _clicked.pop(k, None)
 
 
 def _parse_wait_seconds(callback_text: str) -> int | None:
@@ -185,14 +175,6 @@ async def setup(ctx: object) -> None:
         if not btn_pos:
             ctx.log.debug("拼手气红包消息无「抢红包」按钮，跳过 msg=%s", message.id)
             return
-
-        # 去重（按 owner 隔离，多账号安全）
-        owner_id = getattr(client, "_owner_id", 0)
-        key = f"{owner_id}:{chat_id}:{message.id}"
-        _prune_clicked()
-        if key in _clicked:
-            return
-        _clicked[key] = time.time()
 
         row, col = btn_pos
         msg_link = getattr(message, "link", "")
