@@ -2,9 +2,9 @@
 # 天空答题 · 自动触发（每小时智能触发循环）
 #
 # 由 interval 状态机驱动（每 20s 一个 tick），状态全部存 ctx.kv，幂等、热重载可恢复。
-# 每小时窗口（默认第 5 分起）开始循环：发 /info 校准 → 发「第{n}题{x}」触发 →
+# 每小时窗口（默认第 5 分起）开始循环：私聊 bot 发 /info 校准 → 发「第{n}题{x}」触发 →
 # 等答题侧检测到掉落 → 冷却 5-10 分钟 → 下一题，直到达 drops_per_hour 或跨小时。
-# 掉落计数由 group=4 的统计 handler 写入共享 kv（合并 skyDropTrigger 的核心收益）。
+# 掉落计数由答题 handler (group=5) 写入共享 kv。
 
 from __future__ import annotations
 
@@ -13,72 +13,55 @@ import re
 import time
 from datetime import datetime
 
-from .models import _DROP_REGEX, TZ, _fmt_ts, _parse_bot_ids, _parse_groups, _reply_to_own_filter
+from .models import (
+    _DROP_REGEX,
+    _FALLBACK_DROPS_PER_HOUR,
+    TZ,
+    _ensure_hour,
+    _parse_bot_ids,
+    _parse_groups,
+    refresh_stats,
+)
 
 # tick 间隔（秒）。状态机靠它推进，不做配置项。
 _TICK_SECONDS = 20
 
-# /info 未解析出本小时配额时的兜底上限（天空小秘每小时随机放行 3-4 次，取上限）
-_FALLBACK_DROPS_PER_HOUR = 4
-
-
-def _get_hour_key() -> str:
-    """当前小时标识 YYYY-MM-DD-HH（东八区），用于检测跨小时翻转。"""
-    return datetime.now(TZ).strftime("%Y-%m-%d-%H")
-
-
-def _ensure_hour(ctx: object) -> None:
-    """跨小时翻转时重置本小时状态（tick 与统计 handler 共用，幂等）。"""
-    hour_key = _get_hour_key()
-    if ctx.kv.get("trig:hour_key") != hour_key:
-        ctx.kv.set("trig:hour_key", hour_key)
-        ctx.kv.set("trig:drops_this_hour", 0)
-        ctx.kv.set("trig:question", 1)
-        ctx.kv.set("trig:attempt", 1)
-        ctx.kv.set("trig:phase", "idle")
-        ctx.kv.set("trig:info_reply", "")
-        ctx.log.info("触发循环：跨小时重置 → %s", hour_key)
+# bot /info 回复里的「当前时段剩余掉落: N」——本时段配额 = 已落地 + 剩余
+_INFO_REMAINING_RE = re.compile(r"当前时段剩余掉落[:：]\s*(\d+)")
 
 
 def _apply_info_reply(ctx: object, text: str) -> None:
-    """处理 /info 回复：提取本小时掉落配额写入 kv（供 tick 的达标判断使用）。
+    """处理 /info 回复：从「当前时段剩余掉落: N」提取本时段配额。
 
-    TODO: 天空小秘 /info 回复的具体文本格式待确认，目前仅记录原文。
-    格式确认后在此解析出「本小时配额」（每小时随机 3-4 次），写入 trig:drops_per_hour；
-    未解析到时 tick 用 _FALLBACK_DROPS_PER_HOUR 兜底。
+    bot 返回的是「剩余」次数；本时段总配额 = 本小时已落地 + 剩余，
+    写入 trig:drops_per_hour 供 tick 的达标判断（drops >= per_hour 即停）。
+    未解析到时不改 kv，tick 继续用 _FALLBACK_DROPS_PER_HOUR 兜底。
     """
-    ctx.log.info("/info 回复原文: %s", text[:200])
+    m = _INFO_REMAINING_RE.search(text)
+    if not m:
+        ctx.log.warning("/info 回复未解析出「当前时段剩余掉落」: %s", text[:200])
+        return
+    remaining = int(m.group(1))
+    drops = int(ctx.kv.get("trig:drops_this_hour", 0) or 0)
+    per_hour = drops + remaining
+    ctx.kv.set("trig:drops_per_hour", per_hour)
+    ctx.log.info("/info 校准：剩余 %d + 已掉 %d = 本时段配额 %d", remaining, drops, per_hour)
 
 
-def refresh_stats(ctx: object) -> None:
-    """把触发统计写回 trig_stats 配置项，供面板 info 字段展示（仅在状态变化时调用）。"""
-    trig = int(ctx.kv.get("trig:trigger_count", 0) or 0)
-    drop = int(ctx.kv.get("trig:drop_count", 0) or 0)
-    drops_hour = int(ctx.kv.get("trig:drops_this_hour", 0) or 0)
-    phase = ctx.kv.get("trig:phase") or "idle"
-    last_trig = _fmt_ts(ctx.kv.get("trig:last_trigger_ts", 0))
-    last_drop = _fmt_ts(ctx.kv.get("trig:last_drop_ts", 0))
-    ctx.update_config(
-        {
-            "trig_stats": (
-                f"阶段: {phase} · 本小时掉落 {drops_hour} 次\n"
-                f"累计触发 {trig} 次 · 累计掉落 {drop} 次\n"
-                f"最近触发 {last_trig} · 最近掉落 {last_drop}"
-            )
-        }
-    )
-
-
-async def _send_info(ctx: object, primary_group: int) -> None:
-    """向主群发 /info 校准。先把状态切到 await_info，发送失败也靠超时兜底。"""
+async def _send_info(ctx: object) -> None:
+    """私聊 bot 发 /info 校准（不进群，减少对群内干扰）。失败靠超时兜底。"""
     ctx.kv.set("trig:info_reply", "")
     ctx.kv.set("trig:info_sent_ts", time.time())
     ctx.kv.set("trig:phase", "await_info")
+    bot_ids = _parse_bot_ids(str(ctx.config.get("bot", "") or ""))
+    target = bot_ids[0]
+    if isinstance(target, str) and not target.startswith("@"):
+        target = f"@{target}"
     try:
-        await ctx.user.send(primary_group, "/info")
-        ctx.log.info("已发送 /info 到主群 %s", primary_group)
+        await ctx.user.send(target, "/info")
+        ctx.log.info("已私聊 bot %s 发送 /info", target)
     except Exception as e:
-        ctx.log.warning("发送 /info 失败: %r（等待超时后自动兜底发触发）", e)
+        ctx.log.warning("私聊 /info 失败: %r（等待超时后自动兜底发触发）", e)
 
 
 async def _send_trigger(ctx: object, cfg: dict, groups: list[int]) -> None:
@@ -142,18 +125,9 @@ async def _trigger_tick(ctx: object) -> None:
     groups = _parse_groups(str(cfg.get("target_groups", "") or ""))
     if not groups:
         return
-    primary = groups[0]
     drops = int(ctx.kv.get("trig:drops_this_hour", 0) or 0)
     # 每小时掉落配额来自 /info 解析（写入 kv）；未解析到用兜底上限
     per_hour = int(ctx.kv.get("trig:drops_per_hour", 0) or 0) or _FALLBACK_DROPS_PER_HOUR
-
-    # 心跳诊断日志：每 9 个 tick（约 3 分钟）记一条，确认状态机在跑 + 当前状态
-    tick_n = int(ctx.kv.get("trig:tick_n", 0) or 0) + 1
-    ctx.kv.set("trig:tick_n", tick_n)
-    if tick_n % 9 == 1:
-        ctx.log.info(
-            "触发心跳 #%d: phase=%s drops=%d/%d minute=%d", tick_n, phase, drops, per_hour, datetime.now(TZ).minute
-        )
 
     # ── IDLE：决定本小时是否开始/继续触发 ──
     if phase == "idle":
@@ -163,7 +137,7 @@ async def _trigger_tick(ctx: object) -> None:
         if drops >= per_hour:
             return  # 本小时已达标
         if cfg.get("trig_use_info", True):
-            await _send_info(ctx, primary)  # 本小时先 /info 校准
+            await _send_info(ctx)  # 本小时先私聊 bot 发 /info 校准
         else:
             await _send_trigger(ctx, cfg, groups)
         return
@@ -192,7 +166,7 @@ async def _trigger_tick(ctx: object) -> None:
         attempt = int(ctx.kv.get("trig:attempt", 1) or 1)
 
         if last_drop > trig_sent:
-            # 发出触发后有掉落落地（计数已由统计 handler 写入 drops）
+            # 发出触发后有掉落落地（计数已由答题 handler 写入 drops）
             question = int(ctx.kv.get("trig:question", 1) or 1)
             ctx.log.info("触发成功（第%d题第%d次），本小时累计掉落 %d 次", question, attempt, drops)
             ctx.kv.set("trig:question", question + 1)
@@ -216,9 +190,9 @@ async def _trigger_tick(ctx: object) -> None:
                 ctx.kv.set("trig:attempt", 1)
                 _enter_cooldown(ctx, cfg, now)
             elif info_every > 0 and failed % info_every == 0 and cfg.get("trig_use_info", True):
-                # 连续 info_every 次未掉落 → 发 /info 检查
-                ctx.log.info("连续 %d 次未掉落，发 /info 检查", failed)
-                await _send_info(ctx, primary)
+                # 连续 info_every 次未掉落 → 私聊 bot 发 /info 检查
+                ctx.log.info("连续 %d 次未掉落，私聊 bot 发 /info 检查", failed)
+                await _send_info(ctx)
             else:
                 await _send_trigger(ctx, cfg, groups)  # 同题重试（n 不变 x 升高）
         return
@@ -230,34 +204,14 @@ async def _trigger_tick(ctx: object) -> None:
         return
 
 
-def register_stats_handler(ctx: object) -> None:
-    """统计 handler（group=4，宽匹配：统计所有掉落，不要求回复自己）。
+def register_info_handler(ctx: object) -> None:
+    """/info 回复捕获 handler（group=6）：私聊 bot 时捕获其回复，排除掉落消息。
 
-    掉落计数的唯一写入点：把 last_drop_ts 与本小时掉落数写进共享 kv，
-    供触发状态机读取（合并的核心协同点）。
-    bot 过滤取自全局「bot」配置（注册时读取，改配置重载后生效）。
+    /info 走私聊（不进群），所以这里监听 private 聊天里 bot 发来的文本；
+    仅在 await_info 阶段记录，其他时候的 bot 私聊消息一律忽略。
     """
     bot_ids = _parse_bot_ids(str(ctx.config.get("bot", "") or ""))
-    stats_filter = ctx.filters.group & ctx.filters.user(bot_ids) & ctx.filters.text & ctx.filters.regex(_DROP_REGEX)
-
-    @ctx.on_message(stats_filter, group=4)
-    async def _on_drop(client: object, message: object) -> None:
-        _ensure_hour(ctx)
-        drops = int(ctx.kv.get("trig:drops_this_hour", 0) or 0) + 1
-        ctx.kv.set("trig:drops_this_hour", drops)
-        ctx.kv.set("trig:last_drop_ts", time.time())
-        total = int(ctx.kv.get("trig:drop_count", 0) or 0) + 1
-        ctx.kv.set("trig:drop_count", total)
-        ctx.log.info("检测到天空掉落（本小时第 %d 次 · 累计 %d 次）msg=%s", drops, total, getattr(message, "id", "?"))
-        refresh_stats(ctx)
-
-
-def register_info_handler(ctx: object) -> None:
-    """/info 回复捕获 handler（group=6）：等待 /info 时捕获 bot 回复，排除掉落消息。"""
-    bot_ids = _parse_bot_ids(str(ctx.config.get("bot", "") or ""))
-    info_filter = (
-        ctx.filters.group & ctx.filters.user(bot_ids) & ctx.filters.text & ctx.filters.create(_reply_to_own_filter)
-    )
+    info_filter = ctx.filters.private & ctx.filters.user(bot_ids) & ctx.filters.text
 
     @ctx.on_message(info_filter, group=6)
     async def _on_info_reply(client: object, message: object) -> None:
@@ -265,7 +219,7 @@ def register_info_handler(ctx: object) -> None:
             return
         text = (message.text or "").strip()
         if re.search(_DROP_REGEX, text):
-            return  # 是掉落答题消息，交给答题/统计 handler
+            return  # 是掉落答题消息，交给答题 handler
         ctx.kv.set("trig:info_reply", text)
         ctx.log.info("捕获 /info 回复: %s", text[:200])
 
@@ -280,3 +234,4 @@ def start_trigger(ctx: object) -> None:
             ctx.log.error("触发 tick 异常: %r", e)
 
     ctx.schedule(_tick, "interval", seconds=_TICK_SECONDS, id="trigger_tick")
+    ctx.log.info("触发状态机已启动（每 %ds 一个 tick）", _TICK_SECONDS)

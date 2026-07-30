@@ -10,7 +10,7 @@
 #   models.py    常量与纯工具函数（无 ctx 依赖）
 #   templates.py 答题模板管理（加载/去重/学习/验证/匹配 + 模板 API）
 #   answer.py    答题主逻辑（按钮匹配 + 提交 + 通知）
-#   trigger.py   每小时触发状态机 + 掉落统计 + /info 回复捕获
+#   trigger.py   每小时触发状态机 + /info 回复捕获
 # =============================================================================
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ __plugin__ = {
         "- 合并天空掉落触发插件，按功能拆分 models/templates/answer/trigger 四个模块\n"
         "- 新增每小时智能触发循环：/info 校准 + 第{n}题{x} 触发 + 掉落检测 + 随机冷却\n"
         "- 新增「全局设置」分组：目标群组、机器人统一配置；答题奖励更名「自动答题」\n"
-        "- 每小时掉落目标改为从 /info 自动读取（天空小秘每小时随机放行 3-4 次）\n"
+        "- 每小时掉落目标改为从 /info 自动读取：私聊 bot 发 /info，解析「当前时段剩余掉落」\n"
         "- 触发消息模板可配置（{n}=题号 {x}=尝试次数），连续 N 次未掉落自动发 /info 检查\n"
         "- 【注意】原 skyDropTrigger 的配置不会自动迁移，需在新分组重新配置\n"
         "v1.10.6 更新内容：\n"
@@ -51,7 +51,7 @@ __plugin__ = {
             "default": "-1001326208894",
             "label": "目标群组（一行一个ID）",
             "section": "全局设置",
-            "help": "触发消息发到这些群，一行一个。首行为主群（/info 发这里）。",
+            "help": "触发消息发到这些群，一行一个。/info 校准走私聊 bot，不占用群。",
             "order": 1,
         },
         "bot": {
@@ -197,7 +197,7 @@ __plugin__ = {
             "default": True,
             "label": "发送/info校准",
             "section": "自动触发",
-            "help": "每小时先发 /info 读取本小时掉落目标；连续失败时也用它检查",
+            "help": "每小时私聊 bot 发 /info 读取「当前时段剩余掉落」；连续失败时也用它检查",
             "order": 28,
         },
         "trig_message_template": {
@@ -224,9 +224,7 @@ async def setup(ctx: object) -> None:
     # 加载答题模板（去重 + 从 kv 恢复命中计数）
     templates = templates_mod.load_templates(ctx)
 
-    # 掉落统计 handler（group=4，宽匹配）：所有掉落都计数，写共享 kv 供触发侧读取
-    trigger_mod.register_stats_handler(ctx)
-    # 答题 handler（group=5，窄匹配：仅回复自己消息的掉落）
+    # 答题 handler（group=5，窄匹配：仅回复自己消息的掉落，含掉落计数）
     answer_mod.register_answer_handler(ctx, templates)
     # /info 回复捕获 handler（group=6）：等待 /info 时记录 bot 回复
     trigger_mod.register_info_handler(ctx)

@@ -286,7 +286,7 @@ return (_ctx, _cache) => {
                       }, null, 512), [
                         [_vModelText, cfg.target_groups]
                       ]),
-                      _cache[21] || (_cache[21] = _createElementVNode("span", { class: "help" }, "触发消息发到这些群。首行为主群（/info 发这里）", -1))
+                      _cache[21] || (_cache[21] = _createElementVNode("span", { class: "help" }, "触发消息发到这些群，一行一个（/info 校准走私聊 bot，不占群）", -1))
                     ]),
                     _createElementVNode("div", _hoisted_9, [
                       _cache[22] || (_cache[22] = _createElementVNode("span", { class: "lbl" }, "天空小秘机器人", -1)),
@@ -417,7 +417,7 @@ return (_ctx, _cache) => {
                         _cache[41] || (_cache[41] = _createElementVNode("span", {
                           class: "help",
                           style: {"margin-top":"-4px"}
-                        }, "每小时掉落目标自动从 /info 读取（天空小秘每小时随机放行 3-4 次），无需手动设置", -1)),
+                        }, "每小时掉落目标自动从 /info 读取（私聊 bot，读「当前时段剩余掉落」），无需手动设置", -1)),
                         _createElementVNode("div", _hoisted_24, [
                           _cache[37] || (_cache[37] = _createElementVNode("span", { class: "lbl" }, "触发消息模板", -1)),
                           _withDirectives(_createElementVNode("input", {
@@ -570,7 +570,7 @@ return (_ctx, _cache) => {
                         _cache[56] || (_cache[56] = _createElementVNode("span", {
                           class: "help",
                           style: {"margin-top":"-4px"}
-                        }, "每小时先发 /info 校准；连续失败时也用它检查", -1))
+                        }, "每小时私聊 bot 发 /info 校准；连续失败时也用它检查", -1))
                       ]),
                       _createElementVNode("section", _hoisted_35, [
                         _cache[57] || (_cache[57] = _createElementVNode("div", { class: "card-h" }, "触发统计", -1)),
@@ -701,6 +701,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const Config = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-f8873b5f"]]);
+const Config = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-d9a36e80"]]);
 
 export { Config as default };

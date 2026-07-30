@@ -171,7 +171,7 @@ async function saveEdit(tpl) {
             <div class="fld">
               <span class="lbl">目标群组（一行一个ID）</span>
               <textarea v-model="cfg.target_groups" class="inp" rows="3" spellcheck="false"></textarea>
-              <span class="help">触发消息发到这些群。首行为主群（/info 发这里）</span>
+              <span class="help">触发消息发到这些群，一行一个（/info 校准走私聊 bot，不占群）</span>
             </div>
             <div class="fld">
               <span class="lbl">天空小秘机器人</span>
@@ -237,7 +237,7 @@ async function saveEdit(tpl) {
               <span>启用自动触发</span>
             </label>
             <span class="help" style="margin-top:-4px">每小时智能循环：/info 校准 → 发「第n题x」触发掉落 → 冷却后再来</span>
-            <span class="help" style="margin-top:-4px">每小时掉落目标自动从 /info 读取（天空小秘每小时随机放行 3-4 次），无需手动设置</span>
+            <span class="help" style="margin-top:-4px">每小时掉落目标自动从 /info 读取（私聊 bot，读「当前时段剩余掉落」），无需手动设置</span>
             <div class="fld">
               <span class="lbl">触发消息模板</span>
               <input v-model="cfg.trig_message_template" class="inp" placeholder="第{n}题{x}" />
@@ -286,7 +286,7 @@ async function saveEdit(tpl) {
               <input v-model="cfg.trig_use_info" type="checkbox" />
               <span>发送/info校准</span>
             </label>
-            <span class="help" style="margin-top:-4px">每小时先发 /info 校准；连续失败时也用它检查</span>
+            <span class="help" style="margin-top:-4px">每小时私聊 bot 发 /info 校准；连续失败时也用它检查</span>
           </section>
 
           <section class="card">
