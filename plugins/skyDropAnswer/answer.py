@@ -180,9 +180,9 @@ def register_answer_handler(ctx: object, templates: list[dict]) -> None:
             ctx.log.info("跳过重复消息: %s", message.id)
             return
         processed_msg_ids[message.id] = now
-        reward_bots = str(ctx.config.get("reward_bot_ids", "") or "").strip()
-        if reward_bots:
-            bot_ids = [b.strip().lstrip("@") for b in reward_bots.replace("，", ",").split(",") if b.strip()]
+        bot_cfg = str(ctx.config.get("bot", "") or "").strip()
+        if bot_cfg:
+            bot_ids = [b.strip().lstrip("@") for b in bot_cfg.replace("，", ",").split(",") if b.strip()]
             sender_id = str(message.from_user.id) if message.from_user else ""
             sender_name = (message.from_user.username or "") if message.from_user else ""
             if bot_ids and sender_id not in bot_ids and sender_name not in bot_ids:

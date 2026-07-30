@@ -13,10 +13,13 @@ import re
 import time
 from datetime import datetime
 
-from .models import _DROP_REGEX, BOT_ID, TZ, _fmt_ts, _parse_groups, _reply_to_own_filter
+from .models import _DROP_REGEX, TZ, _fmt_ts, _parse_bot_ids, _parse_groups, _reply_to_own_filter
 
 # tick 间隔（秒）。状态机靠它推进，不做配置项。
 _TICK_SECONDS = 20
+
+# /info 未解析出本小时配额时的兜底上限（天空小秘每小时随机放行 3-4 次，取上限）
+_FALLBACK_DROPS_PER_HOUR = 4
 
 
 def _get_hour_key() -> str:
@@ -35,6 +38,16 @@ def _ensure_hour(ctx: object) -> None:
         ctx.kv.set("trig:phase", "idle")
         ctx.kv.set("trig:info_reply", "")
         ctx.log.info("触发循环：跨小时重置 → %s", hour_key)
+
+
+def _apply_info_reply(ctx: object, text: str) -> None:
+    """处理 /info 回复：提取本小时掉落配额写入 kv（供 tick 的达标判断使用）。
+
+    TODO: 天空小秘 /info 回复的具体文本格式待确认，目前仅记录原文。
+    格式确认后在此解析出「本小时配额」（每小时随机 3-4 次），写入 trig:drops_per_hour；
+    未解析到时 tick 用 _FALLBACK_DROPS_PER_HOUR 兜底。
+    """
+    ctx.log.info("/info 回复原文: %s", text[:200])
 
 
 def refresh_stats(ctx: object) -> None:
@@ -126,12 +139,21 @@ async def _trigger_tick(ctx: object) -> None:
     _ensure_hour(ctx)
     now = time.time()
     phase = ctx.kv.get("trig:phase") or "idle"
-    groups = _parse_groups(str(cfg.get("trig_target_groups", "") or ""))
+    groups = _parse_groups(str(cfg.get("target_groups", "") or ""))
     if not groups:
         return
     primary = groups[0]
     drops = int(ctx.kv.get("trig:drops_this_hour", 0) or 0)
-    per_hour = int(cfg.get("trig_drops_per_hour", 3) or 3)
+    # 每小时掉落配额来自 /info 解析（写入 kv）；未解析到用兜底上限
+    per_hour = int(ctx.kv.get("trig:drops_per_hour", 0) or 0) or _FALLBACK_DROPS_PER_HOUR
+
+    # 心跳诊断日志：每 9 个 tick（约 3 分钟）记一条，确认状态机在跑 + 当前状态
+    tick_n = int(ctx.kv.get("trig:tick_n", 0) or 0) + 1
+    ctx.kv.set("trig:tick_n", tick_n)
+    if tick_n % 9 == 1:
+        ctx.log.info(
+            "触发心跳 #%d: phase=%s drops=%d/%d minute=%d", tick_n, phase, drops, per_hour, datetime.now(TZ).minute
+        )
 
     # ── IDLE：决定本小时是否开始/继续触发 ──
     if phase == "idle":
@@ -152,7 +174,7 @@ async def _trigger_tick(ctx: object) -> None:
         timeout = float(cfg.get("trig_info_timeout", 60) or 60)
         reply = str(ctx.kv.get("trig:info_reply", "") or "")
         if reply:
-            ctx.log.info("/info 回复（仅校准记录，不覆写本地计数）: %s", reply[:200])
+            _apply_info_reply(ctx, reply)
             ctx.kv.set("trig:info_reply", "")
             await _send_trigger(ctx, cfg, groups)
         elif info_sent and now - info_sent > timeout:
@@ -213,8 +235,10 @@ def register_stats_handler(ctx: object) -> None:
 
     掉落计数的唯一写入点：把 last_drop_ts 与本小时掉落数写进共享 kv，
     供触发状态机读取（合并的核心协同点）。
+    bot 过滤取自全局「bot」配置（注册时读取，改配置重载后生效）。
     """
-    stats_filter = ctx.filters.group & ctx.filters.user(BOT_ID) & ctx.filters.text & ctx.filters.regex(_DROP_REGEX)
+    bot_ids = _parse_bot_ids(str(ctx.config.get("bot", "") or ""))
+    stats_filter = ctx.filters.group & ctx.filters.user(bot_ids) & ctx.filters.text & ctx.filters.regex(_DROP_REGEX)
 
     @ctx.on_message(stats_filter, group=4)
     async def _on_drop(client: object, message: object) -> None:
@@ -230,8 +254,9 @@ def register_stats_handler(ctx: object) -> None:
 
 def register_info_handler(ctx: object) -> None:
     """/info 回复捕获 handler（group=6）：等待 /info 时捕获 bot 回复，排除掉落消息。"""
+    bot_ids = _parse_bot_ids(str(ctx.config.get("bot", "") or ""))
     info_filter = (
-        ctx.filters.group & ctx.filters.user(BOT_ID) & ctx.filters.text & ctx.filters.create(_reply_to_own_filter)
+        ctx.filters.group & ctx.filters.user(bot_ids) & ctx.filters.text & ctx.filters.create(_reply_to_own_filter)
     )
 
     @ctx.on_message(info_filter, group=6)

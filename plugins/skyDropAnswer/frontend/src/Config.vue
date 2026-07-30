@@ -9,17 +9,18 @@ const props = defineProps({
 })
 
 const DEFAULTS = {
+  // 全局设置
+  target_groups: '-1001326208894',
+  bot: '',
+  // 自动答题
   enable_reward_answer: false,
-  reward_bot_ids: '',
   reward_delay_min: 2,
   reward_delay_max: 5,
   use_ai_fallback: true,
   enable_template_learning: true,
   // 自动触发
   trig_enabled: false,
-  trig_target_groups: '-1001326208894',
   trig_start_min: 5,
-  trig_drops_per_hour: 3,
   trig_max_attempts: 10,
   trig_info_every: 5,
   trig_cooldown_min: 5,
@@ -32,12 +33,13 @@ const DEFAULTS = {
 }
 
 const GROUPS = [
-  { key: 'reward', label: '答题奖励' },
+  { key: 'global', label: '全局设置' },
   { key: 'trigger', label: '自动触发' },
+  { key: 'reward', label: '自动答题' },
   { key: 'templates', label: '学习模板' },
 ]
 
-const group = ref('reward')
+const group = ref('global')
 const loading = ref(true)
 const saving = ref(false)
 const cfg = reactive({ ...DEFAULTS })
@@ -160,21 +162,39 @@ async function saveEdit(tpl) {
       </aside>
 
       <div class="detail">
-        <!-- ============ 答题奖励 ============ -->
-        <template v-if="group === 'reward'">
-          <h3 class="det-title">答题奖励</h3>
+        <!-- ============ 全局设置 ============ -->
+        <template v-if="group === 'global'">
+          <h3 class="det-title">全局设置</h3>
+
+          <section class="card">
+            <div class="card-h">目标与机器人</div>
+            <div class="fld">
+              <span class="lbl">目标群组（一行一个ID）</span>
+              <textarea v-model="cfg.target_groups" class="inp" rows="3" spellcheck="false"></textarea>
+              <span class="help">触发消息发到这些群。首行为主群（/info 发这里）</span>
+            </div>
+            <div class="fld">
+              <span class="lbl">天空小秘机器人</span>
+              <input v-model="cfg.bot" class="inp" placeholder="@用户名 或 数字ID，逗号分隔可填多个" />
+              <span class="help">留空=默认天空小秘。答题过滤与掉落统计都认这个</span>
+            </div>
+          </section>
+
+          <div class="savebar">
+            <button class="btn primary lg" :disabled="saving" @click="save">{{ saving ? '保存中…' : '保存配置' }}</button>
+          </div>
+        </template>
+
+        <!-- ============ 自动答题 ============ -->
+        <template v-else-if="group === 'reward'">
+          <h3 class="det-title">自动答题</h3>
 
           <section class="card">
             <div class="card-h">基础设置</div>
             <label class="row switch">
               <input v-model="cfg.enable_reward_answer" type="checkbox" />
-              <span>开启答题奖励</span>
+              <span>开启自动答题</span>
             </label>
-            <div class="fld">
-              <span class="lbl">答题机器人</span>
-              <input v-model="cfg.reward_bot_ids" class="inp" placeholder="@机器人用户名，逗号分隔" />
-              <span class="help">@机器人用户名，逗号分隔。留空=不限</span>
-            </div>
             <div class="grid">
               <div class="fld">
                 <span class="lbl">延迟最小(秒)</span>
@@ -217,11 +237,7 @@ async function saveEdit(tpl) {
               <span>启用自动触发</span>
             </label>
             <span class="help" style="margin-top:-4px">每小时智能循环：/info 校准 → 发「第n题x」触发掉落 → 冷却后再来</span>
-            <div class="fld">
-              <span class="lbl">目标群组（一行一个ID）</span>
-              <textarea v-model="cfg.trig_target_groups" class="inp" rows="3" spellcheck="false"></textarea>
-              <span class="help">触发消息发到这些群。首行为主群（/info 发这里）</span>
-            </div>
+            <span class="help" style="margin-top:-4px">每小时掉落目标自动从 /info 读取（天空小秘每小时随机放行 3-4 次），无需手动设置</span>
             <div class="fld">
               <span class="lbl">触发消息模板</span>
               <input v-model="cfg.trig_message_template" class="inp" placeholder="第{n}题{x}" />
@@ -236,11 +252,6 @@ async function saveEdit(tpl) {
                 <span class="lbl">触发窗口起始分</span>
                 <input v-model.number="cfg.trig_start_min" class="inp" type="number" min="0" max="30" />
                 <span class="help">每小时第几分开始触发</span>
-              </div>
-              <div class="fld">
-                <span class="lbl">每小时目标掉落数</span>
-                <input v-model.number="cfg.trig_drops_per_hour" class="inp" type="number" min="1" max="6" />
-                <span class="help">达到就停手</span>
               </div>
               <div class="fld">
                 <span class="lbl">单题最大尝试次数</span>

@@ -30,9 +30,10 @@ __plugin__ = {
         "v2.0.0 重大更新（合并 skyDropTrigger）：\n"
         "- 合并天空掉落触发插件，按功能拆分 models/templates/answer/trigger 四个模块\n"
         "- 新增每小时智能触发循环：/info 校准 + 第{n}题{x} 触发 + 掉落检测 + 随机冷却\n"
+        "- 新增「全局设置」分组：目标群组、机器人统一配置；答题奖励更名「自动答题」\n"
+        "- 每小时掉落目标改为从 /info 自动读取（天空小秘每小时随机放行 3-4 次）\n"
         "- 触发消息模板可配置（{n}=题号 {x}=尝试次数），连续 N 次未掉落自动发 /info 检查\n"
-        "- 答题侧统计掉落写入共享 kv，触发侧直接读取，无需跨插件通信\n"
-        "- 【注意】原 skyDropTrigger 的配置不会自动迁移，需在「自动触发」分组重新配置\n"
+        "- 【注意】原 skyDropTrigger 的配置不会自动迁移，需在新分组重新配置\n"
         "v1.10.6 更新内容：\n"
         "- 推送通知时附带题目原文，方便管理员验证答案正确性\n"
         "v1.10.5 更新内容：\n"
@@ -44,57 +45,66 @@ __plugin__ = {
     "render_mode": "vue",
     "default_enabled": False,
     "config_schema": {
-        # ── 答题奖励 ──
+        # ── 全局设置 ──
+        "target_groups": {
+            "type": "text",
+            "default": "-1001326208894",
+            "label": "目标群组（一行一个ID）",
+            "section": "全局设置",
+            "help": "触发消息发到这些群，一行一个。首行为主群（/info 发这里）。",
+            "order": 1,
+        },
+        "bot": {
+            "type": "string",
+            "default": "",
+            "label": "天空小秘机器人",
+            "section": "全局设置",
+            "help": "@用户名 或 数字ID，逗号分隔可填多个。留空=默认天空小秘。",
+            "order": 2,
+        },
+        # ── 自动答题 ──
         "enable_reward_answer": {
             "type": "boolean",
             "default": False,
-            "label": "开启答题奖励",
-            "section": "答题奖励",
-            "order": 1,
-        },
-        "reward_bot_ids": {
-            "type": "string",
-            "default": "",
-            "label": "答题机器人",
-            "section": "答题奖励",
-            "help": "@机器人用户名，逗号分隔",
-            "order": 2,
+            "label": "开启自动答题",
+            "section": "自动答题",
+            "order": 10,
         },
         "reward_delay_min": {
             "type": "number",
             "default": 2,
             "label": "延迟最小",
-            "section": "答题奖励",
+            "section": "自动答题",
             "min": 1,
             "max": 30,
             "help": "秒",
-            "order": 3,
+            "order": 11,
         },
         "reward_delay_max": {
             "type": "number",
             "default": 5,
             "label": "延迟最大",
-            "section": "答题奖励",
+            "section": "自动答题",
             "min": 1,
             "max": 60,
             "help": "秒",
-            "order": 4,
+            "order": 12,
         },
         "use_ai_fallback": {
             "type": "boolean",
             "default": True,
             "label": "AI智能答题",
-            "section": "答题奖励",
+            "section": "自动答题",
             "help": "未知题型时使用AI分析并回答",
-            "order": 5,
+            "order": 13,
         },
         "enable_template_learning": {
             "type": "boolean",
             "default": True,
             "label": "AI学习模板",
-            "section": "答题奖励",
+            "section": "自动答题",
             "help": "AI答完题后自动生成模板.py文件，下次同类题直接脚本答",
-            "order": 6,
+            "order": 14,
         },
         # ── 自动触发 ──
         "trig_enabled": {
@@ -102,15 +112,8 @@ __plugin__ = {
             "default": False,
             "label": "启用自动触发",
             "section": "自动触发",
-            "order": 10,
-        },
-        "trig_target_groups": {
-            "type": "text",
-            "default": "-1001326208894",
-            "label": "目标群组（一行一个ID）",
-            "section": "自动触发",
-            "help": "触发消息发到这些群，一行一个。首行为主群（/info 发这里）。",
-            "order": 11,
+            "help": "每小时掉落目标自动从 /info 读取（随机 3-4 次）",
+            "order": 20,
         },
         "trig_start_min": {
             "type": "slider",
@@ -121,18 +124,7 @@ __plugin__ = {
             "max": 30,
             "step": 1,
             "help": "每小时第几分开始触发循环",
-            "order": 12,
-        },
-        "trig_drops_per_hour": {
-            "type": "slider",
-            "default": 3,
-            "label": "每小时目标掉落数",
-            "section": "自动触发",
-            "min": 1,
-            "max": 6,
-            "step": 1,
-            "help": "本小时检测到这么多掉落就停手",
-            "order": 13,
+            "order": 21,
         },
         "trig_max_attempts": {
             "type": "slider",
@@ -143,7 +135,7 @@ __plugin__ = {
             "max": 20,
             "step": 1,
             "help": "同一题触发这么多次仍无掉落就放弃该题",
-            "order": 14,
+            "order": 22,
         },
         "trig_info_every": {
             "type": "slider",
@@ -154,7 +146,7 @@ __plugin__ = {
             "max": 10,
             "step": 1,
             "help": "连续这么多次触发未掉落时发 /info 检查状态，0=不检查",
-            "order": 15,
+            "order": 23,
         },
         "trig_cooldown_min": {
             "type": "slider",
@@ -165,7 +157,7 @@ __plugin__ = {
             "max": 30,
             "step": 1,
             "help": "一次触发成功后随机等待的分钟数下限",
-            "order": 16,
+            "order": 24,
         },
         "trig_cooldown_max": {
             "type": "slider",
@@ -176,7 +168,7 @@ __plugin__ = {
             "max": 30,
             "step": 1,
             "help": "一次触发成功后随机等待的分钟数上限",
-            "order": 17,
+            "order": 25,
         },
         "trig_info_timeout": {
             "type": "slider",
@@ -187,7 +179,7 @@ __plugin__ = {
             "max": 300,
             "step": 5,
             "help": "发 /info 后这么久没收到回复就用本地计数继续",
-            "order": 18,
+            "order": 26,
         },
         "trig_drop_timeout": {
             "type": "slider",
@@ -197,16 +189,16 @@ __plugin__ = {
             "min": 30,
             "max": 600,
             "step": 10,
-            "help": "发触发消息后这么久没掉落视为失败，进行下一次尝试",
-            "order": 19,
+            "help": "发「第n题x」后这么久没掉落就发下一条（第n题x+1 的间隔）",
+            "order": 27,
         },
         "trig_use_info": {
             "type": "boolean",
             "default": True,
             "label": "发送/info校准",
             "section": "自动触发",
-            "help": "每小时先发 /info 校准；连续失败时也会用它检查",
-            "order": 20,
+            "help": "每小时先发 /info 读取本小时掉落目标；连续失败时也用它检查",
+            "order": 28,
         },
         "trig_message_template": {
             "type": "string",
@@ -214,13 +206,13 @@ __plugin__ = {
             "label": "触发消息模板",
             "section": "自动触发",
             "help": "{n}=本小时题号 {x}=本题尝试次数，如 第{n}题{x}",
-            "order": 21,
+            "order": 29,
         },
         "trig_stats": {
             "type": "info",
             "label": "触发统计",
             "section": "自动触发",
-            "order": 22,
+            "order": 30,
         },
     },
 }

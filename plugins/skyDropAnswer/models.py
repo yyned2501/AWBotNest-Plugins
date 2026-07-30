@@ -109,6 +109,23 @@ def _pick_message(cfg: dict[str, Any]) -> str:
     return random.choice(pool)
 
 
+def _parse_bot_ids(raw: str) -> list[int | str]:
+    """解析 bot 配置（@用户名 或 数字ID，逗号分隔）为 filters.user 可用的列表。
+
+    纯数字转 int（pyrogram 按 ID 过滤更快），其余按用户名。留空回退默认天空小秘。
+    """
+    out: list[int | str] = []
+    for part in (raw or "").replace("，", ",").split(","):
+        part = part.strip().lstrip("@")
+        if not part:
+            continue
+        try:
+            out.append(int(part))
+        except ValueError:
+            out.append(part)
+    return out or [BOT_ID]
+
+
 def _fmt_ts(ts: object) -> str:
     """时间戳 → MM-DD HH:MM（东八区）；无效值返回 —。"""
     try:
