@@ -38,5 +38,13 @@
     "description": "天空答题奖励，自动回复机器人的数学题/找不同/映射记忆，AI兜底未知题型。",
     "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/skyDropAnswer.svg",
     "path": "plugins/skyDropAnswer/"
+  },
+  "skyDropTrigger": {
+    "name": "天空掉落触发",
+    "version": "1.0.0",
+    "author": "Yy",
+    "description": "按 cron 定时向目标群发聊天消息，触发天空小秘掉落答题，配合 skyDropAnswer 自动答题赚银元。",
+    "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/skyDropTrigger.svg",
+    "path": "plugins/skyDropTrigger/"
   }
 }
