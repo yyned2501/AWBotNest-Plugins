@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <defs>
+    <linearGradient id="bg5" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#00acc1"/>
+      <stop offset="100%" stop-color="#006064"/>
+    </linearGradient>
+  </defs>
+  <rect width="128" height="128" rx="24" fill="url(#bg5)"/>
+  <!-- 硬币 -->
+  <circle cx="64" cy="60" r="32" fill="none" stroke="#fff" stroke-width="4"/>
+  <circle cx="64" cy="60" r="24" fill="none" stroke="#fff" stroke-width="2" opacity="0.4"/>
+  <text x="64" y="68" font-family="sans-serif" font-size="36" font-weight="bold" fill="#ffd54f" text-anchor="middle" dominant-baseline="central">$</text>
+  <!-- 刮刮乐效果 - 斜线 -->
+  <g stroke="#fff" stroke-width="2.5" stroke-linecap="round" opacity="0.5">
+    <line x1="30" y1="30" x2="50" y2="50"/>
+    <line x1="38" y1="28" x2="58" y2="48"/>
+    <line x1="70" y1="70" x2="98" y2="98"/>
+    <line x1="78" y1="68" x2="100" y2="90"/>
+    <line x1="28" y1="82" x2="50" y2="90"/>
+    <line x1="82" y1="28" x2="98" y2="44"/>
+  </g>
+  <!-- 星星装饰 -->
+  <text x="38" y="38" font-size="14" fill="#ffd54f" opacity="0.7">⭐</text>
+</svg>

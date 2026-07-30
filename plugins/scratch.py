@@ -14,11 +14,12 @@ import re
 import time
 
 __plugin__ = {
-    "name": "🎰天空刮奖",
+    "name": "天空刮奖",
     "id": "scratch",
-    "version": "1.6.1",
+    "version": "1.6.2",
     "author": "Yy",
     "description": "散财童子刮刮乐自动挂机。按钮点击+发送命令双重试，filter 层过滤 Bot+回复，每轮自动连锁。",
+    "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/scratch.svg",
     "scope": "user",
     "config_schema": {
         "target_group": {

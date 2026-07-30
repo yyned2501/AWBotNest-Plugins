@@ -43,6 +43,7 @@ __plugin__ = {
     "version": "3.1.1",
     "author": "Yy",
     "description": ("学习你的聊天偏好和说话风格，在匹配关键词的群聊中智能参与对话。冷启动：未学到偏好前不参与。"),
+    "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/learning.svg",
     "scope": "user",
     "default_enabled": False,
     "render_mode": "vue",

@@ -19,6 +19,7 @@ __plugin__ = {
     "version": "1.10.6",
     "author": "Yy",
     "description": "天空答题奖励，每题型独立.py文件，模板管理+验证循环，Vue配置面板。",
+    "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/skyDropAnswer.svg",
     "changelog": (
         "v1.10.6 更新内容：\n"
         "- 推送通知时附带题目原文，方便管理员验证答案正确性\n"

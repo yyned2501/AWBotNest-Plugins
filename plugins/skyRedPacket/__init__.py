@@ -25,6 +25,7 @@ __plugin__ = {
     "version": "2.5.0",
     "author": "Yy",
     "description": "天空小秘（bot 8907007783）拼手气红包自动抢：先抢再重试策略，被拒后从回调解析等待时间自动重试。",
+    "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/skyRedPacket.svg",
     "scope": "user",
     "changelog": (
         "v2.5.0 更新内容：\n"

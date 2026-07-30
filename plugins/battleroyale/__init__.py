@@ -27,6 +27,7 @@ __plugin__ = {
     "version": "1.0.2",
     "author": "Yy",
     "description": ("监听 @NextFunBot 大逃杀游戏，自动跟踪投票统计、每圈结算通知、自动下注（以少胜多规则）。"),
+    "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/battleroyale.svg",
     "scope": "user",
     "default_enabled": False,
     "render_mode": "vue",

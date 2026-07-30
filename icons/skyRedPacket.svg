@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <defs>
+    <linearGradient id="bg2" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#e53935"/>
+      <stop offset="100%" stop-color="#b71c1c"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#ffd54f"/>
+      <stop offset="100%" stop-color="#ff8f00"/>
+    </linearGradient>
+  </defs>
+  <rect width="128" height="128" rx="24" fill="url(#bg2)"/>
+  <!-- 红包形状 -->
+  <rect x="28" y="30" width="72" height="68" rx="8" fill="#fff" opacity="0.15"/>
+  <rect x="34" y="36" width="60" height="56" rx="6" fill="#fff" opacity="0.2"/>
+  <!-- 金字 -->
+  <text x="64" y="62" font-family="sans-serif" font-size="38" font-weight="bold" fill="#ffd54f" text-anchor="middle" dominant-baseline="central">¥</text>
+  <text x="64" y="82" font-family="sans-serif" font-size="16" font-weight="bold" fill="#ffecb3" text-anchor="middle" dominant-baseline="central">红包</text>
+  <!-- 装饰竖线 -->
+  <line x1="64" y1="30" x2="64" y2="36" stroke="#ffd54f" stroke-width="3" stroke-linecap="round"/>
+  <line x1="64" y1="92" x2="64" y2="98" stroke="#ffd54f" stroke-width="3" stroke-linecap="round"/>
+</svg>
