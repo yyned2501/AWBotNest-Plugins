@@ -23,8 +23,9 @@ const DEFAULTS = {
   trig_start_min: 5,
   trig_max_attempts: 10,
   trig_info_every: 5,
-  trig_cooldown_min: 5,
-  trig_cooldown_max: 10,
+  trig_interval: 5,
+  trig_active_start: 8,
+  trig_active_end: 23,
   trig_info_timeout: 60,
   trig_drop_timeout: 120,
   trig_use_info: true,
@@ -236,7 +237,7 @@ async function saveEdit(tpl) {
               <input v-model="cfg.trig_enabled" type="checkbox" />
               <span>启用自动触发</span>
             </label>
-            <span class="help" style="margin-top:-4px">每小时智能循环：/info 校准 → 发「第n题x」触发掉落 → 冷却后再来</span>
+            <span class="help" style="margin-top:-4px">开启时段内定时循环：/info 校准 → 发「第n题x」触发掉落 → 定时触发下一题</span>
             <span class="help" style="margin-top:-4px">每小时掉落目标自动从 /info 读取（私聊 bot，读「当前时段剩余掉落」），无需手动设置</span>
             <div class="fld">
               <span class="lbl">触发消息模板</span>
@@ -264,13 +265,19 @@ async function saveEdit(tpl) {
                 <span class="help">0=不检查</span>
               </div>
               <div class="fld">
-                <span class="lbl">冷却下限(分钟)</span>
-                <input v-model.number="cfg.trig_cooldown_min" class="inp" type="number" min="1" max="30" />
+                <span class="lbl">触发间隔(分钟)</span>
+                <input v-model.number="cfg.trig_interval" class="inp" type="number" min="1" max="60" />
+                <span class="help">一次触发完成后定时这么久再触发下一题</span>
               </div>
               <div class="fld">
-                <span class="lbl">冷却上限(分钟)</span>
-                <input v-model.number="cfg.trig_cooldown_max" class="inp" type="number" min="1" max="30" />
-                <span class="help">成功后在上下限间随机等待</span>
+                <span class="lbl">开启时段·开始(点)</span>
+                <input v-model.number="cfg.trig_active_start" class="inp" type="number" min="0" max="23" />
+                <span class="help">每天这个点起才触发</span>
+              </div>
+              <div class="fld">
+                <span class="lbl">开启时段·结束(点)</span>
+                <input v-model.number="cfg.trig_active_end" class="inp" type="number" min="0" max="23" />
+                <span class="help">到这个点停止；开始>结束=跨午夜</span>
               </div>
               <div class="fld">
                 <span class="lbl">/info等待超时(秒)</span>

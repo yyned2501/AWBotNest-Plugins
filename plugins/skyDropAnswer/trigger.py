@@ -1,14 +1,13 @@
 # -*- coding: utf-8 -*-
-# 天空答题 · 自动触发（每小时智能触发循环）
+# 天空答题 · 自动触发（开启时段内的定时触发循环）
 #
 # 由 interval 状态机驱动（每 20s 一个 tick），状态全部存 ctx.kv，幂等、热重载可恢复。
-# 每小时窗口（默认第 5 分起）开始循环：私聊 bot 发 /info 校准 → 发「第{n}题{x}」触发 →
-# 等答题侧检测到掉落 → 冷却 5-10 分钟 → 下一题，直到达 drops_per_hour 或跨小时。
-# 掉落计数由答题 handler (group=5) 写入共享 kv。
+# 仅在「开启时段」内工作：私聊 bot 发 /info 校准 → 发「第{n}题{x}」触发 →
+# 等答题侧检测到掉落 → 掉落后不再随机冷却等待，而是定时 trig_interval 分钟后触发下一题，
+# 直到达本时段配额（/info 剩余掉落）或跨小时。掉落计数由答题 handler (group=5) 写入共享 kv。
 
 from __future__ import annotations
 
-import random
 import re
 import time
 from datetime import datetime
@@ -17,6 +16,7 @@ from .models import (
     _DROP_REGEX,
     _FALLBACK_DROPS_PER_HOUR,
     TZ,
+    _ensure_day,
     _ensure_hour,
     _parse_bot_ids,
     _parse_groups,
@@ -94,21 +94,30 @@ async def _send_trigger(ctx: object, cfg: dict, groups: list[int]) -> None:
     ctx.kv.set("trig:trigger_sent_ts", now)
     ctx.kv.set("trig:last_trigger_ts", now)
     ctx.kv.set("trig:trigger_count", int(ctx.kv.get("trig:trigger_count", 0) or 0) + 1)
+    ctx.kv.set("trig:trigger_today", int(ctx.kv.get("trig:trigger_today", 0) or 0) + 1)
+    ctx.kv.set("trig:trigger_this_hour", int(ctx.kv.get("trig:trigger_this_hour", 0) or 0) + 1)
     ctx.kv.set("trig:phase", "await_drop")
     ctx.log.info("触发消息已发送: %s（n=%d x=%d）", msg, n, x)
     refresh_stats(ctx)
 
 
-def _enter_cooldown(ctx: object, cfg: dict, now: float) -> None:
-    """进入冷却：随机等待 [cooldown_min, cooldown_max] 分钟后回 idle。"""
-    c_min = float(cfg.get("trig_cooldown_min", 5) or 5)
-    c_max = float(cfg.get("trig_cooldown_max", 10) or 10)
-    if c_max < c_min:
-        c_max = c_min
-    wait = random.uniform(c_min, c_max) * 60
-    ctx.kv.set("trig:cooldown_until", now + wait)
-    ctx.kv.set("trig:phase", "cooldown")
-    ctx.log.info("进入冷却 %.0f 秒", wait)
+def _in_active_window(cfg: dict) -> bool:
+    """当前小时是否落在开启时段 [start, end] 内（含端点，支持跨午夜如 22→6）。"""
+    start = int(cfg.get("trig_active_start", 8) or 0)
+    end = int(cfg.get("trig_active_end", 23) or 0)
+    hour = datetime.now(TZ).hour
+    if start <= end:
+        return start <= hour <= end
+    return hour >= start or hour <= end  # 跨午夜
+
+
+def _schedule_next(ctx: object, cfg: dict, now: float) -> None:
+    """定时下一次触发：固定 trig_interval 分钟后由 tick 触发下一题（替代随机冷却等待）。"""
+    interval = float(cfg.get("trig_interval", 5) or 5)
+    wait = interval * 60
+    ctx.kv.set("trig:next_trigger_at", now + wait)
+    ctx.kv.set("trig:phase", "scheduled")
+    ctx.log.info("已定时下一次触发：%.0f 分钟后", wait)
 
 
 async def _trigger_tick(ctx: object) -> None:
@@ -119,6 +128,7 @@ async def _trigger_tick(ctx: object) -> None:
             ctx.kv.set("trig:phase", "idle")
         return
 
+    _ensure_day(ctx)
     _ensure_hour(ctx)
     now = time.time()
     phase = ctx.kv.get("trig:phase") or "idle"
@@ -129,6 +139,10 @@ async def _trigger_tick(ctx: object) -> None:
     # 每小时掉落配额来自 /info 解析（写入 kv）；未解析到用兜底上限
     per_hour = int(ctx.kv.get("trig:drops_per_hour", 0) or 0) or _FALLBACK_DROPS_PER_HOUR
 
+    # 开启时段门控：不在时段内不发起新触发（已在途的 await_* 让它走完）
+    if phase in ("idle", "scheduled") and not _in_active_window(cfg):
+        return
+
     # ── IDLE：决定本小时是否开始/继续触发 ──
     if phase == "idle":
         start_min = int(cfg.get("trig_start_min", 5) or 0)
@@ -137,7 +151,20 @@ async def _trigger_tick(ctx: object) -> None:
         if drops >= per_hour:
             return  # 本小时已达标
         if cfg.get("trig_use_info", True):
-            await _send_info(ctx)  # 本小时先私聊 bot 发 /info 校准
+            await _send_info(ctx)  # 先私聊 bot 发 /info 校准
+        else:
+            await _send_trigger(ctx, cfg, groups)
+        return
+
+    # ── SCHEDULED：上一次触发完成后定时等待，到点触发下一题 ──
+    if phase == "scheduled":
+        if now < float(ctx.kv.get("trig:next_trigger_at", 0) or 0):
+            return  # 还没到定时时间
+        if drops >= per_hour:
+            ctx.kv.set("trig:phase", "idle")  # 本时段已达标，回 idle
+            return
+        if cfg.get("trig_use_info", True):
+            await _send_info(ctx)  # 下一题前先 /info 刷新剩余掉落
         else:
             await _send_trigger(ctx, cfg, groups)
         return
@@ -173,9 +200,9 @@ async def _trigger_tick(ctx: object) -> None:
             ctx.kv.set("trig:attempt", 1)
             if drops >= per_hour:
                 ctx.kv.set("trig:phase", "idle")
-                ctx.log.info("本小时已达 %d 次上限，停止触发", per_hour)
+                ctx.log.info("本时段已达 %d 次上限，停止触发", per_hour)
             else:
-                _enter_cooldown(ctx, cfg, now)
+                _schedule_next(ctx, cfg, now)  # 定时触发下一题（不再随机冷却）
             refresh_stats(ctx)
             return
 
@@ -188,19 +215,13 @@ async def _trigger_tick(ctx: object) -> None:
                 ctx.log.warning("第%d题尝试 %d 次仍未掉落，放弃本题", question, attempt)
                 ctx.kv.set("trig:question", question + 1)
                 ctx.kv.set("trig:attempt", 1)
-                _enter_cooldown(ctx, cfg, now)
+                _schedule_next(ctx, cfg, now)  # 放弃本题后也定时触发下一题
             elif info_every > 0 and failed % info_every == 0 and cfg.get("trig_use_info", True):
                 # 连续 info_every 次未掉落 → 私聊 bot 发 /info 检查
                 ctx.log.info("连续 %d 次未掉落，私聊 bot 发 /info 检查", failed)
                 await _send_info(ctx)
             else:
                 await _send_trigger(ctx, cfg, groups)  # 同题重试（n 不变 x 升高）
-        return
-
-    # ── COOLDOWN：冷却结束回 idle ──
-    if phase == "cooldown":
-        if now >= float(ctx.kv.get("trig:cooldown_until", 0) or 0):
-            ctx.kv.set("trig:phase", "idle")
         return
 
 

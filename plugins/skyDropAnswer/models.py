@@ -81,33 +81,52 @@ def _get_hour_key() -> str:
     return datetime.now(TZ).strftime("%Y-%m-%d-%H")
 
 
+def _get_day_key() -> str:
+    """当日标识 YYYY-MM-DD（东八区），用于检测跨天翻转。"""
+    return datetime.now(TZ).strftime("%Y-%m-%d")
+
+
 def _ensure_hour(ctx: object) -> None:
     """跨小时翻转时重置本小时状态（tick 与答题 handler 共用，幂等）。"""
     hour_key = _get_hour_key()
     if ctx.kv.get("trig:hour_key") != hour_key:
         ctx.kv.set("trig:hour_key", hour_key)
         ctx.kv.set("trig:drops_this_hour", 0)
+        ctx.kv.set("trig:trigger_this_hour", 0)
         ctx.kv.set("trig:question", 1)
         ctx.kv.set("trig:attempt", 1)
         ctx.kv.set("trig:phase", "idle")
         ctx.kv.set("trig:info_reply", "")
+        ctx.kv.set("trig:drops_per_hour", 0)  # 清空本时段配额，由新一轮 /info 重新校准
         ctx.log.info("触发循环：跨小时重置 → %s", hour_key)
 
 
+def _ensure_day(ctx: object) -> None:
+    """跨天翻转时重置今日统计（tick 与答题 handler 共用，幂等）。"""
+    day_key = _get_day_key()
+    if ctx.kv.get("trig:day_key") != day_key:
+        ctx.kv.set("trig:day_key", day_key)
+        ctx.kv.set("trig:trigger_today", 0)
+        ctx.kv.set("trig:drop_today", 0)
+        ctx.log.info("触发统计：跨天重置 → %s", day_key)
+
+
 def refresh_stats(ctx: object) -> None:
-    """把触发统计写回 trig_stats 配置项，供面板 info 字段展示（仅在状态变化时调用）。"""
-    trig = int(ctx.kv.get("trig:trigger_count", 0) or 0)
-    drop = int(ctx.kv.get("trig:drop_count", 0) or 0)
-    drops_hour = int(ctx.kv.get("trig:drops_this_hour", 0) or 0)
+    """把触发统计写回 trig_stats，分「累计 / 今日 / 本时段」三段展示。"""
     phase = ctx.kv.get("trig:phase") or "idle"
-    last_trig = _fmt_ts(ctx.kv.get("trig:last_trigger_ts", 0))
-    last_drop = _fmt_ts(ctx.kv.get("trig:last_drop_ts", 0))
+    trig_all = int(ctx.kv.get("trig:trigger_count", 0) or 0)
+    drop_all = int(ctx.kv.get("trig:drop_count", 0) or 0)
+    trig_today = int(ctx.kv.get("trig:trigger_today", 0) or 0)
+    drop_today = int(ctx.kv.get("trig:drop_today", 0) or 0)
+    trig_hour = int(ctx.kv.get("trig:trigger_this_hour", 0) or 0)
+    drop_hour = int(ctx.kv.get("trig:drops_this_hour", 0) or 0)
     ctx.update_config(
         {
             "trig_stats": (
-                f"阶段: {phase} · 本小时掉落 {drops_hour} 次\n"
-                f"累计触发 {trig} 次 · 累计掉落 {drop} 次\n"
-                f"最近触发 {last_trig} · 最近掉落 {last_drop}"
+                f"阶段: {phase}\n"
+                f"累计    触发 {trig_all} 次 · 掉落 {drop_all} 次\n"
+                f"今日    触发 {trig_today} 次 · 掉落 {drop_today} 次\n"
+                f"本时段  触发 {trig_hour} 次 · 掉落 {drop_hour} 次"
             )
         }
     )
@@ -164,17 +183,6 @@ def _parse_bot_ids(raw: str) -> list[int | str]:
         except ValueError:
             out.append(part)
     return out or [BOT_ID]
-
-
-def _fmt_ts(ts: object) -> str:
-    """时间戳 → MM-DD HH:MM（东八区）；无效值返回 —。"""
-    try:
-        val = float(ts or 0)
-    except (TypeError, ValueError):
-        return "—"
-    if val <= 0:
-        return "—"
-    return datetime.fromtimestamp(val, TZ).strftime("%m-%d %H:%M")
 
 
 # ────────────────────────── 模板归类工具函数 ──────────────────────────

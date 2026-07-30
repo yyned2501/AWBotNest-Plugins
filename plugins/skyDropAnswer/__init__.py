@@ -1,5 +1,5 @@
 # =============================================================================
-# AWBotNest 插件：天空答题 (skyDropAnswer) v2.0.0
+# AWBotNest 插件：天空答题 (skyDropAnswer) v2.1.0
 #
 # 合并自原 skyDropTrigger + skyDropAnswer：
 #   - 答题：监听天空小秘（bot 8907007783）的银元掉落题目，模板/AI 解答并点击按钮领取
@@ -22,11 +22,16 @@ from . import trigger as trigger_mod
 __plugin__ = {
     "name": "天空答题",
     "id": "skyDropAnswer",
-    "version": "2.0.0",
+    "version": "2.1.0",
     "author": "Yy",
     "description": "天空答题奖励 + 每小时智能触发：模板管理/AI答题/自动触发掉落一体化。",
     "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/skyDropAnswer.svg",
     "changelog": (
+        "v2.1.0 更新：\n"
+        "- 自动触发新增「开启时段」：只在设定的小时范围内触发（默认 8-23 点，支持跨午夜）\n"
+        "- 掉落后不再随机冷却等待，改用定时任务按固定「触发间隔」触发下一题\n"
+        "- 移除冷却上下限配置，新增「触发间隔(分钟)」；跨小时自动清空配额重新 /info 校准\n"
+        "- 触发统计改为「累计 / 今日 / 本时段」三段，各含触发次数与掉落次数\n"
         "v2.0.0 重大更新（合并 skyDropTrigger）：\n"
         "- 合并天空掉落触发插件，按功能拆分 models/templates/answer/trigger 四个模块\n"
         "- 新增每小时智能触发循环：/info 校准 + 第{n}题{x} 触发 + 掉落检测 + 随机冷却\n"
@@ -112,7 +117,7 @@ __plugin__ = {
             "default": False,
             "label": "启用自动触发",
             "section": "自动触发",
-            "help": "每小时掉落目标自动从 /info 读取（随机 3-4 次）",
+            "help": "在开启时段内定时触发；掉落目标自动从 /info 读取",
             "order": 20,
         },
         "trig_start_min": {
@@ -148,27 +153,38 @@ __plugin__ = {
             "help": "连续这么多次触发未掉落时发 /info 检查状态，0=不检查",
             "order": 23,
         },
-        "trig_cooldown_min": {
+        "trig_interval": {
             "type": "slider",
             "default": 5,
-            "label": "冷却下限(分钟)",
+            "label": "触发间隔(分钟)",
             "section": "自动触发",
             "min": 1,
-            "max": 30,
+            "max": 60,
             "step": 1,
-            "help": "一次触发成功后随机等待的分钟数下限",
+            "help": "一次触发完成后，定时这么久再触发下一题（替代随机冷却）",
             "order": 24,
         },
-        "trig_cooldown_max": {
+        "trig_active_start": {
             "type": "slider",
-            "default": 10,
-            "label": "冷却上限(分钟)",
+            "default": 8,
+            "label": "开启时段·开始(点)",
             "section": "自动触发",
-            "min": 1,
-            "max": 30,
+            "min": 0,
+            "max": 23,
             "step": 1,
-            "help": "一次触发成功后随机等待的分钟数上限",
+            "help": "每天这个点起才允许触发（24 小时制）",
             "order": 25,
+        },
+        "trig_active_end": {
+            "type": "slider",
+            "default": 23,
+            "label": "开启时段·结束(点)",
+            "section": "自动触发",
+            "min": 0,
+            "max": 23,
+            "step": 1,
+            "help": "每天到这个点停止触发（含该点）；开始>结束视为跨午夜，如 22→6",
+            "order": 26,
         },
         "trig_info_timeout": {
             "type": "slider",
@@ -179,7 +195,7 @@ __plugin__ = {
             "max": 300,
             "step": 5,
             "help": "发 /info 后这么久没收到回复就用本地计数继续",
-            "order": 26,
+            "order": 27,
         },
         "trig_drop_timeout": {
             "type": "slider",
@@ -190,7 +206,7 @@ __plugin__ = {
             "max": 600,
             "step": 10,
             "help": "发「第n题x」后这么久没掉落就发下一条（第n题x+1 的间隔）",
-            "order": 27,
+            "order": 28,
         },
         "trig_use_info": {
             "type": "boolean",
@@ -198,7 +214,7 @@ __plugin__ = {
             "label": "发送/info校准",
             "section": "自动触发",
             "help": "每小时私聊 bot 发 /info 读取「当前时段剩余掉落」；连续失败时也用它检查",
-            "order": 28,
+            "order": 29,
         },
         "trig_message_template": {
             "type": "string",
@@ -206,13 +222,13 @@ __plugin__ = {
             "label": "触发消息模板",
             "section": "自动触发",
             "help": "{n}=本小时题号 {x}=本题尝试次数，如 第{n}题{x}",
-            "order": 29,
+            "order": 30,
         },
         "trig_stats": {
             "type": "info",
             "label": "触发统计",
             "section": "自动触发",
-            "order": 30,
+            "order": 31,
         },
     },
 }

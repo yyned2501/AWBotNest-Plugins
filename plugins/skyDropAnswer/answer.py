@@ -7,7 +7,7 @@ import asyncio
 import random
 import time
 
-from .models import _DROP_REGEX, _PROMPT_ANSWER, _ensure_hour, _reply_to_own_filter, refresh_stats
+from .models import _DROP_REGEX, _PROMPT_ANSWER, _ensure_day, _ensure_hour, _reply_to_own_filter, refresh_stats
 from .templates import _learn_template, _match_templates, _save_template_count, _verify_template
 
 # 防抖：记录已处理的消息 ID（带时间戳，TTL 清理防无界增长）
@@ -189,13 +189,22 @@ def register_answer_handler(ctx: object, templates: list[dict]) -> None:
                 return
 
         # 掉落计数：写入共享 kv 供触发状态机读取
+        _ensure_day(ctx)
         _ensure_hour(ctx)
         drops = int(ctx.kv.get("trig:drops_this_hour", 0) or 0) + 1
         ctx.kv.set("trig:drops_this_hour", drops)
         ctx.kv.set("trig:last_drop_ts", time.time())
         total = int(ctx.kv.get("trig:drop_count", 0) or 0) + 1
         ctx.kv.set("trig:drop_count", total)
-        ctx.log.info("检测到天空掉落（本小时第 %d 次 · 累计 %d 次）msg=%s", drops, total, message.id)
+        drop_today = int(ctx.kv.get("trig:drop_today", 0) or 0) + 1
+        ctx.kv.set("trig:drop_today", drop_today)
+        ctx.log.info(
+            "检测到天空掉落（本时段第 %d 次 · 今日第 %d 次 · 累计 %d 次）msg=%s",
+            drops,
+            drop_today,
+            total,
+            message.id,
+        )
         refresh_stats(ctx)
 
         await _answer_and_submit((message.text or "").strip(), client, message, ctx, templates)
