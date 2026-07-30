@@ -15,10 +15,25 @@ const DEFAULTS = {
   reward_delay_max: 5,
   use_ai_fallback: true,
   enable_template_learning: true,
+  // 自动触发
+  trig_enabled: false,
+  trig_target_groups: '-1001326208894',
+  trig_start_min: 5,
+  trig_drops_per_hour: 3,
+  trig_max_attempts: 10,
+  trig_info_every: 5,
+  trig_cooldown_min: 5,
+  trig_cooldown_max: 10,
+  trig_info_timeout: 60,
+  trig_drop_timeout: 120,
+  trig_use_info: true,
+  trig_message_template: '第{n}题{x}',
+  trig_stats: '',
 }
 
 const GROUPS = [
   { key: 'reward', label: '答题奖励' },
+  { key: 'trigger', label: '自动触发' },
   { key: 'templates', label: '学习模板' },
 ]
 
@@ -191,6 +206,88 @@ async function saveEdit(tpl) {
           </div>
         </template>
 
+        <!-- ============ 自动触发 ============ -->
+        <template v-else-if="group === 'trigger'">
+          <h3 class="det-title">自动触发</h3>
+
+          <section class="card">
+            <div class="card-h">基础设置</div>
+            <label class="row switch">
+              <input v-model="cfg.trig_enabled" type="checkbox" />
+              <span>启用自动触发</span>
+            </label>
+            <span class="help" style="margin-top:-4px">每小时智能循环：/info 校准 → 发「第n题x」触发掉落 → 冷却后再来</span>
+            <div class="fld">
+              <span class="lbl">目标群组（一行一个ID）</span>
+              <textarea v-model="cfg.trig_target_groups" class="inp" rows="3" spellcheck="false"></textarea>
+              <span class="help">触发消息发到这些群。首行为主群（/info 发这里）</span>
+            </div>
+            <div class="fld">
+              <span class="lbl">触发消息模板</span>
+              <input v-model="cfg.trig_message_template" class="inp" placeholder="第{n}题{x}" />
+              <span class="help">{n}=本小时题号 {x}=本题尝试次数</span>
+            </div>
+          </section>
+
+          <section class="card">
+            <div class="card-h">循环节奏</div>
+            <div class="grid">
+              <div class="fld">
+                <span class="lbl">触发窗口起始分</span>
+                <input v-model.number="cfg.trig_start_min" class="inp" type="number" min="0" max="30" />
+                <span class="help">每小时第几分开始触发</span>
+              </div>
+              <div class="fld">
+                <span class="lbl">每小时目标掉落数</span>
+                <input v-model.number="cfg.trig_drops_per_hour" class="inp" type="number" min="1" max="6" />
+                <span class="help">达到就停手</span>
+              </div>
+              <div class="fld">
+                <span class="lbl">单题最大尝试次数</span>
+                <input v-model.number="cfg.trig_max_attempts" class="inp" type="number" min="1" max="20" />
+                <span class="help">超过就放弃该题</span>
+              </div>
+              <div class="fld">
+                <span class="lbl">每几次未掉落查/info</span>
+                <input v-model.number="cfg.trig_info_every" class="inp" type="number" min="0" max="10" />
+                <span class="help">0=不检查</span>
+              </div>
+              <div class="fld">
+                <span class="lbl">冷却下限(分钟)</span>
+                <input v-model.number="cfg.trig_cooldown_min" class="inp" type="number" min="1" max="30" />
+              </div>
+              <div class="fld">
+                <span class="lbl">冷却上限(分钟)</span>
+                <input v-model.number="cfg.trig_cooldown_max" class="inp" type="number" min="1" max="30" />
+                <span class="help">成功后在上下限间随机等待</span>
+              </div>
+              <div class="fld">
+                <span class="lbl">/info等待超时(秒)</span>
+                <input v-model.number="cfg.trig_info_timeout" class="inp" type="number" min="10" max="300" />
+              </div>
+              <div class="fld">
+                <span class="lbl">等掉落超时(秒)</span>
+                <input v-model.number="cfg.trig_drop_timeout" class="inp" type="number" min="30" max="600" />
+                <span class="help">超时视为本次失败</span>
+              </div>
+            </div>
+            <label class="row switch">
+              <input v-model="cfg.trig_use_info" type="checkbox" />
+              <span>发送/info校准</span>
+            </label>
+            <span class="help" style="margin-top:-4px">每小时先发 /info 校准；连续失败时也用它检查</span>
+          </section>
+
+          <section class="card">
+            <div class="card-h">触发统计</div>
+            <div class="stats-box">{{ cfg.trig_stats || '暂无统计（启用后自动刷新）' }}</div>
+          </section>
+
+          <div class="savebar">
+            <button class="btn primary lg" :disabled="saving" @click="save">{{ saving ? '保存中…' : '保存配置' }}</button>
+          </div>
+        </template>
+
         <!-- ============ 回答模板 ============ -->
         <template v-else-if="group === 'templates'">
           <h3 class="det-title">回答模板</h3>
@@ -321,6 +418,11 @@ textarea.inp { resize: vertical; font-family: inherit; }
 .btn.danger:hover { background: #2d1b1a; }
 .savebar { position: sticky; bottom: 0; display: flex; justify-content: flex-end; padding-top: 4px; }
 .muted { font-size: 12px; color: var(--text-muted, #7a8291); }
+.stats-box {
+  font-size: 12px; line-height: 1.8; white-space: pre-line;
+  color: var(--text-secondary, #b9c0cc);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
 
 /* 模板卡片 */
 .tpl-bar { display: flex; justify-content: space-between; align-items: center; }
