@@ -25,7 +25,7 @@
   },
   "scratch": {
     "name": "天空刮奖",
-    "version": "1.6.1",
+    "version": "1.6.2",
     "author": "Yy",
     "description": "散财童子刮刮乐自动挂机。回调文本直接累加奖金（无需等消息编辑），双重试，filter 层 Bot+回复过滤。",
     "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/scratch.svg",
