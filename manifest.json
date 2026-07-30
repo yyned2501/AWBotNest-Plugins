@@ -9,7 +9,7 @@
   },
   "skyRedPacket": {
     "name": "天空红包",
-    "version": "2.5.1",
+    "version": "2.5.2",
     "author": "Yy",
     "description": "天空小秘（bot 8907007783）拼手气红包自动抢：先抢再重试，被拒后从回调解析等待时间自动重试。",
     "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/skyRedPacket.svg",

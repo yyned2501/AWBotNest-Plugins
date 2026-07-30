@@ -22,12 +22,14 @@ import time
 __plugin__ = {
     "name": "天空红包",
     "id": "skyRedPacket",
-    "version": "2.5.1",
+    "version": "2.5.2",
     "author": "Yy",
     "description": "天空小秘（bot 8907007783）拼手气红包自动抢：先抢再重试策略，被拒后从回调解析等待时间自动重试。",
     "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/skyRedPacket.svg",
     "scope": "user",
     "changelog": (
+        "v2.5.2 更新内容：\n"
+        "- 移除 ctx.kv 持久化去重（热重载不频繁，内存去重已够用）\n"
         "v2.5.1 更新内容：\n"
         "- 已结束的红包不再推送为 success/已抢，改走 warning/已结束\n"
         "v2.5.0 更新内容：\n"
@@ -85,9 +87,8 @@ __plugin__ = {
 
 BOT_ID = 8907007783
 _CLICKED_TTL = 3600
-_KV_CLICKED_PREFIX = "clicked:"
 
-# 去重缓存（内存级，启动时从 ctx.kv 恢复）
+# 去重缓存（内存级，仅用于同 session 防重复）
 _clicked: dict[str, float] = {}
 # 最大重试次数
 _MAX_RETRIES = 5
@@ -112,28 +113,6 @@ def _prune_clicked() -> None:
     stale = [k for k, ts in _clicked.items() if now - ts > _CLICKED_TTL]
     for k in stale:
         _clicked.pop(k, None)
-
-
-def _prune_clicked_kv(ctx: object) -> None:
-    """清理过期的 kv 去重记录。"""
-    now = time.time()
-    for key in ctx.kv.keys():
-        if key.startswith(_KV_CLICKED_PREFIX):
-            val = ctx.kv.get(key, 0)
-            if isinstance(val, (int, float)) and now - float(val) > _CLICKED_TTL:
-                ctx.kv.delete(key)
-
-
-def _load_clicked_from_kv(ctx: object) -> dict[str, float]:
-    """从 ctx.kv 恢复去重记录到内存。"""
-    clicked: dict[str, float] = {}
-    for key in ctx.kv.keys():
-        if key.startswith(_KV_CLICKED_PREFIX):
-            msg_key = key[len(_KV_CLICKED_PREFIX) :]
-            val = ctx.kv.get(key, 0)
-            if isinstance(val, (int, float)):
-                clicked[msg_key] = float(val)
-    return clicked
 
 
 def _parse_wait_seconds(callback_text: str) -> int | None:
@@ -187,12 +166,6 @@ async def setup(ctx: object) -> None:
     cfg = ctx.config
     ctx.log.info("天空红包插件已启用")
 
-    # 从 ctx.kv 恢复去重记录，热重载后不重复抢包
-    global _clicked
-    _clicked = _load_clicked_from_kv(ctx)
-    _prune_clicked_kv(ctx)
-    ctx.log.info("从 kv 恢复 %d 条去重记录", len(_clicked))
-
     # ─── 抢红包 Handler ────────────────────────────────
     @ctx.on_message(
         ctx.filters.group & ctx.filters.user(BOT_ID),
@@ -220,7 +193,6 @@ async def setup(ctx: object) -> None:
         if key in _clicked:
             return
         _clicked[key] = time.time()
-        ctx.kv.set(f"{_KV_CLICKED_PREFIX}{key}", time.time())
 
         row, col = btn_pos
         msg_link = getattr(message, "link", "")
