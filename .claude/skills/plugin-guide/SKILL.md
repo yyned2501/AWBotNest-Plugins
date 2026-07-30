@@ -407,7 +407,7 @@ vue 模式无平台「保存」按钮，由组件自己调 `host.saveConfig`。�
 ## 11. 本仓库专属规则（AWBotNest-Plugins）
 
 - 这是**插件市场仓库**，不是平台仓库——**不改平台内核**。
-- **改插件代码必须同步抬高 `manifest.json` 的 `version`**，否则商店识别不到更新、已安装实例收不到推送。建议同时更新 `__plugin__["changelog"]`。
+- **改插件代码必须同步提升版本号：`__plugin__["version"]`（`__init__.py`）和 `manifest.json` 对应条目一起改，漏一个算 bug**，否则商店识别不到更新、已安装实例收不到推送。建议同时更新 `__plugin__["changelog"]`。
 - 新插件先确认 `manifest.json` 里没有同 `id`，再加进去。
 - Vue 插件改了 `frontend/src` 必须 `npm run build` 重新生成 `dist/` 并提交（平台加载的是构建产物）。
 - 同步机制：直接操作远程 `AWdress/AWBotNest-Plugins`（非 fork）。
