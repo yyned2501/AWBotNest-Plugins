@@ -1,5 +1,5 @@
 # =============================================================================
-# AWBotNest 插件：天空答题 (skyDropAnswer) v2.1.1
+# AWBotNest 插件：天空答题 (skyDropAnswer) v2.1.2
 #
 # 合并自原 skyDropTrigger + skyDropAnswer：
 #   - 答题：监听天空小秘（bot 8907007783）的银元掉落题目，模板/AI 解答并点击按钮领取
@@ -22,11 +22,15 @@ from . import trigger as trigger_mod
 __plugin__ = {
     "name": "天空答题",
     "id": "skyDropAnswer",
-    "version": "2.1.1",
+    "version": "2.1.2",
     "author": "Yy",
     "description": "天空答题奖励 + 每小时智能触发：模板管理/AI答题/自动触发掉落一体化。",
     "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/skyDropAnswer.svg",
     "changelog": (
+        "v2.1.2 更新：\n"
+        "- 触发改为低频调度：不再用 20 秒 tick 逐次重试同一道题\n"
+        "- 同一题在一次整轮任务内连续尝试，短随机间隔；检测到掉落立即停止后续尝试\n"
+        "- 整轮结束后按「触发间隔」定时启动下一题，插件卸载时会取消未完成轮次\n"
         "v2.1.1 更新：\n"
         "- 触发拟人化：决定触发后随机延迟 0~「拟人延迟上限」秒再发，避免整点机械刷屏\n"
         "- 修正「已定时下一次触发」日志把秒误显示为分钟的问题\n"
@@ -269,4 +273,5 @@ async def setup(ctx: object) -> None:
 
 
 async def teardown(ctx: object) -> None:
+    trigger_mod.stop_trigger(ctx)
     ctx.log.info("天空答题已卸载")
