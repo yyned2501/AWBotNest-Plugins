@@ -39,14 +39,6 @@
     "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/skyDropAnswer.svg",
     "path": "plugins/skyDropAnswer/"
   },
-  "skyzjh": {
-    "name": "天空炸金花",
-    "version": "1.0.0",
-    "author": "Yy",
-    "description": "监听 hdsky 炸金花牌局，自动加入、看牌、好牌跟注烂牌弃牌，支持双击弃牌确认。",
-    "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/skyzjh.svg",
-    "path": "plugins/skyzjh/"
-  },
   "skyGame": {
     "name": "天空游戏",
     "version": "1.0.0",
