@@ -1,5 +1,5 @@
 # =============================================================================
-# AWBotNest 插件：天空答题 (skyDropAnswer) v2.1.3
+# AWBotNest 插件：天空答题 (skyDropAnswer) v2.1.4
 #
 # 合并自原 skyDropTrigger + skyDropAnswer：
 #   - 答题：监听天空小秘（bot 8907007783）的银元掉落题目，模板/AI 解答并点击按钮领取
@@ -22,11 +22,15 @@ from . import trigger as trigger_mod
 __plugin__ = {
     "name": "天空答题",
     "id": "skyDropAnswer",
-    "version": "2.1.3",
+    "version": "2.1.4",
     "author": "Yy",
     "description": "天空答题奖励 + 每小时智能触发：模板管理/AI答题/自动触发掉落一体化。",
     "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/skyDropAnswer.svg",
     "changelog": (
+        "v2.1.4 更新：\n"
+        "- 背诗/唱歌改为按配置行顺序逐行发（不再随机），行号存 kv 循环使用\n"
+        "- 同一行按标点符号拆成多条消息依次发，段间 1~3 秒短停顿模拟打字\n"
+        "- 发送中途检测到掉落则跳过本行剩余段，下次轮到该类别从下一行继续\n"
         "v2.1.3 更新：\n"
         "- 触发消息新增「背诗」「唱歌」两种文案类型，随机切换避免频繁发「第n题x」被系统检测\n"
         "- 新增配置项：背诗池、唱歌池，用户可自定义多行文案\n"
@@ -248,14 +252,11 @@ __plugin__ = {
         "trig_msg_poems": {
             "type": "text",
             "default": (
-                "床前明月光，疑是地上霜。\n"
-                "大漠孤烟直，长河落日圆。\n"
-                "海内存知己，天涯若比邻。\n"
-                "明月几时有？把酒问青天。"
+                "床前明月光，疑是地上霜。\n大漠孤烟直，长河落日圆。\n海内存知己，天涯若比邻。\n明月几时有？把酒问青天。"
             ),
             "label": "背诗池（一行一首）",
             "section": "自动触发",
-            "help": "触发时随机选一句发；留空=不启用背诗文案",
+            "help": "按行顺序逐行发，同行按标点拆多条；留空=不启用背诗",
             "order": 31,
         },
         "trig_msg_songs": {
@@ -267,7 +268,7 @@ __plugin__ = {
             ),
             "label": "唱歌池（一行一句）",
             "section": "自动触发",
-            "help": "触发时随机选一句发；留空=不启用唱歌文案",
+            "help": "按行顺序逐行发，同行按标点拆多条；留空=不启用唱歌",
             "order": 32,
         },
         "trig_stats": {

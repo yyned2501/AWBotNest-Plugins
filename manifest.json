@@ -33,7 +33,7 @@
   },
   "skyDropAnswer": {
     "name": "天空答题",
-    "version": "2.1.3",
+    "version": "2.1.4",
     "author": "Yy",
     "description": "天空答题奖励 + 开启时段内定时触发：模板管理/AI答题/自动触发掉落一体化（合并原 skyDropTrigger）。",
     "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/skyDropAnswer.svg",

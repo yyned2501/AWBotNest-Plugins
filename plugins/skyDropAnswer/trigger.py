@@ -1,8 +1,11 @@
 # -*- coding: utf-8 -*-
-# 天空答题 · 自动触发（低频调度 + 同题整轮触发）
+# 天空答题 · 自动触发（低频调度 + 同题整轮触发 + 多文案顺序/随机切换）
 #
 # 低频 tick 只负责判断是否该启动新一轮；同一题的多次尝试由一个 asyncio
-# 轮次任务连续调度，尝试之间短暂随机等待，检测到掉落后立即停止后续尝试。
+# 轮次任务连续调度。每次尝试随机选「模板/背诗/唱歌」三类之一：
+#   - 模板：第{n}题{x}（带变量）
+#   - 背诗/唱歌：按配置行顺序逐行发，同行按标点拆成多条依次发；
+#     中途检测到掉落则跳过本行剩余段，下次轮到该类别从下一行继续。
 
 from __future__ import annotations
 
@@ -60,36 +63,23 @@ async def _send_info(ctx: object) -> None:
         ctx.log.warning("私聊 /info 失败: %r（低频 tick 超时后自动继续）", e)
 
 
-async def _send_trigger(ctx: object, cfg: dict, groups: list[int]) -> bool:
-    """发送一次触发消息（随机选模板/背诗/唱歌）；返回是否至少成功发送到一个群。"""
-    drops = int(ctx.kv.get("trig:drops_this_hour", 0) or 0)
-    question = int(ctx.kv.get("trig:question", 1) or 1)
-    attempt = int(ctx.kv.get("trig:attempt", 1) or 1)
-    n = max(question, drops + 1)
-    msg = _pick_trigger_message(cfg, n, attempt)
-    sent = False
-    for gid in groups:
-        try:
-            await ctx.user.send(gid, msg)
-            sent = True
-        except Exception as e:
-            ctx.log.warning("向群 %s 发送触发消息失败: %r", gid, e)
-    if not sent:
-        ctx.log.warning("触发消息全部发送失败")
-        return False
-    now = time.time()
-    ctx.kv.set("trig:trigger_sent_ts", now)
-    ctx.kv.set("trig:last_trigger_ts", now)
-    ctx.kv.set("trig:trigger_count", int(ctx.kv.get("trig:trigger_count", 0) or 0) + 1)
-    ctx.kv.set("trig:trigger_today", int(ctx.kv.get("trig:trigger_today", 0) or 0) + 1)
-    ctx.kv.set("trig:trigger_this_hour", int(ctx.kv.get("trig:trigger_this_hour", 0) or 0) + 1)
-    ctx.log.info("触发消息已发送: %s（n=%d x=%d）", msg, n, attempt)
-    refresh_stats(ctx)
-    return True
+# 用于按标点拆句的正则（中英文常见标点）
+_PUNCT_SPLIT_RE = re.compile(r"[，。！？；：、,.!?;:]+")
 
 
-def _pick_trigger_message(cfg: dict, n: int, attempt: int) -> str:
-    """随机从模板/背诗/唱歌中选一种消息，避免总发「第n题x」被系统检测。"""
+def _split_by_punct(text: str) -> list[str]:
+    """按标点符号把一行拆成多条消息段；无标点则原样返回单段。"""
+    parts = [s.strip() for s in _PUNCT_SPLIT_RE.split(text) if s.strip()]
+    return parts if parts else [text.strip()] if text.strip() else []
+
+
+def _pick_trigger_segments(ctx: object, cfg: dict, n: int, attempt: int) -> list[str]:
+    """随机选一种文案类型，返回本次要发的消息段列表（可能多条）。
+
+    模板：第{n}题{x}（单段）。
+    背诗/唱歌：按配置行顺序取当前行，按标点拆成多段；
+    行号存 kv（trig:poem_idx / trig:song_idx），发完推进，循环使用。
+    """
     choices = ["template"]
     poems_raw = str(cfg.get("trig_msg_poems", "") or "").strip()
     songs_raw = str(cfg.get("trig_msg_songs", "") or "").strip()
@@ -100,16 +90,63 @@ def _pick_trigger_message(cfg: dict, n: int, attempt: int) -> str:
     if songs:
         choices.append("song")
     kind = random.choice(choices)
+
     if kind == "poem":
-        return random.choice(poems)
+        idx = int(ctx.kv.get("trig:poem_idx", 0) or 0) % len(poems)
+        ctx.kv.set("trig:poem_idx", idx + 1)
+        line = poems[idx]
+        ctx.log.info("背诗第 %d 行: %s", idx + 1, line)
+        return _split_by_punct(line)
     if kind == "song":
-        return random.choice(songs)
+        idx = int(ctx.kv.get("trig:song_idx", 0) or 0) % len(songs)
+        ctx.kv.set("trig:song_idx", idx + 1)
+        line = songs[idx]
+        ctx.log.info("唱歌第 %d 行: %s", idx + 1, line)
+        return _split_by_punct(line)
+
     # 模板消息：第{n}题{x}
     template = str(cfg.get("trig_message_template", "") or "第{n}题{x}")
     try:
-        return template.format(n=n, x=attempt)
+        msg = template.format(n=n, x=attempt)
     except (KeyError, IndexError, ValueError):
-        return f"第{n}题{attempt}"
+        msg = f"第{n}题{attempt}"
+    return [msg]
+
+
+async def _send_segments(ctx: object, groups: list[int], segments: list[str], baseline: int) -> bool:
+    """逐段发送消息；每段之间检查掉落，检测到则跳过本行剩余段。
+
+    返回是否至少成功发送了一段到一个群。
+    """
+    sent_any = False
+    for i, seg in enumerate(segments):
+        # 发送前检查：若已有新掉落，跳过本行剩余段
+        if int(ctx.kv.get("trig:drops_this_hour", 0) or 0) > baseline:
+            ctx.log.info("第 %d/%d 段发送前检测到掉落，跳过剩余 %d 段", i + 1, len(segments), len(segments) - i)
+            break
+        ok = False
+        for gid in groups:
+            try:
+                await ctx.user.send(gid, seg)
+                ok = True
+            except Exception as e:
+                ctx.log.warning("向群 %s 发送失败: %r", gid, e)
+        if not ok:
+            ctx.log.warning("段 %d/%d 全部群发送失败: %s", i + 1, len(segments), seg)
+            continue
+        sent_any = True
+        now = time.time()
+        ctx.kv.set("trig:trigger_sent_ts", now)
+        ctx.kv.set("trig:last_trigger_ts", now)
+        ctx.kv.set("trig:trigger_count", int(ctx.kv.get("trig:trigger_count", 0) or 0) + 1)
+        ctx.kv.set("trig:trigger_today", int(ctx.kv.get("trig:trigger_today", 0) or 0) + 1)
+        ctx.kv.set("trig:trigger_this_hour", int(ctx.kv.get("trig:trigger_this_hour", 0) or 0) + 1)
+        ctx.log.info("触发消息已发送 [%d/%d]: %s", i + 1, len(segments), seg)
+        refresh_stats(ctx)
+        # 段间短停顿（模拟打字节奏），同时检测掉落
+        if i < len(segments) - 1:
+            await asyncio.sleep(random.uniform(1, 3))
+    return sent_any
 
 
 def _in_active_window(cfg: dict) -> bool:
@@ -143,7 +180,11 @@ async def _wait_for_drop(ctx: object, baseline: int, seconds: float) -> bool:
 
 
 async def _question_round(ctx: object, cfg: dict, groups: list[int]) -> None:
-    """在一次任务中完成同一题的全部尝试，掉落后立即停止。"""
+    """在一次任务中完成同一题的全部尝试，掉落后立即停止。
+
+    每次尝试随机选「模板/背诗/唱歌」之一；背诗/唱歌按行顺序取，
+    同行按标点拆成多段依次发，中途掉落则跳过本行剩余段。
+    """
     baseline = int(ctx.kv.get("trig:drops_this_hour", 0) or 0)
     question = int(ctx.kv.get("trig:question", 1) or 1)
     max_attempts = int(cfg.get("trig_max_attempts", 10) or 10)
@@ -163,7 +204,9 @@ async def _question_round(ctx: object, cfg: dict, groups: list[int]) -> None:
                 ctx.log.info("第%d题第%d次，拟人延迟 %.0f 秒后发送", question, attempt, delay)
                 if await _wait_for_drop(ctx, baseline, delay):
                     break
-            sent = await _send_trigger(ctx, cfg, groups)
+            n = max(question, int(ctx.kv.get("trig:drops_this_hour", 0) or 0) + 1)
+            segments = _pick_trigger_segments(ctx, cfg, n, attempt)
+            sent = await _send_segments(ctx, groups, segments, baseline)
             if not sent:
                 break
             ctx.kv.set("trig:phase", "round")
