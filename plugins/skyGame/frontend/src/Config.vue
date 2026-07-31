@@ -15,6 +15,14 @@ const DEFAULTS = {
   bot: '',
   hdsky_cookie_file: '/app/data/hdsky_cookie.txt',
   hdsky_base_url: 'https://hdsky.supertimi.de:8443',
+  // Cookie 自动续期
+  auth_auto_renew: true,
+  cc_server: 'http://192.168.31.10:3000',
+  cc_uuid: '',
+  cc_password: '',
+  hdsky_uid: '105577',
+  auth_check_interval: 1800,
+  auth_notify: true,
   // 养马
   horse_enabled: false,
   horse_poll_interval: 120,
@@ -54,6 +62,7 @@ const HAND_TYPES = ['豹子', '同花顺', '金花', '顺子', '对子', '散牌
 const group = ref('global')
 const loading = ref(true)
 const saving = ref(false)
+const renewing = ref(false)
 const cfg = reactive({ ...DEFAULTS })
 
 onMounted(async () => {
@@ -76,6 +85,20 @@ async function save() {
     props.host.toast.error('保存失败：' + (e.message || e))
   } finally {
     saving.value = false
+  }
+}
+
+// 手动触发一次 Cookie 续期（后端 hdsky_auth，跳过防抖）
+async function renewNow() {
+  renewing.value = true
+  try {
+    const r = await props.host.callApi('/renew', { method: 'POST' })
+    if (r && r.ok) props.host.toast.success(r.message || '续期成功')
+    else props.host.toast.error((r && r.message) || '续期失败')
+  } catch (e) {
+    props.host.toast.error('续期请求失败：' + (e.message || e))
+  } finally {
+    renewing.value = false
   }
 }
 
@@ -128,11 +151,56 @@ function toggleHand(h) {
             <div class="fld">
               <span class="lbl">Cookie 文件路径</span>
               <input v-model="cfg.hdsky_cookie_file" class="inp" spellcheck="false" />
-              <span class="help">容器内路径（宿主 appdata/awbotnest/data 目录），12 小时过期需重新覆盖</span>
+              <span class="help">容器内路径（宿主 appdata/awbotnest/data 目录），过期后由下方自动续期覆盖</span>
             </div>
             <div class="fld">
               <span class="lbl">门户地址</span>
               <input v-model="cfg.hdsky_base_url" class="inp" spellcheck="false" />
+            </div>
+          </section>
+
+          <section class="card">
+            <div class="card-h">Cookie 自动续期</div>
+            <label class="row switch">
+              <input v-model="cfg.auth_auto_renew" type="checkbox" />
+              <span>门户会话过期自动续期</span>
+            </label>
+            <span class="help" style="margin-top:-4px">
+              经 MoviePilot CookieCloud 拉浏览器 cookie 快照 → 读 HDSky 站内信验证码 → 自动登录写回 Cookie 文件
+            </span>
+            <div class="grid">
+              <div class="fld">
+                <span class="lbl">CookieCloud 地址</span>
+                <input v-model="cfg.cc_server" class="inp" spellcheck="false" />
+                <span class="help">MoviePilot 内置，http://&lt;主机&gt;:3000</span>
+              </div>
+              <div class="fld">
+                <span class="lbl">HDSky UID</span>
+                <input v-model="cfg.hdsky_uid" class="inp" spellcheck="false" />
+              </div>
+              <div class="fld">
+                <span class="lbl">CookieCloud UUID（Key）</span>
+                <input v-model="cfg.cc_uuid" class="inp" spellcheck="false" />
+              </div>
+              <div class="fld">
+                <span class="lbl">CookieCloud 加密密钥</span>
+                <input v-model="cfg.cc_password" class="inp" type="password" spellcheck="false" />
+              </div>
+              <div class="fld">
+                <span class="lbl">会话体检间隔(秒)</span>
+                <input v-model.number="cfg.auth_check_interval" class="inp" type="number" min="600" max="7200" step="300" />
+                <span class="help">定期探测+主动续期；轮询遇到 401 也会即时触发</span>
+              </div>
+              <div class="fld">
+                <span class="lbl">续期通知</span>
+                <label class="row switch">
+                  <input v-model="cfg.auth_notify" type="checkbox" />
+                  <span>结果推送</span>
+                </label>
+              </div>
+            </div>
+            <div class="row" style="justify-content:flex-end">
+              <button class="btn" :disabled="renewing" @click="renewNow">{{ renewing ? '续期中…' : '立即续期' }}</button>
             </div>
           </section>
 

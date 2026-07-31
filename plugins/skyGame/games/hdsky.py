@@ -8,6 +8,7 @@
 #
 # 内部负责：cookie 读取、CSRF 获取与定期刷新、自签证书、通用请求头、
 # JSON 编解码、异常收敛（失败返回 {"_error": ...}，不抛给调用方）。
+# 会话过期（HTTP 401）时若注入了 renewer，自动续期一次并重试原请求。
 
 from __future__ import annotations
 
@@ -15,6 +16,7 @@ import json
 import secrets
 import ssl
 import time
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
@@ -33,7 +35,7 @@ def request_key() -> str:
     return "web_" + secrets.token_hex(16)
 
 
-def _read_cookie(path: str) -> str | None:
+def read_portal_session(path: str) -> str | None:
     """从 Netscape cookie 文件读取 hdsky_portal_session（每次请求重读，支持原地续期）。"""
     try:
         with open(path) as f:
@@ -51,7 +53,7 @@ def _read_cookie(path: str) -> str | None:
     return None
 
 
-def _make_ssl_ctx() -> ssl.SSLContext:
+def make_ssl_ctx() -> ssl.SSLContext:
     """门户为自签证书，禁用校验。"""
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
@@ -68,7 +70,8 @@ class HdskyClient:
         self._log = log
         self._csrf: str | None = None
         self._csrf_at: float = 0.0
-        self._http = httpx.AsyncClient(verify=_make_ssl_ctx())
+        self._renewer: Callable[[], Awaitable[bool]] | None = None
+        self._http = httpx.AsyncClient(verify=make_ssl_ctx())
 
     async def __aenter__(self) -> HdskyClient:
         return self
@@ -93,6 +96,10 @@ class HdskyClient:
         self._csrf = None
         self._csrf_at = 0.0
 
+    def set_renewer(self, renewer: Callable[[], Awaitable[bool]] | None) -> None:
+        """注入会话续期回调（无参，异步返回是否成功）。收到 401 时自动调用一次。"""
+        self._renewer = renewer
+
     async def _ensure_csrf(self) -> None:
         """惰性获取 CSRF；过期自动刷新。"""
         if self._csrf and time.monotonic() - self._csrf_at < _CSRF_MAX_AGE:
@@ -101,13 +108,15 @@ class HdskyClient:
         self._csrf = sess.get("csrfToken") or None
         self._csrf_at = time.monotonic()
 
-    async def _request(self, method: str, path: str, body: dict | None = None) -> dict[str, Any]:
+    async def _request(
+        self, method: str, path: str, body: dict | None = None, *, _retry: bool = False
+    ) -> dict[str, Any]:
         """通用请求：拼认证头、编解码 JSON；任何异常收敛为 {"_error": ...}。"""
         headers: dict[str, str] = {
             "Origin": self._base,
             "Referer": f"{self._base}/portal",
         }
-        cookie = _read_cookie(self._cookie_file)
+        cookie = read_portal_session(self._cookie_file)
         if cookie:
             headers["Cookie"] = f"hdsky_portal_session={cookie}"
         content: bytes | None = None
@@ -119,9 +128,26 @@ class HdskyClient:
                 headers["X-CSRF-Token"] = self._csrf
         try:
             resp = await self._http.request(method, f"{self._base}{path}", headers=headers, content=content, timeout=10)
+            if resp.status_code == 401 and not _retry:
+                return await self._handle_expired(method, path, body)
             return resp.json()
         except Exception as e:
             return {"_error": str(e)}
+
+    async def _handle_expired(self, method: str, path: str, body: dict | None) -> dict[str, Any]:
+        """会话过期（401）：有 renewer 则续期一次并重试，否则收敛为错误。"""
+        if self._renewer is None:
+            return {"_error": "门户 Cookie 已过期（未配置自动续期）"}
+        if self._log:
+            self._log.info("门户会话过期，尝试自动续期…")
+        try:
+            renewed = await self._renewer()
+        except Exception as e:
+            return {"_error": f"门户 Cookie 续期异常: {e}"}
+        if not renewed:
+            return {"_error": "门户 Cookie 已过期且自动续期失败"}
+        self.reset_csrf()  # cookie 已换新，CSRF 一并重取
+        return await self._request(method, path, body, _retry=True)
 
     async def get(self, path: str) -> dict[str, Any]:
         """GET 接口，返回 JSON dict。"""

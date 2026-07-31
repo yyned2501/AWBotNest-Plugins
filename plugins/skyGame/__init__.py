@@ -1,25 +1,29 @@
 # =============================================================================
-# AWBotNest 插件：天空游戏 (skyGame) v1.1.0
+# AWBotNest 插件：天空游戏 (skyGame) v1.2.0
 #
 # 天空系列游戏的统一入口：Vue 配置界面左侧按游戏分组，各游戏逻辑拆到
 # games/ 子模块，互不干扰。当前收录：
 #   - 炸金花：轮询 hdsky 门户 API，自动加入/看牌/好牌跟注烂牌弃牌
 #   - 养马：自动喂食/遛马/官方赛报名/复活提示
+#   - Cookie 自动续期：门户会话过期时从 CookieCloud 取浏览器 cookie，
+#     读 HDSky 站内信验证码自动重新登录，写回 cookie 文件
 #
 # 代码组织：
-#   games/hdsky.py      门户共享 HTTP（cookie + CSRF + requestKey）
-#   games/zhajinhua.py  炸金花轮询状态机
-#   games/horse.py      养马养护循环
+#   games/hdsky.py       门户共享 HTTP（cookie + CSRF + requestKey + 401 自动续期）
+#   games/hdsky_auth.py  Cookie 续期（CookieCloud → 站内信抽码 → 登录 → 写 cookie）
+#   games/zhajinhua.py   炸金花轮询状态机
+#   games/horse.py       养马养护循环
 # =============================================================================
 
 from __future__ import annotations
 
 from . import games
+from .games import hdsky_auth
 
 __plugin__ = {
     "name": "天空游戏",
     "id": "skyGame",
-    "version": "1.1.0",
+    "version": "1.2.0",
     "author": "Yy",
     "description": "天空系列游戏统一入口：炸金花自动参与、养马自动养护，左侧按游戏分组配置。",
     "scope": "user",
@@ -58,6 +62,65 @@ __plugin__ = {
             "label": "HDSky 门户地址",
             "section": "全局设置",
             "order": 4,
+        },
+        # ── Cookie 自动续期 ──
+        "auth_auto_renew": {
+            "type": "boolean",
+            "default": True,
+            "label": "门户会话过期自动续期",
+            "section": "Cookie 自动续期",
+            "help": "经 MoviePilot CookieCloud 的浏览器 cookie 快照 → 读 HDSky 站内信验证码 → 自动登录写回 Cookie",
+            "order": 30,
+        },
+        "cc_server": {
+            "type": "string",
+            "default": "http://192.168.31.10:3000",
+            "label": "CookieCloud 地址",
+            "section": "Cookie 自动续期",
+            "help": "MoviePilot 内置 CookieCloud（http://<主机>:3000）",
+            "order": 31,
+        },
+        "cc_uuid": {
+            "type": "string",
+            "default": "",
+            "label": "CookieCloud UUID",
+            "section": "Cookie 自动续期",
+            "help": "浏览器 CookieCloud 插件的服务器地址对应 UUID（即 Key）",
+            "order": 32,
+        },
+        "cc_password": {
+            "type": "password",
+            "default": "",
+            "label": "CookieCloud 加密密钥",
+            "section": "Cookie 自动续期",
+            "help": "浏览器 CookieCloud 插件的加密密钥（即密码/Token）",
+            "order": 33,
+        },
+        "hdsky_uid": {
+            "type": "string",
+            "default": "105577",
+            "label": "HDSky UID",
+            "section": "Cookie 自动续期",
+            "help": "门户登录用的 HDSky 用户 UID",
+            "order": 34,
+        },
+        "auth_check_interval": {
+            "type": "slider",
+            "default": 1800,
+            "label": "会话体检间隔(秒)",
+            "section": "Cookie 自动续期",
+            "min": 600,
+            "max": 7200,
+            "step": 300,
+            "help": "定期探测会话有效性并主动续期；游戏轮询遇到 401 也会即时触发",
+            "order": 35,
+        },
+        "auth_notify": {
+            "type": "boolean",
+            "default": True,
+            "label": "续期结果通知",
+            "section": "Cookie 自动续期",
+            "order": 36,
         },
         # ── 养马 ──
         "horse_enabled": {
@@ -189,6 +252,14 @@ __plugin__ = {
         },
     },
     "changelog": (
+        "v1.2.0 更新：\n"
+        "- 门户 Cookie 自动续期：会话过期时从 MoviePilot CookieCloud 拉浏览器 cookie 快照，"
+        "优先复用快照内仍有效的门户会话；否则触发门户登录，用 PT 站 cookie 读 HDSky 站内信"
+        "验证码并自动验证，写回 cookie 文件，全程无需人工干预\n"
+        "- 双触发：游戏轮询遇到 401 即时续期 + 看门狗定期体检主动续期\n"
+        "- HdskyClient 支持 401 自动续期重试；续期防抖（10 分钟内不重复发验证码）、失败通知节流\n"
+        "- 新增配置区「Cookie 自动续期」（CookieCloud 地址/UUID/密钥、UID、体检间隔）\n"
+        "- 配置界面支持手动「立即续期」按钮\n"
         "v1.1.0 更新：\n"
         "- 养马自动化落地（基于实测门户 API）：饱腹度低于阈值自动喂食、每日额度自动遛马、"
         "官方赛可选自动报名、死亡复活可选\n"
@@ -209,6 +280,13 @@ __plugin__ = {
 async def setup(ctx: object) -> None:
     ctx.log.info("天空游戏插件已加载 (v%s)", __plugin__["version"])
     games.start_all(ctx)
+
+    @ctx.on_api("/renew", methods=["POST"])
+    async def renew_now(req: object) -> dict:
+        """手动触发一次 Cookie 续期（跳过防抖），配置界面「立即续期」按钮调用。"""
+        ok = await hdsky_auth.renewer_for(ctx).renew(force=True)
+        return {"ok": ok, "message": "续期成功，新 Cookie 已生效" if ok else "续期失败，详情见运行日志"}
+
     ctx.log.info("天空游戏已就绪")
 
 

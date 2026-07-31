@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 
+from . import hdsky_auth
 from .hdsky import HdskyClient, request_key
 
 _task: asyncio.Task[None] | None = None
@@ -116,6 +117,7 @@ async def _care_loop(ctx: object) -> None:
     interval = float(cfg.get("horse_poll_interval", 120) or 120)
 
     async with HdskyClient(log=ctx.log) as client:
+        client.set_renewer(hdsky_auth.renewer_for(ctx))  # 401 时自动续期并重试
         while True:
             try:
                 if not cfg.get("horse_enabled", False):

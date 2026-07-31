@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 
+from . import hdsky_auth
 from .hdsky import HdskyClient
 
 # 默认跟注牌型（配置缺省/为空时的回退）
@@ -39,6 +40,7 @@ async def _poll_loop(ctx: object) -> None:
     fold_pending = False
 
     async with HdskyClient(log=ctx.log) as client:
+        client.set_renewer(hdsky_auth.renewer_for(ctx))  # 401 时自动续期并重试
         while True:
             try:
                 if not cfg.get("zjh_enabled", True):
