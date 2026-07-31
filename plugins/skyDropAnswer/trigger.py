@@ -74,12 +74,22 @@ def _split_by_punct(text: str) -> list[str]:
 
 
 def _pick_trigger_kind(cfg: dict) -> str:
-    """随机选一种文案类型（每轮只选一次，轮内不切换）。"""
-    choices = ["template"]
-    if str(cfg.get("trig_msg_poems", "") or "").strip():
+    """随机选一种文案类型（每轮只选一次，轮内不切换）。
+
+    可用类型 = 用户勾选的 trig_kinds ∩ 有内容的文案池；
+    背诗/唱歌需对应池非空才生效；若勾选为空或全部池空，回退到模板，
+    保证 random.choice 不会拿到空列表。
+    """
+    selected = set(cfg.get("trig_kinds", ["template", "poem", "song"]) or [])
+    choices: list[str] = []
+    if "template" in selected:
+        choices.append("template")
+    if "poem" in selected and str(cfg.get("trig_msg_poems", "") or "").strip():
         choices.append("poem")
-    if str(cfg.get("trig_msg_songs", "") or "").strip():
+    if "song" in selected and str(cfg.get("trig_msg_songs", "") or "").strip():
         choices.append("song")
+    if not choices:
+        choices = ["template"]
     return random.choice(choices)
 
 

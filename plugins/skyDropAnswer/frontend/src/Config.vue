@@ -30,6 +30,7 @@ const DEFAULTS = {
   trig_info_timeout: 60,
   trig_drop_timeout: 120,
   trig_use_info: true,
+  trig_kinds: ['template', 'poem', 'song'],
   trig_message_template: '第{n}题{x}',
   trig_msg_poems: '床前明月光，疑是地上霜。\n大漠孤烟直，长河落日圆。\n海内存知己，天涯若比邻。\n明月几时有？把酒问青天。',
   trig_msg_songs: '我相信我就是我，我相信明天。\n你是我的小呀小苹果，怎么爱你都不嫌多。\n没有什么能够阻挡，你对自由的向往。',
@@ -151,6 +152,17 @@ async function saveEdit(tpl) {
     editSaving.value = false
   }
 }
+
+// 触发文案类型多选：trig_kinds 是字符串数组
+function hasKind(k) {
+  return Array.isArray(cfg.trig_kinds) && cfg.trig_kinds.includes(k)
+}
+function toggleKind(k) {
+  if (!Array.isArray(cfg.trig_kinds)) cfg.trig_kinds = []
+  const i = cfg.trig_kinds.indexOf(k)
+  if (i >= 0) cfg.trig_kinds.splice(i, 1)
+  else cfg.trig_kinds.push(k)
+}
 </script>
 
 <template>
@@ -242,6 +254,22 @@ async function saveEdit(tpl) {
             </label>
             <span class="help" style="margin-top:-4px">开启时段内定时循环：/info 校准 → 发「第n题x」触发掉落 → 定时触发下一题</span>
             <span class="help" style="margin-top:-4px">每小时掉落目标自动从 /info 读取（私聊 bot，读「当前时段剩余掉落」），无需手动设置</span>
+            <div class="fld">
+              <span class="lbl">启用文案类型（本轮从中随机选一种，轮内不切换）</span>
+              <label class="row switch">
+                <input type="checkbox" :checked="hasKind('template')" @change="toggleKind('template')" />
+                <span>模板（第n题x）</span>
+              </label>
+              <label class="row switch">
+                <input type="checkbox" :checked="hasKind('poem')" @change="toggleKind('poem')" />
+                <span>背诗</span>
+              </label>
+              <label class="row switch">
+                <input type="checkbox" :checked="hasKind('song')" @change="toggleKind('song')" />
+                <span>唱歌</span>
+              </label>
+              <span class="help">背诗/唱歌需对应池非空才生效；全不选则只用模板</span>
+            </div>
             <div class="fld">
               <span class="lbl">触发消息模板</span>
               <input v-model="cfg.trig_message_template" class="inp" placeholder="第{n}题{x}" />

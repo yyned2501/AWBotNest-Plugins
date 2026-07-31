@@ -1,5 +1,5 @@
 # =============================================================================
-# AWBotNest 插件：天空答题 (skyDropAnswer) v2.1.4
+# AWBotNest 插件：天空答题 (skyDropAnswer) v2.1.5
 #
 # 合并自原 skyDropTrigger + skyDropAnswer：
 #   - 答题：监听天空小秘（bot 8907007783）的银元掉落题目，模板/AI 解答并点击按钮领取
@@ -22,11 +22,14 @@ from . import trigger as trigger_mod
 __plugin__ = {
     "name": "天空答题",
     "id": "skyDropAnswer",
-    "version": "2.1.4",
+    "version": "2.1.5",
     "author": "Yy",
     "description": "天空答题奖励 + 每小时智能触发：模板管理/AI答题/自动触发掉落一体化。",
     "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/skyDropAnswer.svg",
     "changelog": (
+        "v2.1.5 更新：\n"
+        "- 自动触发新增「启用文案类型」多选：可勾选只用模板/背诗/唱歌中的某几个或某一个\n"
+        "- 本轮仍从已勾选且有内容的类型中随机选一种，轮内不切换；全不选则回退模板\n"
         "v2.1.4 更新：\n"
         "- 背诗/唱歌改为按配置行顺序逐行发（不再随机），行号存 kv 循环使用\n"
         "- 同一行按标点符号拆成多条消息依次发，段间 1~3 秒短停顿模拟打字\n"
@@ -241,13 +244,26 @@ __plugin__ = {
             "help": "每小时私聊 bot 发 /info 读取「当前时段剩余掉落」；连续失败时也用它检查",
             "order": 30,
         },
+        "trig_kinds": {
+            "type": "multiselect",
+            "default": ["template", "poem", "song"],
+            "label": "启用文案类型",
+            "section": "自动触发",
+            "options": [
+                {"value": "template", "label": "模板（第n题x）"},
+                {"value": "poem", "label": "背诗"},
+                {"value": "song", "label": "唱歌"},
+            ],
+            "help": "本轮从勾选且有内容的类型中随机选一种；背诗/唱歌需对应池非空；全不选=只用模板",
+            "order": 31,
+        },
         "trig_message_template": {
             "type": "string",
             "default": "第{n}题{x}",
             "label": "触发消息模板",
             "section": "自动触发",
             "help": "{n}=本小时题号 {x}=本题尝试次数，如 第{n}题{x}",
-            "order": 31,
+            "order": 32,
         },
         "trig_msg_poems": {
             "type": "text",
@@ -257,7 +273,7 @@ __plugin__ = {
             "label": "背诗池（一行一首）",
             "section": "自动触发",
             "help": "按行顺序逐行发，同行按标点拆多条；留空=不启用背诗",
-            "order": 31,
+            "order": 33,
         },
         "trig_msg_songs": {
             "type": "text",
@@ -269,13 +285,13 @@ __plugin__ = {
             "label": "唱歌池（一行一句）",
             "section": "自动触发",
             "help": "按行顺序逐行发，同行按标点拆多条；留空=不启用唱歌",
-            "order": 32,
+            "order": 34,
         },
         "trig_stats": {
             "type": "info",
             "label": "触发统计",
             "section": "自动触发",
-            "order": 34,
+            "order": 36,
         },
     },
 }
