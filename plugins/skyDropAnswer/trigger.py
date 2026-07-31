@@ -2,12 +2,13 @@
 # 天空答题 · 自动触发（开启时段内的定时触发循环）
 #
 # 由 interval 状态机驱动（每 20s 一个 tick），状态全部存 ctx.kv，幂等、热重载可恢复。
-# 仅在「开启时段」内工作：私聊 bot 发 /info 校准 → 发「第{n}题{x}」触发 →
-# 等答题侧检测到掉落 → 掉落后不再随机冷却等待，而是定时 trig_interval 分钟后触发下一题，
+# 仅在「开启时段」内工作：私聊 bot 发 /info 校准 → 决定触发后拟人随机延迟一小段 →
+# 发「第{n}题{x}」触发 → 等答题侧检测到掉落 → 掉落后定时 trig_interval 分钟后触发下一题，
 # 直到达本时段配额（/info 剩余掉落）或跨小时。掉落计数由答题 handler (group=5) 写入共享 kv。
 
 from __future__ import annotations
 
+import random
 import re
 import time
 from datetime import datetime
@@ -111,13 +112,25 @@ def _in_active_window(cfg: dict) -> bool:
     return hour >= start or hour <= end  # 跨午夜
 
 
+def _arm_send(ctx: object, cfg: dict, now: float) -> None:
+    """决定触发后进入「待发」态：拟人随机延迟 0~trig_jitter_max 秒再由 ARMED 阶段真发。
+
+    不在决定时立刻发群消息，避免整点/固定节拍机械刷屏，模拟真人发送时机。
+    """
+    jitter_max = float(cfg.get("trig_jitter_max", 30) or 0)
+    delay = random.uniform(0, jitter_max) if jitter_max > 0 else 0.0
+    ctx.kv.set("trig:send_at", now + delay)
+    ctx.kv.set("trig:phase", "armed")
+    ctx.log.info("决定触发，拟人延迟 %.0f 秒后发送", delay)
+
+
 def _schedule_next(ctx: object, cfg: dict, now: float) -> None:
     """定时下一次触发：固定 trig_interval 分钟后由 tick 触发下一题（替代随机冷却等待）。"""
     interval = float(cfg.get("trig_interval", 5) or 5)
     wait = interval * 60
     ctx.kv.set("trig:next_trigger_at", now + wait)
     ctx.kv.set("trig:phase", "scheduled")
-    ctx.log.info("已定时下一次触发：%.0f 分钟后", wait)
+    ctx.log.info("已定时下一次触发：%.0f 分钟后", wait / 60)
 
 
 async def _trigger_tick(ctx: object) -> None:
@@ -143,6 +156,13 @@ async def _trigger_tick(ctx: object) -> None:
     if phase in ("idle", "scheduled") and not _in_active_window(cfg):
         return
 
+    # ── ARMED：已决定触发，拟人延迟到点后真发 ──
+    if phase == "armed":
+        if now < float(ctx.kv.get("trig:send_at", 0) or 0):
+            return  # 还在拟人延迟里
+        await _send_trigger(ctx, cfg, groups)
+        return
+
     # ── IDLE：决定本小时是否开始/继续触发 ──
     if phase == "idle":
         start_min = int(cfg.get("trig_start_min", 5) or 0)
@@ -153,7 +173,7 @@ async def _trigger_tick(ctx: object) -> None:
         if cfg.get("trig_use_info", True):
             await _send_info(ctx)  # 先私聊 bot 发 /info 校准
         else:
-            await _send_trigger(ctx, cfg, groups)
+            _arm_send(ctx, cfg, now)  # 决定触发（拟人延迟后真发）
         return
 
     # ── SCHEDULED：上一次触发完成后定时等待，到点触发下一题 ──
@@ -166,7 +186,7 @@ async def _trigger_tick(ctx: object) -> None:
         if cfg.get("trig_use_info", True):
             await _send_info(ctx)  # 下一题前先 /info 刷新剩余掉落
         else:
-            await _send_trigger(ctx, cfg, groups)
+            _arm_send(ctx, cfg, now)  # 决定触发（拟人延迟后真发）
         return
 
     # ── AWAIT_INFO：等 bot 回 /info，超时用本地计数兜底 ──
@@ -177,10 +197,10 @@ async def _trigger_tick(ctx: object) -> None:
         if reply:
             _apply_info_reply(ctx, reply)
             ctx.kv.set("trig:info_reply", "")
-            await _send_trigger(ctx, cfg, groups)
+            _arm_send(ctx, cfg, now)  # 校准后决定触发（拟人延迟后真发）
         elif info_sent and now - info_sent > timeout:
             ctx.log.info("/info 等待超时，用本地计数兜底（本小时已掉 %d 次）", drops)
-            await _send_trigger(ctx, cfg, groups)
+            _arm_send(ctx, cfg, now)  # 兜底决定触发（拟人延迟后真发）
         return
 
     # ── AWAIT_DROP：等触发后的掉落，超时重试 / 定期检查 ──
@@ -221,7 +241,7 @@ async def _trigger_tick(ctx: object) -> None:
                 ctx.log.info("连续 %d 次未掉落，私聊 bot 发 /info 检查", failed)
                 await _send_info(ctx)
             else:
-                await _send_trigger(ctx, cfg, groups)  # 同题重试（n 不变 x 升高）
+                _arm_send(ctx, cfg, now)  # 同题重试（n 不变 x 升高，拟人延迟后真发）
         return
 
 

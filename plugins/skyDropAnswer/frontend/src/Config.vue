@@ -24,6 +24,7 @@ const DEFAULTS = {
   trig_max_attempts: 10,
   trig_info_every: 5,
   trig_interval: 5,
+  trig_jitter_max: 30,
   trig_active_start: 8,
   trig_active_end: 23,
   trig_info_timeout: 60,
@@ -268,6 +269,11 @@ async function saveEdit(tpl) {
                 <span class="lbl">触发间隔(分钟)</span>
                 <input v-model.number="cfg.trig_interval" class="inp" type="number" min="1" max="60" />
                 <span class="help">一次触发完成后定时这么久再触发下一题</span>
+              </div>
+              <div class="fld">
+                <span class="lbl">拟人延迟上限(秒)</span>
+                <input v-model.number="cfg.trig_jitter_max" class="inp" type="number" min="0" max="120" />
+                <span class="help">决定触发后随机延迟0~此值再发，0=不延迟</span>
               </div>
               <div class="fld">
                 <span class="lbl">开启时段·开始(点)</span>
