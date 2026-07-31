@@ -61,16 +61,12 @@ async def _send_info(ctx: object) -> None:
 
 
 async def _send_trigger(ctx: object, cfg: dict, groups: list[int]) -> bool:
-    """发送一次「第{n}题{x}」尝试；返回是否至少成功发送到一个群。"""
+    """发送一次触发消息（随机选模板/背诗/唱歌）；返回是否至少成功发送到一个群。"""
     drops = int(ctx.kv.get("trig:drops_this_hour", 0) or 0)
     question = int(ctx.kv.get("trig:question", 1) or 1)
     attempt = int(ctx.kv.get("trig:attempt", 1) or 1)
     n = max(question, drops + 1)
-    template = str(cfg.get("trig_message_template", "") or "第{n}题{x}")
-    try:
-        msg = template.format(n=n, x=attempt)
-    except (KeyError, IndexError, ValueError):
-        msg = f"第{n}题{attempt}"
+    msg = _pick_trigger_message(cfg, n, attempt)
     sent = False
     for gid in groups:
         try:
@@ -90,6 +86,30 @@ async def _send_trigger(ctx: object, cfg: dict, groups: list[int]) -> bool:
     ctx.log.info("触发消息已发送: %s（n=%d x=%d）", msg, n, attempt)
     refresh_stats(ctx)
     return True
+
+
+def _pick_trigger_message(cfg: dict, n: int, attempt: int) -> str:
+    """随机从模板/背诗/唱歌中选一种消息，避免总发「第n题x」被系统检测。"""
+    choices = ["template"]
+    poems_raw = str(cfg.get("trig_msg_poems", "") or "").strip()
+    songs_raw = str(cfg.get("trig_msg_songs", "") or "").strip()
+    poems = [ln.strip() for ln in poems_raw.split("\n") if ln.strip()] if poems_raw else []
+    songs = [ln.strip() for ln in songs_raw.split("\n") if ln.strip()] if songs_raw else []
+    if poems:
+        choices.append("poem")
+    if songs:
+        choices.append("song")
+    kind = random.choice(choices)
+    if kind == "poem":
+        return random.choice(poems)
+    if kind == "song":
+        return random.choice(songs)
+    # 模板消息：第{n}题{x}
+    template = str(cfg.get("trig_message_template", "") or "第{n}题{x}")
+    try:
+        return template.format(n=n, x=attempt)
+    except (KeyError, IndexError, ValueError):
+        return f"第{n}题{attempt}"
 
 
 def _in_active_window(cfg: dict) -> bool:

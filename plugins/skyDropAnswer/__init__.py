@@ -1,5 +1,5 @@
 # =============================================================================
-# AWBotNest 插件：天空答题 (skyDropAnswer) v2.1.2
+# AWBotNest 插件：天空答题 (skyDropAnswer) v2.1.3
 #
 # 合并自原 skyDropTrigger + skyDropAnswer：
 #   - 答题：监听天空小秘（bot 8907007783）的银元掉落题目，模板/AI 解答并点击按钮领取
@@ -22,11 +22,14 @@ from . import trigger as trigger_mod
 __plugin__ = {
     "name": "天空答题",
     "id": "skyDropAnswer",
-    "version": "2.1.2",
+    "version": "2.1.3",
     "author": "Yy",
     "description": "天空答题奖励 + 每小时智能触发：模板管理/AI答题/自动触发掉落一体化。",
     "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/skyDropAnswer.svg",
     "changelog": (
+        "v2.1.3 更新：\n"
+        "- 触发消息新增「背诗」「唱歌」两种文案类型，随机切换避免频繁发「第n题x」被系统检测\n"
+        "- 新增配置项：背诗池、唱歌池，用户可自定义多行文案\n"
         "v2.1.2 更新：\n"
         "- 触发改为低频调度：不再用 20 秒 tick 逐次重试同一道题\n"
         "- 同一题在一次整轮任务内连续尝试，短随机间隔；检测到掉落立即停止后续尝试\n"
@@ -242,11 +245,36 @@ __plugin__ = {
             "help": "{n}=本小时题号 {x}=本题尝试次数，如 第{n}题{x}",
             "order": 31,
         },
+        "trig_msg_poems": {
+            "type": "text",
+            "default": (
+                "床前明月光，疑是地上霜。\n"
+                "大漠孤烟直，长河落日圆。\n"
+                "海内存知己，天涯若比邻。\n"
+                "明月几时有？把酒问青天。"
+            ),
+            "label": "背诗池（一行一首）",
+            "section": "自动触发",
+            "help": "触发时随机选一句发；留空=不启用背诗文案",
+            "order": 31,
+        },
+        "trig_msg_songs": {
+            "type": "text",
+            "default": (
+                "我相信我就是我，我相信明天。\n"
+                "你是我的小呀小苹果，怎么爱你都不嫌多。\n"
+                "没有什么能够阻挡，你对自由的向往。"
+            ),
+            "label": "唱歌池（一行一句）",
+            "section": "自动触发",
+            "help": "触发时随机选一句发；留空=不启用唱歌文案",
+            "order": 32,
+        },
         "trig_stats": {
             "type": "info",
             "label": "触发统计",
             "section": "自动触发",
-            "order": 32,
+            "order": 34,
         },
     },
 }

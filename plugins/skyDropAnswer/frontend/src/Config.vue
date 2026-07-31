@@ -31,6 +31,8 @@ const DEFAULTS = {
   trig_drop_timeout: 120,
   trig_use_info: true,
   trig_message_template: '第{n}题{x}',
+  trig_msg_poems: '床前明月光，疑是地上霜。\n大漠孤烟直，长河落日圆。\n海内存知己，天涯若比邻。\n明月几时有？把酒问青天。',
+  trig_msg_songs: '我相信我就是我，我相信明天。\n你是我的小呀小苹果，怎么爱你都不嫌多。\n没有什么能够阻挡，你对自由的向往。',
   trig_stats: '',
 }
 
@@ -244,6 +246,16 @@ async function saveEdit(tpl) {
               <span class="lbl">触发消息模板</span>
               <input v-model="cfg.trig_message_template" class="inp" placeholder="第{n}题{x}" />
               <span class="help">{n}=本小时题号 {x}=本题尝试次数</span>
+            </div>
+            <div class="fld">
+              <span class="lbl">背诗池（一行一首）</span>
+              <textarea v-model="cfg.trig_msg_poems" class="inp" rows="3" spellcheck="false"></textarea>
+              <span class="help">触发时随机选一句发；留空=不启用背诗文案</span>
+            </div>
+            <div class="fld">
+              <span class="lbl">唱歌池（一行一句）</span>
+              <textarea v-model="cfg.trig_msg_songs" class="inp" rows="3" spellcheck="false"></textarea>
+              <span class="help">触发时随机选一句发；留空=不启用唱歌文案</span>
             </div>
           </section>
 
