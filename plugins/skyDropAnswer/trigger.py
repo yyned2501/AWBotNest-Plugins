@@ -73,31 +73,34 @@ def _split_by_punct(text: str) -> list[str]:
     return parts if parts else [text.strip()] if text.strip() else []
 
 
-def _pick_trigger_segments(ctx: object, cfg: dict, n: int, attempt: int) -> list[str]:
-    """随机选一种文案类型，返回本次要发的消息段列表（可能多条）。
+def _pick_trigger_kind(cfg: dict) -> str:
+    """随机选一种文案类型（每轮只选一次，轮内不切换）。"""
+    choices = ["template"]
+    if str(cfg.get("trig_msg_poems", "") or "").strip():
+        choices.append("poem")
+    if str(cfg.get("trig_msg_songs", "") or "").strip():
+        choices.append("song")
+    return random.choice(choices)
+
+
+def _pick_trigger_segments(ctx: object, cfg: dict, kind: str, n: int, attempt: int) -> list[str]:
+    """按指定文案类型返回本次要发的消息段列表（可能多条）。
 
     模板：第{n}题{x}（单段）。
     背诗/唱歌：按配置行顺序取当前行，按标点拆成多段；
     行号存 kv（trig:poem_idx / trig:song_idx），发完推进，循环使用。
     """
-    choices = ["template"]
-    poems_raw = str(cfg.get("trig_msg_poems", "") or "").strip()
-    songs_raw = str(cfg.get("trig_msg_songs", "") or "").strip()
-    poems = [ln.strip() for ln in poems_raw.split("\n") if ln.strip()] if poems_raw else []
-    songs = [ln.strip() for ln in songs_raw.split("\n") if ln.strip()] if songs_raw else []
-    if poems:
-        choices.append("poem")
-    if songs:
-        choices.append("song")
-    kind = random.choice(choices)
-
     if kind == "poem":
+        poems_raw = str(cfg.get("trig_msg_poems", "") or "").strip()
+        poems = [ln.strip() for ln in poems_raw.split("\n") if ln.strip()]
         idx = int(ctx.kv.get("trig:poem_idx", 0) or 0) % len(poems)
         ctx.kv.set("trig:poem_idx", idx + 1)
         line = poems[idx]
         ctx.log.info("背诗第 %d 行: %s", idx + 1, line)
         return _split_by_punct(line)
     if kind == "song":
+        songs_raw = str(cfg.get("trig_msg_songs", "") or "").strip()
+        songs = [ln.strip() for ln in songs_raw.split("\n") if ln.strip()]
         idx = int(ctx.kv.get("trig:song_idx", 0) or 0) % len(songs)
         ctx.kv.set("trig:song_idx", idx + 1)
         line = songs[idx]
@@ -191,6 +194,9 @@ async def _question_round(ctx: object, cfg: dict, groups: list[int]) -> None:
     # 发送前随机延迟模拟真人；同题重试间隔则更短，避免机械刷屏。
     first_delay_max = float(cfg.get("trig_jitter_max", 30) or 0)
     retry_delay_min, retry_delay_max = 5.0, 15.0
+    # 每轮随机选一种文案类型，轮内不切换
+    kind = _pick_trigger_kind(cfg)
+    ctx.log.info("本轮文案类型: %s", kind)
     ctx.kv.set("trig:phase", "round")
     ctx.kv.set("trig:attempt", 1)
     try:
@@ -205,7 +211,7 @@ async def _question_round(ctx: object, cfg: dict, groups: list[int]) -> None:
                 if await _wait_for_drop(ctx, baseline, delay):
                     break
             n = max(question, int(ctx.kv.get("trig:drops_this_hour", 0) or 0) + 1)
-            segments = _pick_trigger_segments(ctx, cfg, n, attempt)
+            segments = _pick_trigger_segments(ctx, cfg, kind, n, attempt)
             sent = await _send_segments(ctx, groups, segments, baseline)
             if not sent:
                 break
