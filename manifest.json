@@ -41,9 +41,9 @@
   },
   "skyGame": {
     "name": "天空游戏",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "author": "Yy",
-    "description": "天空系列游戏统一入口：炸金花自动参与、养马等，Vue 左侧按游戏分组配置。",
+    "description": "天空系列游戏统一入口：炸金花自动参与、养马自动养护，Vue 左侧按游戏分组配置。",
     "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/skyGame.svg",
     "path": "plugins/skyGame/"
   }

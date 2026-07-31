@@ -1,45 +1,24 @@
 # -*- coding: utf-8 -*-
 # 天空游戏 · 炸金花：监听 hdsky 炸金花牌局，自动加入、看牌、决策
 #
-# 移植自独立插件 skyzjh，配置键统一加 zjh_ 前缀：
+# 认证与传输由 HdskyClient 封装，本模块只写「接口 + 参数」：
 #   - 每 zjh_poll_interval 秒轮询牌局状态
 #   - 未加入且可加入 → 加入
 #   - 轮到我了 → 看牌 → 好牌跟注 / 烂牌弃牌
 #   - 支持双击弃牌确认
-#   - 新牌局自动刷新 CSRF
+#   - 新牌局作废 CSRF（下次 POST 自动重取）
 #   - 跟注牌型由配置 zjh_good_hands 勾选驱动
 
 from __future__ import annotations
 
 import asyncio
-import json
-import ssl
-from typing import Any
 
-import httpx
+from .hdsky import HdskyClient
 
 # 默认跟注牌型（配置缺省/为空时的回退）
 _DEFAULT_GOOD_HANDS = ["豹子", "同花顺", "金花", "顺子", "对子"]
 
 _poll_task: asyncio.Task[None] | None = None
-
-
-def _read_cookie(path: str) -> str | None:
-    """从 Netscape cookie 文件读取 hdsky_portal_session。"""
-    try:
-        with open(path) as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                if line.startswith("#") and not line.startswith("#HttpOnly_"):
-                    continue
-                fields = line.split("\t")
-                if len(fields) >= 7 and fields[5] == "hdsky_portal_session":
-                    return fields[6]
-    except (FileNotFoundError, PermissionError, OSError):
-        return None
-    return None
 
 
 def _good_hands(cfg: dict) -> list[str]:
@@ -53,71 +32,28 @@ def _good_hand(hand_type: str, good_hands: list[str]) -> bool:
     return any(h in hand_type for h in good_hands)
 
 
-async def _api(
-    client: httpx.AsyncClient,
-    base: str,
-    path: str,
-    method: str = "GET",
-    body: bytes | None = None,
-    csrf: str | None = None,
-    cookie: str | None = None,
-) -> dict[str, Any]:
-    """调用 hdsky API，返回解析后的 JSON。"""
-    headers = {
-        "Origin": base,
-        "Referer": f"{base}/portal",
-    }
-    if cookie:
-        headers["Cookie"] = f"hdsky_portal_session={cookie}"
-    if method == "POST":
-        headers["Content-Type"] = "application/json"
-        if csrf:
-            headers["X-CSRF-Token"] = csrf
-    try:
-        resp = await client.request(method, f"{base}{path}", headers=headers, content=body, timeout=10)
-        return resp.json()
-    except Exception as e:
-        return {"_error": str(e)}
-
-
 async def _poll_loop(ctx: object) -> None:
     """轮询牌局状态并执行操作。"""
     cfg = ctx.config
-    cookie_file = str(cfg.get("zjh_cookie_file", "") or "")
-    base = str(cfg.get("zjh_base_url", "") or "")
     interval = float(cfg.get("zjh_poll_interval", 2) or 2)
-
-    csrf: str | None = None
     fold_pending = False
 
-    ssl_ctx = ssl.create_default_context()
-    ssl_ctx.check_hostname = False
-    ssl_ctx.verify_mode = ssl.CERT_NONE
-
-    async with httpx.AsyncClient(verify=ssl_ctx) as client:
+    async with HdskyClient(log=ctx.log) as client:
         while True:
             try:
                 if not cfg.get("zjh_enabled", True):
                     await asyncio.sleep(interval)
                     continue
 
-                cookie = _read_cookie(cookie_file)
-                if not cookie:
-                    await asyncio.sleep(interval)
-                    continue
-
+                # 每轮读最新配置（cookie 路径/门户地址可能被改）
+                client.configure(str(cfg.get("hdsky_cookie_file", "") or ""), str(cfg.get("hdsky_base_url", "") or ""))
                 good_hands = _good_hands(cfg)
 
-                # 获取 CSRF token
-                if not csrf:
-                    sess = await _api(client, base, "/api/portal/session", cookie=cookie)
-                    csrf = sess.get("csrfToken", "")
-
                 # 获取牌局状态
-                game_data = await _api(client, base, "/api/portal/zhajinhua", cookie=cookie, csrf=csrf)
+                game_data = await client.get("/api/portal/zhajinhua")
                 if "_error" in game_data:
                     ctx.log.warning("API 请求失败: %s", game_data["_error"])
-                    csrf = None
+                    client.reset_csrf()
                     await asyncio.sleep(interval)
                     continue
 
@@ -136,7 +72,7 @@ async def _poll_loop(ctx: object) -> None:
                 # 没加入且可加入 → 加入
                 if not joined and "join" in actions:
                     ctx.log.info("加入牌桌 #%s...", rid)
-                    r = await _api(client, base, "/api/portal/zhajinhua/join", "POST", b"{}", csrf, cookie)
+                    r = await client.post("/api/portal/zhajinhua/join", {})
                     if r.get("ok"):
                         ctx.log.info("加入成功！")
                         if cfg.get("zjh_notify_join", True):
@@ -149,8 +85,7 @@ async def _poll_loop(ctx: object) -> None:
                     if not hand:
                         # 还没看牌
                         ctx.log.info("轮到我了！看牌...")
-                        body = json.dumps({"action": "peek"}).encode()
-                        r = await _api(client, base, "/api/portal/zhajinhua/action", "POST", body, csrf, cookie)
+                        r = await client.post("/api/portal/zhajinhua/action", {"action": "peek"})
                         if r.get("ok"):
                             hand = r.get("game", {}).get("self", {}).get("hand", "?")
                             hand_type = r.get("game", {}).get("self", {}).get("handType", "?")
@@ -159,15 +94,13 @@ async def _poll_loop(ctx: object) -> None:
 
                             if _good_hand(hand_type, good_hands):
                                 ctx.log.info("好牌！跟注")
-                                body = json.dumps({"action": "call"}).encode()
-                                await _api(client, base, "/api/portal/zhajinhua/action", "POST", body, csrf, cookie)
+                                await client.post("/api/portal/zhajinhua/action", {"action": "call"})
                                 ctx.log.info("已跟注，等待下一轮")
                                 if cfg.get("zjh_notify_hand", True):
                                     await ctx.notify(f"🃏 好牌跟注: {hand} ({hand_type})")
                             else:
                                 ctx.log.info("烂牌！弃牌")
-                                body = json.dumps({"action": "fold"}).encode()
-                                await _api(client, base, "/api/portal/zhajinhua/action", "POST", body, csrf, cookie)
+                                await client.post("/api/portal/zhajinhua/action", {"action": "fold"})
                                 if fc:
                                     fold_pending = True
                                 else:
@@ -178,8 +111,7 @@ async def _poll_loop(ctx: object) -> None:
                         # 已经看过牌了，直接决策
                         if hand and not _good_hand(hand_type, good_hands):
                             ctx.log.info("牌不好，弃牌...")
-                            body = json.dumps({"action": "fold"}).encode()
-                            await _api(client, base, "/api/portal/zhajinhua/action", "POST", body, csrf, cookie)
+                            await client.post("/api/portal/zhajinhua/action", {"action": "fold"})
                             if fc:
                                 fold_pending = True
                             else:
@@ -190,18 +122,16 @@ async def _poll_loop(ctx: object) -> None:
                 elif fold_pending and alive and is_turn:
                     # 双击确认弃牌
                     ctx.log.info("确认弃牌...")
-                    body = json.dumps({"action": "fold"}).encode()
-                    r = await _api(client, base, "/api/portal/zhajinhua/action", "POST", body, csrf, cookie)
+                    r = await client.post("/api/portal/zhajinhua/action", {"action": "fold"})
                     if r.get("ok"):
                         ctx.log.info("确认弃牌成功")
                         if cfg.get("zjh_notify_fold_confirm", False):
                             await ctx.notify("🃏 双击确认弃牌")
                         fold_pending = False
 
-                # 新牌局开始 → 刷新 CSRF
+                # 新牌局开始 → 作废旧 CSRF
                 if phase == "waiting" and rid and not joined:
-                    sess = await _api(client, base, "/api/portal/session", cookie=cookie)
-                    csrf = sess.get("csrfToken", "")
+                    client.reset_csrf()
 
                 await asyncio.sleep(interval)
 

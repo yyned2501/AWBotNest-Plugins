@@ -7,13 +7,19 @@ const DEFAULTS = {
   // 全局设置
   target_groups: '-1001326208894',
   bot: '',
+  hdsky_cookie_file: '/app/data/hdsky_cookie.txt',
+  hdsky_base_url: 'https://hdsky.supertimi.de:8443',
   // 养马
   horse_enabled: false,
+  horse_poll_interval: 120,
+  horse_feed_type: 'weed',
+  horse_feed_threshold: 60,
+  horse_auto_walk: true,
+  horse_auto_official_race: false,
+  horse_auto_revive: false,
   horse_notify: true,
   // 炸金花
   zjh_enabled: true,
-  zjh_cookie_file: '/home/hermes/.hermes/cookies/hdsky_cookie.txt',
-  zjh_base_url: 'https://hdsky.supertimi.de:8443',
   zjh_poll_interval: 2,
   zjh_good_hands: ['豹子', '同花顺', '金花', '顺子', '对子'],
   zjh_notify_join: true,

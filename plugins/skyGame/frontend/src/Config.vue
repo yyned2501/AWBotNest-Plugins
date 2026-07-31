@@ -13,13 +13,19 @@ const DEFAULTS = {
   // 全局设置
   target_groups: '-1001326208894',
   bot: '',
+  hdsky_cookie_file: '/app/data/hdsky_cookie.txt',
+  hdsky_base_url: 'https://hdsky.supertimi.de:8443',
   // 养马
   horse_enabled: false,
+  horse_poll_interval: 120,
+  horse_feed_type: 'weed',
+  horse_feed_threshold: 60,
+  horse_auto_walk: true,
+  horse_auto_official_race: false,
+  horse_auto_revive: false,
   horse_notify: true,
   // 炸金花
   zjh_enabled: true,
-  zjh_cookie_file: '/home/hermes/.hermes/cookies/hdsky_cookie.txt',
-  zjh_base_url: 'https://hdsky.supertimi.de:8443',
   zjh_poll_interval: 2,
   zjh_good_hands: ['豹子', '同花顺', '金花', '顺子', '对子'],
   zjh_notify_join: true,
@@ -27,6 +33,13 @@ const DEFAULTS = {
   zjh_notify_fold_confirm: false,
   zjh_notify_error: true,
 }
+
+// 草料选项（与后端 config_schema 一致）
+const FEED_TYPES = [
+  { value: 'weed', label: '杂草（100银元 +12饱腹）' },
+  { value: 'fine', label: '精草（300银元 +30饱腹）' },
+  { value: 'divine', label: '仙草（1000银元 +60饱腹）' },
+]
 
 // 左侧分组：按游戏归类
 const GROUPS = [
@@ -110,6 +123,19 @@ function toggleHand(h) {
             </div>
           </section>
 
+          <section class="card">
+            <div class="card-h">HDSky 门户（炸金花/养马共用）</div>
+            <div class="fld">
+              <span class="lbl">Cookie 文件路径</span>
+              <input v-model="cfg.hdsky_cookie_file" class="inp" spellcheck="false" />
+              <span class="help">容器内路径（宿主 appdata/awbotnest/data 目录），12 小时过期需重新覆盖</span>
+            </div>
+            <div class="fld">
+              <span class="lbl">门户地址</span>
+              <input v-model="cfg.hdsky_base_url" class="inp" spellcheck="false" />
+            </div>
+          </section>
+
           <div class="savebar">
             <button class="btn primary lg" :disabled="saving" @click="save">{{ saving ? '保存中…' : '保存配置' }}</button>
           </div>
@@ -123,13 +149,59 @@ function toggleHand(h) {
             <div class="card-h">基础设置</div>
             <label class="row switch">
               <input v-model="cfg.horse_enabled" type="checkbox" />
-              <span>启用养马</span>
+              <span>启用养马自动化</span>
             </label>
+            <span class="help" style="margin-top:-4px">每轮轮询最多执行一个养护动作：喂食 → 遛马 → 官方赛</span>
+            <div class="grid">
+              <div class="fld">
+                <span class="lbl">养护轮询间隔(秒)</span>
+                <input v-model.number="cfg.horse_poll_interval" class="inp" type="number" min="30" max="600" step="10" />
+                <span class="help">节奏拟人，不用太频繁</span>
+              </div>
+              <div class="fld">
+                <span class="lbl">养马通知</span>
+                <label class="row switch">
+                  <input v-model="cfg.horse_notify" type="checkbox" />
+                  <span>操作结果推送</span>
+                </label>
+              </div>
+            </div>
+          </section>
+
+          <section class="card">
+            <div class="card-h">自动喂食</div>
+            <div class="grid">
+              <div class="fld">
+                <span class="lbl">草料</span>
+                <select v-model="cfg.horse_feed_type" class="inp">
+                  <option v-for="f in FEED_TYPES" :key="f.value" :value="f.value">{{ f.label }}</option>
+                </select>
+              </div>
+              <div class="fld">
+                <span class="lbl">饱腹度阈值</span>
+                <input v-model.number="cfg.horse_feed_threshold" class="inp" type="number" min="0" max="100" step="5" />
+                <span class="help">低于此值且今日次数未用完时喂（每日上限 5 次）</span>
+              </div>
+            </div>
+          </section>
+
+          <section class="card">
+            <div class="card-h">自动行为</div>
             <label class="row switch">
-              <input v-model="cfg.horse_notify" type="checkbox" />
-              <span>养马通知</span>
+              <input v-model="cfg.horse_auto_walk" type="checkbox" />
+              <span>自动遛马</span>
             </label>
-            <div class="notice">🐴 养马逻辑开发中，启用后仅记录提示，暂无自动操作。</div>
+            <span class="help" style="margin-top:-4px">用完每日遛马额度（4 次），赚银元+经验，体力耗尽自动停</span>
+            <label class="row switch">
+              <input v-model="cfg.horse_auto_official_race" type="checkbox" />
+              <span>自动报名官方赛</span>
+            </label>
+            <span class="help" style="margin-top:-4px">每日官方赛开放报名时免费参加</span>
+            <label class="row switch">
+              <input v-model="cfg.horse_auto_revive" type="checkbox" />
+              <span>死亡自动复活</span>
+            </label>
+            <span class="help" style="margin-top:-4px">马匹死亡且余额足够时复活（约 30 万银元，默认关）</span>
           </section>
 
           <div class="savebar">
@@ -149,19 +221,9 @@ function toggleHand(h) {
             </label>
             <span class="help" style="margin-top:-4px">轮询牌局：自动加入 → 看牌 → 好牌跟注 / 烂牌弃牌</span>
             <div class="fld">
-              <span class="lbl">Cookie 文件路径</span>
-              <input v-model="cfg.zjh_cookie_file" class="inp" spellcheck="false" />
-              <span class="help">hdsky_portal_session cookie 文件路径</span>
-            </div>
-            <div class="grid">
-              <div class="fld">
-                <span class="lbl">服务器地址</span>
-                <input v-model="cfg.zjh_base_url" class="inp" spellcheck="false" />
-              </div>
-              <div class="fld">
-                <span class="lbl">轮询间隔(秒)</span>
-                <input v-model.number="cfg.zjh_poll_interval" class="inp" type="number" min="1" max="10" step="0.5" />
-              </div>
+              <span class="lbl">轮询间隔(秒)</span>
+              <input v-model.number="cfg.zjh_poll_interval" class="inp" type="number" min="1" max="10" step="0.5" />
+              <span class="help">Cookie 与门户地址见「全局设置」</span>
             </div>
           </section>
 
@@ -243,11 +305,6 @@ function toggleHand(h) {
 .row.switch { cursor: pointer; font-size: 13px; color: var(--text-primary, #e8ebf0); }
 .row.switch input { accent-color: var(--accent, #6ea8fe); }
 .hand-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 6px 16px; }
-.notice {
-  font-size: 12px; line-height: 1.7; padding: 8px 12px; border-radius: 6px;
-  color: var(--text-secondary, #b9c0cc);
-  background: rgba(210, 153, 34, 0.08); border: 1px solid rgba(210, 153, 34, 0.25);
-}
 
 .inp {
   width: 100%; min-width: 0; box-sizing: border-box;
