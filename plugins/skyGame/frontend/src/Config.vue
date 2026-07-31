@@ -1,0 +1,292 @@
+<script setup>
+// 天空游戏 · 配置界面
+// 左侧按游戏分组：全局设置 / 养马 / 炸金花
+// host.getConfig() / host.saveConfig() / host.callApi()
+import { ref, reactive, onMounted } from 'vue'
+
+const props = defineProps({
+  pluginId: { type: String, required: true },
+  host: { type: Object, required: true },
+})
+
+const DEFAULTS = {
+  // 全局设置
+  target_groups: '-1001326208894',
+  bot: '',
+  // 养马
+  horse_enabled: false,
+  horse_notify: true,
+  // 炸金花
+  zjh_enabled: true,
+  zjh_cookie_file: '/home/hermes/.hermes/cookies/hdsky_cookie.txt',
+  zjh_base_url: 'https://hdsky.supertimi.de:8443',
+  zjh_poll_interval: 2,
+  zjh_good_hands: ['豹子', '同花顺', '金花', '顺子', '对子'],
+  zjh_notify_join: true,
+  zjh_notify_hand: true,
+  zjh_notify_fold_confirm: false,
+  zjh_notify_error: true,
+}
+
+// 左侧分组：按游戏归类
+const GROUPS = [
+  { key: 'global', label: '全局设置', icon: '⚙️' },
+  { key: 'horse', label: '养马', icon: '🐴' },
+  { key: 'zjh', label: '炸金花', icon: '🃏' },
+]
+
+// 炸金花可勾选的牌型
+const HAND_TYPES = ['豹子', '同花顺', '金花', '顺子', '对子', '散牌']
+
+const group = ref('global')
+const loading = ref(true)
+const saving = ref(false)
+const cfg = reactive({ ...DEFAULTS })
+
+onMounted(async () => {
+  try {
+    const saved = await props.host.getConfig()
+    Object.assign(cfg, DEFAULTS, saved || {})
+  } catch (e) {
+    props.host.toast.error('读取配置失败：' + (e.message || e))
+  } finally {
+    loading.value = false
+  }
+})
+
+async function save() {
+  saving.value = true
+  try {
+    await props.host.saveConfig({ ...cfg })
+    props.host.toast.success('配置已保存')
+  } catch (e) {
+    props.host.toast.error('保存失败：' + (e.message || e))
+  } finally {
+    saving.value = false
+  }
+}
+
+// 跟注牌型多选：zjh_good_hands 是字符串数组
+function hasHand(h) {
+  return Array.isArray(cfg.zjh_good_hands) && cfg.zjh_good_hands.includes(h)
+}
+function toggleHand(h) {
+  if (!Array.isArray(cfg.zjh_good_hands)) cfg.zjh_good_hands = []
+  const i = cfg.zjh_good_hands.indexOf(h)
+  if (i >= 0) cfg.zjh_good_hands.splice(i, 1)
+  else cfg.zjh_good_hands.push(h)
+}
+</script>
+
+<template>
+  <div class="lcfg">
+    <div v-if="loading" class="muted">加载配置…</div>
+    <div v-else class="layout">
+      <aside class="sidebar">
+        <div class="side-title">游戏</div>
+        <button v-for="g in GROUPS" :key="g.key"
+                :class="['side-item', { on: group === g.key }]" @click="group = g.key">
+          <span class="side-icon">{{ g.icon }}</span>
+          <span>{{ g.label }}</span>
+        </button>
+      </aside>
+
+      <div class="detail">
+        <!-- ============ 全局设置 ============ -->
+        <template v-if="group === 'global'">
+          <h3 class="det-title">全局设置</h3>
+
+          <section class="card">
+            <div class="card-h">目标与机器人</div>
+            <div class="fld">
+              <span class="lbl">目标群组（一行一个ID）</span>
+              <textarea v-model="cfg.target_groups" class="inp" rows="3" spellcheck="false"></textarea>
+              <span class="help">游戏消息发到的群，一行一个。</span>
+            </div>
+            <div class="fld">
+              <span class="lbl">天空小秘机器人</span>
+              <input v-model="cfg.bot" class="inp" placeholder="@用户名 或 数字ID，逗号分隔可填多个" />
+              <span class="help">留空=默认天空小秘。</span>
+            </div>
+          </section>
+
+          <div class="savebar">
+            <button class="btn primary lg" :disabled="saving" @click="save">{{ saving ? '保存中…' : '保存配置' }}</button>
+          </div>
+        </template>
+
+        <!-- ============ 养马 ============ -->
+        <template v-else-if="group === 'horse'">
+          <h3 class="det-title">养马</h3>
+
+          <section class="card">
+            <div class="card-h">基础设置</div>
+            <label class="row switch">
+              <input v-model="cfg.horse_enabled" type="checkbox" />
+              <span>启用养马</span>
+            </label>
+            <label class="row switch">
+              <input v-model="cfg.horse_notify" type="checkbox" />
+              <span>养马通知</span>
+            </label>
+            <div class="notice">🐴 养马逻辑开发中，启用后仅记录提示，暂无自动操作。</div>
+          </section>
+
+          <div class="savebar">
+            <button class="btn primary lg" :disabled="saving" @click="save">{{ saving ? '保存中…' : '保存配置' }}</button>
+          </div>
+        </template>
+
+        <!-- ============ 炸金花 ============ -->
+        <template v-else-if="group === 'zjh'">
+          <h3 class="det-title">炸金花</h3>
+
+          <section class="card">
+            <div class="card-h">基础设置</div>
+            <label class="row switch">
+              <input v-model="cfg.zjh_enabled" type="checkbox" />
+              <span>启用自动参与</span>
+            </label>
+            <span class="help" style="margin-top:-4px">轮询牌局：自动加入 → 看牌 → 好牌跟注 / 烂牌弃牌</span>
+            <div class="fld">
+              <span class="lbl">Cookie 文件路径</span>
+              <input v-model="cfg.zjh_cookie_file" class="inp" spellcheck="false" />
+              <span class="help">hdsky_portal_session cookie 文件路径</span>
+            </div>
+            <div class="grid">
+              <div class="fld">
+                <span class="lbl">服务器地址</span>
+                <input v-model="cfg.zjh_base_url" class="inp" spellcheck="false" />
+              </div>
+              <div class="fld">
+                <span class="lbl">轮询间隔(秒)</span>
+                <input v-model.number="cfg.zjh_poll_interval" class="inp" type="number" min="1" max="10" step="0.5" />
+              </div>
+            </div>
+          </section>
+
+          <section class="card">
+            <div class="card-h">跟注牌型</div>
+            <div class="fld">
+              <span class="lbl">勾选的牌型跟注，未勾选的弃牌</span>
+              <div class="hand-grid">
+                <label v-for="h in HAND_TYPES" :key="h" class="row switch">
+                  <input type="checkbox" :checked="hasHand(h)" @change="toggleHand(h)" />
+                  <span>{{ h }}</span>
+                </label>
+              </div>
+              <span class="help">全不选时回退默认五种好牌（豹子/同花顺/金花/顺子/对子）</span>
+            </div>
+          </section>
+
+          <section class="card">
+            <div class="card-h">通知</div>
+            <label class="row switch">
+              <input v-model="cfg.zjh_notify_join" type="checkbox" />
+              <span>加入牌局</span>
+            </label>
+            <label class="row switch">
+              <input v-model="cfg.zjh_notify_hand" type="checkbox" />
+              <span>手牌决策（跟注/弃牌）</span>
+            </label>
+            <label class="row switch">
+              <input v-model="cfg.zjh_notify_fold_confirm" type="checkbox" />
+              <span>双击确认弃牌</span>
+            </label>
+            <label class="row switch">
+              <input v-model="cfg.zjh_notify_error" type="checkbox" />
+              <span>异常</span>
+            </label>
+          </section>
+
+          <div class="savebar">
+            <button class="btn primary lg" :disabled="saving" @click="save">{{ saving ? '保存中…' : '保存配置' }}</button>
+          </div>
+        </template>
+      </div>
+    </div>
+  </div>
+</template>
+
+<style scoped>
+.lcfg { display: flex; flex-direction: column; gap: 14px; container-type: inline-size; min-height: 100%; }
+.layout { display: flex; gap: 16px; align-items: flex-start; min-height: 100%; }
+.sidebar {
+  flex: 0 0 150px; display: flex; flex-direction: column; gap: 4px;
+  padding: 10px; border-radius: 10px;
+  background: var(--bg-elevated, #1a1d27); border: 1px solid var(--border-light, #2a2e3a);
+}
+.side-title { font-size: 11px; color: var(--text-muted, #7a8291); padding: 4px 8px 6px; }
+.side-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 9px 10px; border-radius: 8px; border: none; cursor: pointer; text-align: left;
+  background: none; color: var(--text-secondary, #b9c0cc); font-size: 13px;
+  transition: background 0.15s, color 0.15s;
+}
+.side-item:hover { background: var(--bg-card, #12141c); }
+.side-item.on { background: var(--accent-dim, #1e3a5f); color: var(--accent, #6ea8fe); }
+.side-icon { font-size: 14px; }
+
+.detail { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 14px; }
+.det-title { margin: 0; font-size: 15px; font-weight: 600; color: var(--text-primary, #e8ebf0); }
+
+.card {
+  display: flex; flex-direction: column; gap: 12px; padding: 16px; border-radius: 10px;
+  background: var(--bg-elevated, #1a1d27); border: 1px solid var(--border-light, #2a2e3a);
+}
+.card-h { font-size: 13px; font-weight: 600; color: var(--accent, #6ea8fe); }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px 20px; }
+.fld { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.lbl { font-size: 13px; color: var(--text-secondary, #b9c0cc); }
+.help { font-size: 12px; color: var(--text-muted, #7a8291); }
+.row { display: flex; align-items: center; gap: 10px; }
+.row.switch { cursor: pointer; font-size: 13px; color: var(--text-primary, #e8ebf0); }
+.row.switch input { accent-color: var(--accent, #6ea8fe); }
+.hand-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 6px 16px; }
+.notice {
+  font-size: 12px; line-height: 1.7; padding: 8px 12px; border-radius: 6px;
+  color: var(--text-secondary, #b9c0cc);
+  background: rgba(210, 153, 34, 0.08); border: 1px solid rgba(210, 153, 34, 0.25);
+}
+
+.inp {
+  width: 100%; min-width: 0; box-sizing: border-box;
+  padding: 8px 10px; border-radius: 6px; font-size: 13px;
+  background: var(--bg-card, #12141c); color: var(--text-primary, #e8ebf0);
+  border: 1px solid var(--border-light, #2a2e3a);
+  transition: border-color 0.15s;
+}
+.inp:focus { outline: none; border-color: var(--accent, #6ea8fe); }
+.inp[type='number'] { max-width: 150px; }
+textarea.inp { resize: vertical; font-family: inherit; }
+
+.btn {
+  padding: 7px 14px; border-radius: 6px; cursor: pointer; font-size: 13px;
+  background: var(--bg-card, #12141c); color: var(--text-secondary, #b9c0cc);
+  border: 1px solid var(--border-light, #2a2e3a);
+  transition: border-color 0.15s, color 0.15s;
+}
+.btn:hover { border-color: var(--accent, #6ea8fe); color: var(--accent, #6ea8fe); }
+.btn.primary { background: var(--accent-dim, #1e3a5f); border-color: var(--accent, #6ea8fe); color: var(--accent, #6ea8fe); }
+.btn.lg { padding: 9px 22px; }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.savebar { position: sticky; bottom: 0; display: flex; justify-content: flex-end; padding-top: 4px; }
+.muted { font-size: 12px; color: var(--text-muted, #7a8291); }
+
+@container (max-width: 620px) {
+  .layout { flex-direction: column; }
+  .sidebar { flex-basis: auto; width: 100%; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .side-title { display: none; }
+  .side-item { flex: 0 1 auto; }
+  .detail { width: 100%; }
+  .grid { grid-template-columns: 1fr; }
+  .inp[type='number'] { max-width: none; width: 100%; }
+  .savebar { justify-content: stretch; }
+  .savebar .btn.lg { width: 100%; text-align: center; }
+}
+@container (max-width: 380px) {
+  .card { padding: 12px; }
+  .sidebar { padding: 8px; gap: 4px; }
+  .inp { padding: 7px 8px; }
+}
+</style>
