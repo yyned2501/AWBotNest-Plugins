@@ -95,8 +95,9 @@ _poll_task: asyncio.Task[None] | None = None
 
 
 def _normalize_hand_type(hand_type: str) -> str:
-    """将门户牌型名称归一为概率表使用的名称。"""
-    return _HAND_TYPE_ALIASES.get(hand_type, hand_type)
+    """将门户牌型名称或“手牌 → 牌型”组合文本归一为概率表名称。"""
+    normalized = hand_type.rsplit("→", 1)[-1].strip()
+    return _HAND_TYPE_ALIASES.get(normalized, normalized)
 
 
 def _parse_hand(hand: str) -> list[int]:

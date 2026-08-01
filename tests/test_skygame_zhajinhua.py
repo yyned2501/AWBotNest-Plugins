@@ -58,6 +58,13 @@ def test_extract_hand_value_handles_a23_as_low_straight() -> None:
 
 def test_normalize_portal_flush_name() -> None:
     assert _normalize_hand_type("同花") == "金花"
+    assert _normalize_hand_type("9♠ 3♠ 2♠ → 同花") == "金花"
+
+
+def test_extract_hand_value_from_portal_combined_flush_type() -> None:
+    hand = "9♠ 3♠ 2♠"
+    hand_type = _normalize_hand_type(f"{hand} → 同花")
+    assert _extract_hand_value(hand_type, hand) == (9, 3, 2)
 
 
 def test_parse_and_extract_reject_invalid_hand() -> None:
