@@ -178,6 +178,11 @@ def _is_self(player: dict[str, Any]) -> bool:
     return bool(player.get("isSelf") or player.get("self"))
 
 
+def _in_hand(game: dict[str, Any]) -> bool:
+    """本账号是否仍在当前牌局（未弃牌/未出局）；只有此时才需跟踪对手快照。"""
+    return bool(game.get("self", {}).get("alive", False))
+
+
 def _player_state(player: dict[str, Any]) -> _PlayerState:
     """提取用于轮询比较的公开状态。"""
     bet = player.get("bet")
@@ -742,10 +747,14 @@ async def _poll_loop(ctx: object) -> None:
                     last_rid = rid
                     turns_taken = 0
                     tracker = _RoundTracker()
-                _update_round_tracker(g, tracker, ctx.log)
+                s = g.get("self", {})
+                # 弃牌/出局后本局不再有任何决策，停止跟踪对手快照与门槛推导。
+                # 否则对手互相缠斗时门槛会递归虚高（单挑反推的不动点在 1.0，
+                # 轮流下注单调收敛到 1.0），纯属无用计算还把日志刷花。
+                if _in_hand(g):
+                    _update_round_tracker(g, tracker, ctx.log)
                 phase = g.get("phase", "")
                 actions = g.get("actions", [])
-                s = g.get("self", {})
                 joined = s.get("joined", False)
                 is_turn = s.get("isTurn", False)
                 alive = s.get("alive", False)

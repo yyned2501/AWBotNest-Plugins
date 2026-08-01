@@ -16,6 +16,7 @@ from plugins.skyGame.games.zhajinhua import (
     _combined_self_threshold,
     _extract_hand_value,
     _hand_threshold_for_actual_win_probability,
+    _in_hand,
     _normalize_hand_type,
     _opponent_counts,
     _opponent_hand_threshold,
@@ -542,3 +543,56 @@ def test_call_decision_rejects_invalid_financial_data() -> None:
     assert _call_decision("豹子", 14, game, 0.5, tracker) is None
     assert _call_decision("豹子", 14, {"pot": 100, "callBet": -1}, 0.5, tracker) is None
     assert _call_decision("豹子", None, {"pot": 100, "callBet": 1}, 0.5, tracker) is None
+
+
+def test_in_hand_reflects_self_alive() -> None:
+    assert _in_hand({"self": {"alive": True}}) is True
+    assert _in_hand({"self": {"alive": False}}) is False
+    assert _in_hand({"self": {}}) is False
+    assert _in_hand({}) is False
+
+
+def test_tracker_stops_accumulating_once_self_folds() -> None:
+    # 回归：弃牌后本局不再有决策，_poll_loop 门控应停止跟踪对手快照，
+    # 避免对手互相缠斗时门槛递归虚高（单挑反推不动点收敛到 1.0）。
+    tracker = _RoundTracker()
+
+    def poll(game: dict[str, object]) -> None:
+        # 复刻 _poll_loop 的门控：仅在局时更新跟踪器
+        if _in_hand(game):
+            _update_round_tracker(game, tracker)
+
+    in_hand_blind = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": True, "bet": 100},
+        {"id": "opp", "alive": True, "seen": False, "bet": 100},
+        pot=1000,
+        call_bet=100,
+    )
+    in_hand_blind["self"] = {"alive": True}
+    poll(in_hand_blind)
+
+    opp_peeks = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": True, "bet": 100},
+        {"id": "opp", "alive": True, "seen": True, "bet": 100},
+        pot=1000,
+        call_bet=100,
+    )
+    opp_peeks["self"] = {"alive": True}
+    poll(opp_peeks)
+
+    # 正向：我在局时对手上牌被记录
+    assert "opp" in tracker.peek_snapshots
+    peek_before = tracker.peek_snapshots["opp"]
+
+    self_folded = _game(
+        {"id": "self", "alive": False, "isSelf": True, "seen": True, "bet": 100},
+        {"id": "opp", "alive": True, "seen": True, "bet": 900},
+        pot=9000,
+        call_bet=3000,
+    )
+    self_folded["self"] = {"alive": False}
+    poll(self_folded)
+
+    # 异常路径：我方弃牌后对手大幅加注，也不产生新快照、不抬高门槛
+    assert tracker.snapshots == {}
+    assert tracker.peek_snapshots["opp"] == peek_before
