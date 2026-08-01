@@ -106,12 +106,15 @@ async def _care_once(ctx: object, cfg: dict, client: HdskyClient) -> None:
     official = (horse.get("competitions", {}) or {}).get("official", {}) or {}
     eligibility = official.get("eligibility", {}) or {}
     today = datetime.date.today().isoformat()
-    if ctx.kv.get("horse:race_last_signup_date") == today:
+    if official.get("joined"):
+        ctx.kv.set("horse:race_last_signup_date", today)
+        ctx.log.debug("官方赛今日已报名（服务端状态），跳过")
+    elif ctx.kv.get("horse:race_last_signup_date") == today:
         ctx.log.debug("今日已报名官方赛，明天再检查")
     elif cfg.get("horse_auto_official_race", False) and official.get("signupOpen") and eligibility.get("canRace"):
         r = await client.post("/api/portal/horse/race/action", {"action": "official_join", "requestKey": request_key()})
         ctx.log.info("报名官方赛马")
-        if r.get("result", {}).get("ok", r.get("ok", False)):
+        if r.get("ok", False):
             ctx.kv.set("horse:race_last_signup_date", today)
         await _notify_result(ctx, cfg, r, "官方赛报名失败")
         return
