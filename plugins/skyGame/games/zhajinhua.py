@@ -37,8 +37,14 @@ _RANK_MAP = {
     "K": 13,
     "A": 14,
 }
+_HAND_TYPE_ALIASES = {"同花": "金花"}
 
 _poll_task: asyncio.Task[None] | None = None
+
+
+def _normalize_hand_type(hand_type: str) -> str:
+    """将门户牌型名称归一为配置和概率表使用的名称。"""
+    return _HAND_TYPE_ALIASES.get(hand_type, hand_type)
 
 
 def _good_hands(cfg: dict) -> list[str]:
@@ -84,6 +90,8 @@ def _extract_hand_value(hand_type: str, hand: str) -> int | tuple[int, ...] | No
     if len(ranks) < 3:
         return None
     if hand_type in ("豹子", "同花顺", "顺子"):
+        if hand_type != "豹子" and ranks == [14, 3, 2]:
+            return 3
         return ranks[0]
     if hand_type in ("金花", "散牌"):
         return (ranks[0], ranks[1], ranks[2])
@@ -104,14 +112,13 @@ def _call_prob(hand_type: str, hand_value: int | tuple[int, ...] | None, alive: 
 
 def _should_call(hand_type: str, hand_value: int | tuple[int, ...] | None, alive: int, good_hands: list[str]) -> bool:
     """综合牌型、具体手牌与剩余人数判断是否跟注。"""
-    for h in good_hands:
-        if h in hand_type:
-            win = _call_prob(hand_type, hand_value, alive)
-            # 人数越多门槛越高：2 人时 > 25%，5 人时 > 35%
-            opponents = max(alive - 1, 1)
-            threshold = 0.25 + min(opponents, 8) * 0.02
-            return win >= threshold
-    return False
+    if hand_type not in good_hands:
+        return False
+    win = _call_prob(hand_type, hand_value, alive)
+    # 人数越多门槛越高：2 人时 > 25%，5 人时 > 35%
+    opponents = max(alive - 1, 1)
+    threshold = 0.25 + min(opponents, 8) * 0.02
+    return win >= threshold
 
 
 async def _poll_loop(ctx: object) -> None:
@@ -151,7 +158,7 @@ async def _poll_loop(ctx: object) -> None:
                 is_turn = s.get("isTurn", False)
                 alive = s.get("alive", False)
                 hand = s.get("hand", "")
-                hand_type = s.get("handType", "")
+                hand_type = _normalize_hand_type(s.get("handType", ""))
                 fc = s.get("foldConfirm", False)
 
                 # 没加入且可加入 → 加入
@@ -199,7 +206,7 @@ async def _poll_loop(ctx: object) -> None:
                         r = await client.post("/api/portal/zhajinhua/action", {"action": "peek"})
                         if r.get("ok"):
                             hand = r.get("game", {}).get("self", {}).get("hand", "?")
-                            hand_type = r.get("game", {}).get("self", {}).get("handType", "?")
+                            hand_type = _normalize_hand_type(r.get("game", {}).get("self", {}).get("handType", "?"))
                             fc = r.get("game", {}).get("self", {}).get("foldConfirm", False)
                             ctx.log.info("手牌: %s (%s)", hand, hand_type)
 
