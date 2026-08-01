@@ -43,11 +43,13 @@ _HAND_TYPE_ALIASES = {"同花": "金花"}
 
 @dataclass(frozen=True)
 class _OpponentSnapshot:
-    """对手看牌后最近一次继续下注前的牌局快照。"""
+    """对手某次理性决策前的牌局快照及其面对的对手权重。"""
 
     pot: float
     call_bet: float
     opponents: int
+    blind_opponents: int | None = None
+    seen_thresholds: tuple[float, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -72,11 +74,12 @@ class _PendingFold:
 
 @dataclass
 class _RoundTracker:
-    """一局内的对手下注快照、上一轮公开状态和待确认弃牌。"""
+    """一局内的对手上牌/下注快照、上一轮公开状态和待确认弃牌。"""
 
     players: dict[str, _PlayerState] = field(default_factory=dict)
     pot: float | None = None
     call_bet: float | None = None
+    peek_snapshots: dict[str, _OpponentSnapshot] = field(default_factory=dict)
     snapshots: dict[str, _OpponentSnapshot] = field(default_factory=dict)
     pending_fold: _PendingFold | None = None
 
@@ -203,11 +206,66 @@ def _opponent_counts(game: dict[str, Any]) -> tuple[int, int]:
 
 
 def _opponent_threshold(snapshot: _OpponentSnapshot | None) -> float | None:
-    """按对手行动前的底池赔率反推其最小单挑牌力。"""
+    """反推对手在该快照下牌局整体胜率的盈亏平衡门槛。"""
     if snapshot is None or snapshot.pot <= 0 or snapshot.call_bet <= 0:
         return None
-    pot_odds = snapshot.call_bet / (snapshot.pot + snapshot.call_bet)
-    return pot_odds ** (1 / max(snapshot.opponents, 1))
+    return snapshot.call_bet / (snapshot.pot + snapshot.call_bet)
+
+
+def _opponent_hand_threshold(snapshot: _OpponentSnapshot | None) -> float | None:
+    """按蒙牌与已看牌对手的权重反推对手最低单挑牌力。"""
+    game_threshold = _opponent_threshold(snapshot)
+    if game_threshold is None or snapshot is None:
+        return None
+    blind_opponents = snapshot.blind_opponents if snapshot.blind_opponents is not None else snapshot.opponents
+    known_weight = 1.0
+    for threshold in snapshot.seen_thresholds:
+        known_weight *= max(1.0 - threshold, 0.0)
+    if known_weight <= 0:
+        return None
+    return (game_threshold / known_weight) ** (1 / max(blind_opponents, 1))
+
+
+def _combined_opponent_threshold(
+    peek_snapshot: _OpponentSnapshot | None, continue_snapshot: _OpponentSnapshot | None
+) -> float | None:
+    """按上牌和看牌后继续下注两次决策推导对手的综合最低牌力。"""
+    thresholds = [
+        threshold
+        for snapshot in (peek_snapshot, continue_snapshot)
+        if (threshold := _opponent_hand_threshold(snapshot)) is not None
+    ]
+    return max(thresholds, default=None)
+
+
+def _snapshot_for_actor(
+    game: dict[str, Any], tracker: _RoundTracker, actor_key: str, pot: float, call_bet: float
+) -> _OpponentSnapshot:
+    """按行动者面对的蒙牌和已看牌对手构造决策快照。"""
+    blind_opponents = 0
+    seen_thresholds: list[float] = []
+    opponents = 0
+    for index, player in enumerate(_players(game)):
+        key = _player_key(player, index)
+        if key == actor_key or not _is_alive(player):
+            continue
+        opponents += 1
+        previous = tracker.players.get(key)
+        seen = previous.seen if previous is not None else bool(player.get("seen", False))
+        if not seen:
+            blind_opponents += 1
+            continue
+        if not _is_self(player):
+            threshold = _combined_opponent_threshold(tracker.peek_snapshots.get(key), tracker.snapshots.get(key))
+            if threshold is not None:
+                seen_thresholds.append(threshold)
+    return _OpponentSnapshot(
+        pot=pot,
+        call_bet=call_bet,
+        opponents=max(opponents, 1),
+        blind_opponents=blind_opponents,
+        seen_thresholds=tuple(seen_thresholds),
+    )
 
 
 def _is_continue_action(last_action: str) -> bool:
@@ -217,47 +275,59 @@ def _is_continue_action(last_action: str) -> bool:
 
 
 def _update_round_tracker(game: dict[str, Any], tracker: _RoundTracker, log: Any = None) -> None:
-    """根据相邻轮询记录对手看牌后继续下注时的行动前快照。"""
+    """根据相邻轮询记录对手上牌及看牌后继续下注的行动前快照。"""
     pot = game.get("pot")
     call_bet = game.get("callBet")
     if not isinstance(pot, (int, float)) or not isinstance(call_bet, (int, float)):
         return
 
     opponents = _opponent_entries(game)
-    # 上一轮存活对手数（不含自己）；行动者面对的是其余对手，需再减自身一人
-    previous_opponents = sum(1 for state in tracker.players.values() if state.alive)
-    faced_opponents = max(previous_opponents - 1, 1)
+    # 上一轮存活对手数（不含自己）；行动者面对的是其余存活对手，需再减自身一人。
     for index, player in enumerate(_players(game)):
         if _is_self(player):
             continue
         key = _player_key(player, index)
         current = _player_state(player)
         previous = tracker.players.get(key)
-        if previous and current.alive and current.seen:
-            bet_increased = previous.bet is not None and current.bet is not None and current.bet > previous.bet
-            action_changed = current.last_action != previous.last_action and _is_continue_action(current.last_action)
-            if previous.seen and (bet_increased or action_changed):
-                if tracker.pot is not None and tracker.call_bet is not None:
-                    snapshot = _OpponentSnapshot(
-                        pot=tracker.pot,
-                        call_bet=tracker.call_bet,
-                        opponents=faced_opponents,
+        if previous and current.alive and current.seen and tracker.pot is not None and tracker.call_bet is not None:
+            snapshot = _snapshot_for_actor(game, tracker, key, tracker.pot, tracker.call_bet)
+            if not previous.seen:
+                tracker.peek_snapshots[key] = snapshot
+                if log:
+                    inferred = _opponent_hand_threshold(snapshot)
+                    log.info(
+                        "记录对手上牌快照 %s: 上牌前底池=%.0f 成本=%.0f 面对对手=%d → 上牌门槛=%s",
+                        key,
+                        snapshot.pot,
+                        snapshot.call_bet,
+                        snapshot.opponents,
+                        f"{inferred:.3f}" if inferred is not None else "无法推断",
                     )
+            else:
+                bet_increased = previous.bet is not None and current.bet is not None and current.bet > previous.bet
+                action_changed = current.last_action != previous.last_action and _is_continue_action(
+                    current.last_action
+                )
+                if bet_increased or action_changed:
                     tracker.snapshots[key] = snapshot
                     if log:
-                        inferred = _opponent_threshold(snapshot)
+                        peek_snapshot = tracker.peek_snapshots.get(key)
+                        inferred = _combined_opponent_threshold(peek_snapshot, snapshot)
+                        peek_threshold = _opponent_hand_threshold(peek_snapshot)
                         log.info(
-                            "记录对手下注快照 %s: 行动前底池=%.0f 成本=%.0f 面对对手=%d → 推断门槛=%s",
+                            "记录对手下注快照 %s: 行动前底池=%.0f 成本=%.0f 面对对手=%d → 上牌门槛=%s 综合门槛=%s",
                             key,
                             snapshot.pot,
                             snapshot.call_bet,
                             snapshot.opponents,
+                            f"{peek_threshold:.3f}" if peek_threshold is not None else "未观测",
                             f"{inferred:.3f}" if inferred is not None else "无法推断",
                         )
         tracker.players[key] = current
 
     active_keys = {key for key, _ in opponents}
     tracker.players = {key: state for key, state in tracker.players.items() if key in active_keys}
+    tracker.peek_snapshots = {key: snapshot for key, snapshot in tracker.peek_snapshots.items() if key in active_keys}
     tracker.snapshots = {key: snapshot for key, snapshot in tracker.snapshots.items() if key in active_keys}
     tracker.pot = float(pot)
     tracker.call_bet = float(call_bet)
@@ -291,7 +361,7 @@ def _call_decision(
     for key, player in _opponent_entries(game):
         if not player.get("seen", False):
             continue
-        threshold = _opponent_threshold(tracker.snapshots.get(key))
+        threshold = _combined_opponent_threshold(tracker.peek_snapshots.get(key), tracker.snapshots.get(key))
         observed = threshold is not None
         threshold = threshold if threshold is not None else fallback_threshold
         versus_seen = max(one_vs_one - threshold, 0.0) / (1.0 - threshold)
@@ -316,6 +386,11 @@ def _choose(
     if decision.expected_value < 0:
         return _Choice(False, "跟注期望收益为负", decision)
     return _Choice(True, "期望收益非负", decision)
+
+
+def _action_override(actions: list[Any]) -> str | None:
+    """从服务端授权动作中取优先级最高的应战开牌动作。"""
+    return next((action for action in actions if action == "showdown"), None)
 
 
 def _choose_action(
@@ -376,13 +451,22 @@ def _log_decision(
     for key, player in _opponent_entries(game):
         if not player.get("seen", False):
             continue
-        snap = tracker.snapshots.get(key)
-        inferred = _opponent_threshold(snap)
-        if snap is not None:
-            src = f"实测 快照(底池{snap.pot:.0f}/成本{snap.call_bet:.0f}/对手{snap.opponents})"
-        else:
-            src = "回退(未观测到下注)"
-        seen_detail.append(f"{key} 门槛={'%.3f' % inferred if inferred is not None else '回退值'} {src}")
+        peek_snapshot = tracker.peek_snapshots.get(key)
+        continue_snapshot = tracker.snapshots.get(key)
+        inferred = _combined_opponent_threshold(peek_snapshot, continue_snapshot)
+        details = []
+        if peek_snapshot is not None:
+            details.append(
+                f"上牌(底池{peek_snapshot.pot:.0f}/成本{peek_snapshot.call_bet:.0f}/对手{peek_snapshot.opponents})"
+            )
+        if continue_snapshot is not None:
+            details.append(
+                f"下注(底池{continue_snapshot.pot:.0f}/成本{continue_snapshot.call_bet:.0f}/对手{continue_snapshot.opponents})"
+            )
+        seen_detail.append(
+            f"{key} 综合门槛={'%.3f' % inferred if inferred is not None else '回退值'} "
+            f"{' + '.join(details) if details else '回退(未观测到上牌或下注)'}"
+        )
     log.info(
         "决策[%s] %s(%s) 键值=%s | 单挑胜率=%.4f 蒙=%d 看=%d | 看牌对手[%s] | "
         "终胜率=%.4f | 底池=%.0f 成本=%.0f | EV=%+.2f | 原因=%s",
@@ -480,13 +564,12 @@ async def _act_on_hand(
     choice = _choose(hand_type, hand_value, game, fallback_threshold, tracker)
     _log_decision(ctx, hand, hand_type, hand_value, game, choice, tracker)
 
-    if not choice.call:
-        return await _request_fold(ctx, client, cfg, game, hand, hand_type, choice, tracker)
-
     decision = choice.decision
     actions = game.get("actions", [])
-    if action_override:
-        action, reason = action_override, "对手发起比牌，EV 非负应战"
+    if action_override and action_override in actions and decision is not None:
+        action, reason = action_override, "对手发起比牌，服务端要求应战开牌"
+    elif not choice.call:
+        return await _request_fold(ctx, client, cfg, game, hand, hand_type, choice, tracker)
     else:
         action, reason = _choose_action(
             choice,
@@ -496,10 +579,28 @@ async def _act_on_hand(
             bool(cfg.get("zjh_raise_enabled", False)),
             float(cfg.get("zjh_raise_min_win_rate", 75)) / 100,
         )
+
+    if action_override:
+        ctx.log.info(
+            "应战开牌: 牌桌=%s phase=%r alive=%s isTurn=%s actions=%s",
+            rid,
+            game.get("phase"),
+            game.get("self", {}).get("alive"),
+            game.get("self", {}).get("isTurn"),
+            actions,
+        )
     ctx.log.info("执行动作[%s]：%s；服务端可用动作=%s", action, reason, actions)
     result = await client.post("/api/portal/zhajinhua/action", {"action": action})
     if not result.get("ok"):
-        ctx.log.warning("动作[%s]请求失败: %s", action, result.get("error"))
+        ctx.log.warning(
+            "动作[%s]请求失败: %s；牌桌=%s phase=%r self=%s actions=%s",
+            action,
+            result.get("error"),
+            rid,
+            game.get("phase"),
+            game.get("self", {}),
+            actions,
+        )
         return False
     if cfg.get("zjh_notify_hand", True) and decision is not None:
         await ctx.notify(
@@ -589,10 +690,10 @@ async def _poll_loop(ctx: object) -> None:
                     else:
                         ctx.log.warning("确认弃牌失败: %s", r.get("error"))
 
-                elif joined and is_turn and phase == "playing":
+                elif joined and is_turn and isinstance(actions, list) and actions:
                     if hand:
-                        # 对手已发起比牌时，showdown 是唯一应战动作；其余已看牌局面按策略决策。
-                        action_override = "showdown" if "showdown" in actions else None
+                        # 服务端 actions 是动作授权的唯一来源；showdown 出现时优先应战。
+                        action_override = _action_override(actions)
                         fold_pending = await _act_on_hand(
                             ctx,
                             client,
@@ -604,12 +705,12 @@ async def _poll_loop(ctx: object) -> None:
                             tracker,
                             action_override,
                         )
-                    elif turns_taken == 0:
+                    elif turns_taken == 0 and "call" in actions:
                         # 第一轮蒙牌（盲跟）
                         ctx.log.info("第一轮蒙牌，盲跟")
                         await client.post("/api/portal/zhajinhua/action", {"action": "call"})
                         turns_taken += 1
-                    else:
+                    elif "peek" in actions:
                         # 第二轮看牌
                         ctx.log.info("轮到我了！看牌...")
                         r = await client.post("/api/portal/zhajinhua/action", {"action": "peek"})
@@ -621,7 +722,8 @@ async def _poll_loop(ctx: object) -> None:
                             hand = peek_self.get("hand", "?")
                             hand_type = _normalize_hand_type(peek_self.get("handType", "?"))
                             ctx.log.info("手牌: %s (%s)", hand, hand_type)
-                            action_override = "showdown" if "showdown" in g.get("actions", []) else None
+                            peek_actions = g.get("actions", [])
+                            action_override = _action_override(peek_actions)
                             fold_pending = await _act_on_hand(
                                 ctx,
                                 client,
@@ -633,6 +735,15 @@ async def _poll_loop(ctx: object) -> None:
                                 tracker,
                                 action_override,
                             )
+                    else:
+                        ctx.log.warning(
+                            "轮到我方但没有可执行的预期动作: 牌桌=%s phase=%r actions=%s hand=%s turns=%d",
+                            rid,
+                            phase,
+                            actions,
+                            bool(hand),
+                            turns_taken,
+                        )
 
                 # 新牌局 CSRF 作废（轮次状态已在本轮开头完成重置）
                 if phase == "waiting" and rid and not joined:

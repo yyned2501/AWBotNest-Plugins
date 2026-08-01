@@ -7,12 +7,15 @@ import pytest
 
 from plugins.skyGame.games import gen_zjh_prob, zjh_prob
 from plugins.skyGame.games.zhajinhua import (
+    _act_on_hand,
     _call_decision,
     _choose,
     _choose_action,
+    _combined_opponent_threshold,
     _extract_hand_value,
     _normalize_hand_type,
     _opponent_counts,
+    _opponent_hand_threshold,
     _opponent_threshold,
     _OpponentSnapshot,
     _parse_hand,
@@ -23,6 +26,64 @@ from plugins.skyGame.games.zhajinhua import (
 
 def _game(*players: dict[str, object], pot: float = 1000, call_bet: float = 100) -> dict[str, object]:
     return {"pot": pot, "callBet": call_bet, "players": list(players)}
+
+
+class _FakeLog:
+    def info(self, *args: object) -> None:
+        pass
+
+    def warning(self, *args: object) -> None:
+        pass
+
+
+class _FakeContext:
+    log = _FakeLog()
+
+    async def notify(self, *args: object, **kwargs: object) -> None:
+        pass
+
+
+class _FakeClient:
+    def __init__(self) -> None:
+        self.requests: list[tuple[str, dict[str, object]]] = []
+
+    async def post(self, path: str, body: dict[str, object]) -> dict[str, object]:
+        self.requests.append((path, body))
+        return {"ok": True}
+
+
+@pytest.mark.asyncio
+async def test_showdown_override_uses_server_authorized_action_even_for_negative_ev() -> None:
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": True},
+        {"id": "opponent", "alive": True, "seen": False},
+        pot=100,
+        call_bet=2000,
+    )
+    game.update(
+        {
+            "roundId": 123,
+            "phase": "showdown",
+            "actions": ["fold", "showdown"],
+            "self": {"alive": True, "isTurn": True},
+        }
+    )
+    client = _FakeClient()
+
+    pending_fold = await _act_on_hand(
+        _FakeContext(),
+        client,
+        {"zjh_notify_hand": False},
+        game,
+        "A♠ A♥ K♦",
+        "对子",
+        0.5,
+        _RoundTracker(),
+        "showdown",
+    )
+
+    assert pending_fold is False
+    assert client.requests == [("/api/portal/zhajinhua/action", {"action": "showdown"})]
 
 
 def test_probability_table_has_continuous_hand_type_ranges() -> None:
@@ -90,11 +151,21 @@ def test_opponent_counts_uses_conservative_fallback_without_players() -> None:
 
 def test_opponent_threshold_reflects_ev_zero_pot_odds() -> None:
     one_opponent = _OpponentSnapshot(pot=100, call_bet=100, opponents=1)
-    two_opponents = _OpponentSnapshot(pot=100, call_bet=100, opponents=2)
+    two_blind_opponents = _OpponentSnapshot(pot=100, call_bet=100, opponents=2, blind_opponents=2)
 
     assert _opponent_threshold(one_opponent) == pytest.approx(0.5)
-    assert _opponent_threshold(two_opponents) == pytest.approx(0.5**0.5)
+    assert _opponent_hand_threshold(one_opponent) == pytest.approx(0.5)
+    assert _opponent_hand_threshold(two_blind_opponents) == pytest.approx(0.5**0.5)
     assert _opponent_threshold(_OpponentSnapshot(pot=0, call_bet=100, opponents=1)) is None
+
+
+def test_combined_opponent_threshold_requires_passing_peek_and_continue_decisions() -> None:
+    peek = _OpponentSnapshot(pot=100, call_bet=100, opponents=1)
+    continued = _OpponentSnapshot(pot=900, call_bet=100, opponents=1)
+
+    assert _combined_opponent_threshold(peek, continued) == pytest.approx(0.5)
+    assert _combined_opponent_threshold(None, continued) == pytest.approx(0.1)
+    assert _combined_opponent_threshold(None, None) is None
 
 
 def test_tracker_records_seen_opponent_bet_increase_using_prior_snapshot() -> None:
@@ -117,8 +188,8 @@ def test_tracker_records_seen_opponent_bet_increase_using_prior_snapshot() -> No
     _update_round_tracker(before, tracker)
     _update_round_tracker(after, tracker)
 
-    # 行动者面对的是其余存活对手（不含自己）：self + opponent + blind 中对手面对 1 人
-    assert tracker.snapshots["opponent"] == _OpponentSnapshot(pot=500, call_bet=100, opponents=1)
+    # 行动者面对本账号（已看牌、未知门槛）和一名蒙牌玩家；蒙牌权重为 1。
+    assert tracker.snapshots["opponent"] == _OpponentSnapshot(pot=500, call_bet=100, opponents=2, blind_opponents=1)
 
 
 def test_tracker_records_continue_last_action_when_bet_unavailable() -> None:
@@ -139,7 +210,64 @@ def test_tracker_records_continue_last_action_when_bet_unavailable() -> None:
     _update_round_tracker(before, tracker)
     _update_round_tracker(after, tracker)
 
-    assert tracker.snapshots["opponent"] == _OpponentSnapshot(pot=500, call_bet=100, opponents=1)
+    assert tracker.snapshots["opponent"] == _OpponentSnapshot(pot=500, call_bet=100, opponents=1, blind_opponents=1)
+
+
+def test_tracker_records_peek_snapshot_and_waits_for_evidence_of_continue() -> None:
+    tracker = _RoundTracker()
+    before = _game(
+        {"id": "self", "alive": True, "isSelf": True},
+        {"id": "opponent", "alive": True, "seen": False, "bet": 100},
+        {"id": "blind", "alive": True, "seen": False, "bet": 100},
+        pot=500,
+        call_bet=100,
+    )
+    after = _game(
+        {"id": "self", "alive": True, "isSelf": True},
+        {"id": "opponent", "alive": True, "seen": True, "bet": 100},
+        {"id": "blind", "alive": True, "seen": False, "bet": 100},
+        pot=500,
+        call_bet=100,
+    )
+
+    _update_round_tracker(before, tracker)
+    _update_round_tracker(after, tracker)
+
+    assert tracker.peek_snapshots["opponent"] == _OpponentSnapshot(
+        pot=500, call_bet=100, opponents=2, blind_opponents=2
+    )
+    assert tracker.snapshots == {}
+
+
+def test_tracker_preserves_peek_snapshot_and_records_later_continue() -> None:
+    tracker = _RoundTracker()
+    before = _game(
+        {"id": "self", "alive": True, "isSelf": True},
+        {"id": "opponent", "alive": True, "seen": False, "bet": 100},
+        pot=500,
+        call_bet=100,
+    )
+    peeked = _game(
+        {"id": "self", "alive": True, "isSelf": True},
+        {"id": "opponent", "alive": True, "seen": True, "bet": 100},
+        pot=500,
+        call_bet=100,
+    )
+    continued = _game(
+        {"id": "self", "alive": True, "isSelf": True},
+        {"id": "opponent", "alive": True, "seen": True, "bet": 200},
+        pot=700,
+        call_bet=100,
+    )
+
+    _update_round_tracker(before, tracker)
+    _update_round_tracker(peeked, tracker)
+    _update_round_tracker(continued, tracker)
+
+    assert tracker.peek_snapshots["opponent"] == _OpponentSnapshot(
+        pot=500, call_bet=100, opponents=1, blind_opponents=1
+    )
+    assert tracker.snapshots["opponent"] == _OpponentSnapshot(pot=500, call_bet=100, opponents=1, blind_opponents=1)
 
 
 def test_tracker_does_not_assume_seen_player_continued_without_evidence() -> None:
@@ -190,6 +318,25 @@ def test_call_decision_uses_observed_threshold_for_seen_opponent() -> None:
     one_vs_one = zjh_prob.win_prob_1v1("对子", (14, 13))
     expected = max(one_vs_one - 0.5, 0) / 0.5
     assert decision.win_probability == pytest.approx(expected)
+    assert decision.seen_thresholds == ((0.5, True),)
+
+
+def test_call_decision_uses_combined_peek_and_continue_threshold() -> None:
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True},
+        {"id": "seen", "alive": True, "seen": True},
+        pot=1000,
+        call_bet=100,
+    )
+    tracker = _RoundTracker(
+        peek_snapshots={"seen": _OpponentSnapshot(pot=100, call_bet=100, opponents=1)},
+        snapshots={"seen": _OpponentSnapshot(pot=900, call_bet=100, opponents=1)},
+    )
+    decision = _call_decision("对子", (14, 13), game, 0.1, tracker)
+
+    assert decision is not None
+    one_vs_one = zjh_prob.win_prob_1v1("对子", (14, 13))
+    assert decision.win_probability == pytest.approx(max(one_vs_one - 0.5, 0) / 0.5)
     assert decision.seen_thresholds == ((0.5, True),)
 
 
