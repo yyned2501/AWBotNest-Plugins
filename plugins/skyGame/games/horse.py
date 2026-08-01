@@ -97,8 +97,20 @@ async def _care_once(ctx: object, cfg: dict, client: HdskyClient) -> None:
     walk_count = int(stats.get("walkCountToday", 0) or 0)
     walk_max = int(stats.get("walkMax", 0) or 0)
     if cfg.get("horse_auto_walk", True) and st.get("canWalk") and walk_count < walk_max:
+        walk_fail_key = "horse:walk_consecutive_failures"
+        walk_fail_count = int(ctx.kv.get(walk_fail_key, 0) or 0)
+        if walk_fail_count >= 3:
+            ctx.log.debug("遛马连续失败 %d 次，跳过本轮", walk_fail_count)
+            return
         r = await _horse_action(client, "walk")
         ctx.log.info("遛马（今日 %d/%d）", walk_count + 1, walk_max)
+        result = r.get("result", {}) or {}
+        if result.get("code") == "cooldown":
+            ctx.log.debug("遛马冷却中，不计数: %s", result.get("message", ""))
+        elif result.get("ok", r.get("ok", False)):
+            ctx.kv.set(walk_fail_key, 0)
+        else:
+            ctx.kv.set(walk_fail_key, walk_fail_count + 1)
         await _notify_result(ctx, cfg, r, "遛马失败")
         return
 

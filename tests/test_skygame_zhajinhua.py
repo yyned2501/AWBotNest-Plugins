@@ -17,7 +17,9 @@ from plugins.skyGame.games.zhajinhua import (
     _combined_self_threshold,
     _extract_hand_value,
     _hand_threshold_for_actual_win_probability,
+    _heads_up_opponent_seen,
     _in_hand,
+    _is_heads_up,
     _normalize_hand_type,
     _opponent_counts,
     _opponent_hand_threshold,
@@ -666,3 +668,148 @@ async def test_acquire_hand_after_peek_returns_empty_when_never_ready() -> None:
     assert hand == ""
     assert hand_type == ""
     assert client.gets == 3
+
+
+def test_is_heads_up_detects_single_opponent() -> None:
+    # 单挑：只有一个对手存活
+    heads_up = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": True},
+        {"id": "opp", "alive": True, "seen": False},
+    )
+    assert _is_heads_up(heads_up) is True
+
+
+def test_is_heads_up_false_with_multiple_opponents() -> None:
+    # 非单挑：多个对手存活
+    multi = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": True},
+        {"id": "opp1", "alive": True, "seen": False},
+        {"id": "opp2", "alive": True, "seen": False},
+    )
+    assert _is_heads_up(multi) is False
+
+
+def test_is_heads_up_false_with_no_opponents() -> None:
+    # 无对手（只剩自己）：不是单挑
+    alone = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": True},
+    )
+    assert _is_heads_up(alone) is False
+
+
+def test_heads_up_opponent_seen_true_when_opponent_has_peeked() -> None:
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": True},
+        {"id": "opp", "alive": True, "seen": True},
+    )
+    assert _heads_up_opponent_seen(game) is True
+
+
+def test_heads_up_opponent_seen_false_when_opponent_blind() -> None:
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": True},
+        {"id": "opp", "alive": True, "seen": False},
+    )
+    assert _heads_up_opponent_seen(game) is False
+
+
+def test_heads_up_opponent_seen_false_when_no_opponent() -> None:
+    assert _heads_up_opponent_seen({}) is False
+
+
+@pytest.mark.asyncio
+async def test_act_on_hand_heads_up_blind_opponent_calls_without_ev_check() -> None:
+    """单挑对手未看牌 → 直接跟注，不检查 EV 正负。"""
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": True},
+        {"id": "opp", "alive": True, "seen": False},
+        pot=100,
+        call_bet=2000,
+    )
+    game.update(
+        {
+            "roundId": 123,
+            "actions": ["fold", "call"],
+            "self": {"alive": True, "isTurn": True},
+        }
+    )
+    client = _FakeClient()
+    pending_fold = await _act_on_hand(
+        _FakeContext(),
+        client,
+        {"zjh_notify_hand": False},
+        game,
+        "2♠ 3♥ 5♦",
+        "散牌",
+        0.5,
+        _RoundTracker(),
+    )
+    assert pending_fold is False
+    # EV 为负也应跟注（对手未看牌），不弃牌
+    assert client.requests == [("/api/portal/zhajinhua/action", {"action": "call"})]
+
+
+@pytest.mark.asyncio
+async def test_act_on_hand_heads_up_seen_opponent_negative_ev_does_not_fold() -> None:
+    """单挑对手已看牌 → EV 为负也不弃牌，直接跟注。"""
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": True},
+        {"id": "opp", "alive": True, "seen": True},
+        pot=100,
+        call_bet=2000,
+    )
+    game.update(
+        {
+            "roundId": 123,
+            "actions": ["fold", "call"],
+            "self": {"alive": True, "isTurn": True},
+        }
+    )
+    client = _FakeClient()
+    pending_fold = await _act_on_hand(
+        _FakeContext(),
+        client,
+        {"zjh_notify_hand": False},
+        game,
+        "2♠ 3♥ 5♦",
+        "散牌",
+        0.5,
+        _RoundTracker(),
+    )
+    assert pending_fold is False
+    # EV 为负也不弃牌，改为跟注
+    assert client.requests == [("/api/portal/zhajinhua/action", {"action": "call"})]
+
+
+@pytest.mark.asyncio
+async def test_act_on_hand_heads_up_showdown_override_still_wins() -> None:
+    """单挑对手已看牌时 showdown 覆盖仍优先于单挑特殊逻辑。"""
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": True},
+        {"id": "opp", "alive": True, "seen": True},
+        pot=100,
+        call_bet=2000,
+    )
+    game.update(
+        {
+            "roundId": 123,
+            "phase": "showdown",
+            "actions": ["fold", "showdown"],
+            "self": {"alive": True, "isTurn": True},
+        }
+    )
+    client = _FakeClient()
+    pending_fold = await _act_on_hand(
+        _FakeContext(),
+        client,
+        {"zjh_notify_hand": False},
+        game,
+        "2♠ 3♥ 5♦",
+        "散牌",
+        0.5,
+        _RoundTracker(),
+        "showdown",
+    )
+    assert pending_fold is False
+    # showdown 覆盖优先于单挑特殊逻辑
+    assert client.requests == [("/api/portal/zhajinhua/action", {"action": "showdown"})]

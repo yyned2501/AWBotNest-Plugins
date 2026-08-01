@@ -234,6 +234,19 @@ def _opponent_counts(game: dict[str, Any]) -> tuple[int, int]:
     return len(opponents) - seen, seen
 
 
+def _is_heads_up(game: dict[str, Any]) -> bool:
+    """是否只剩一家对手（单挑局面）。"""
+    blind, seen = _opponent_counts(game)
+    return blind + seen == 1
+
+
+def _heads_up_opponent_seen(game: dict[str, Any]) -> bool:
+    """单挑中，对手是否已看牌。"""
+    for _, player in _opponent_entries(game):
+        return bool(player.get("seen", False))
+    return False
+
+
 def _actual_win_probability(hand_threshold: float, blind_opponents: int, seen_thresholds: tuple[float, ...]) -> float:
     """按蒙牌和已看牌对手权重计算实际胜率。"""
     if not 0 < hand_threshold <= 1 or blind_opponents < 0:
@@ -643,6 +656,81 @@ def _fold_notification(rid: Any, hand: str, hand_type: str, reason: str, decisio
     return "\n".join(lines)
 
 
+def _game_result_notification(game_data: dict[str, Any], hand: str, hand_type: str) -> str:
+    """生成牌局结束通知：本局结果、存活玩家与手牌。"""
+    game = game_data.get("game", {})
+    s = game.get("self", {})
+    alive = s.get("alive", False)
+    players = _players(game)
+    result_lines = ["🃏 炸金花 · 对局结束"]
+    if alive:
+        result_lines.append("状态：存活（等待下一局）")
+    else:
+        result_lines.append("状态：出局")
+    if hand:
+        result_lines.append(f"本局手牌 {hand}（{hand_type}）")
+    # 存活玩家列表
+    survivors = []
+    for player in players:
+        if _is_alive(player):
+            label = "你" if _is_self(player) else "对手"
+            survivors.append(label)
+    if survivors:
+        result_lines.append(f"剩余玩家：{'、'.join(survivors)}")
+    return "\n".join(result_lines)
+
+
+async def _notify_game_result(
+    ctx: object,
+    cfg: dict[str, Any],
+    game_data: dict[str, Any],
+    hand: str,
+    hand_type: str,
+) -> None:
+    """推送牌局结束结果通知。"""
+    if not cfg.get("zjh_notify_hand", True):
+        return
+    notification = _game_result_notification(game_data, hand, hand_type)
+    await ctx.notify(notification)
+
+
+def _game_result_notification(
+    game_data: dict[str, Any],
+    hand: str,
+    hand_type: str,
+    tracker: _RoundTracker,
+) -> str:
+    """生成牌局结束通知：本局结果、对手排行、奖金等。"""
+    game = game_data.get("game", {})
+    s = game.get("self", {})
+    alive = s.get("alive", False)
+    players = _players(game)
+    result_lines = []
+    if alive:
+        result_lines.append("🃏 炸金花 · 本局获胜")
+    else:
+        result_lines.append("🃏 炸金花 · 本局结束")
+    if hand:
+        result_lines.append(f"手牌 {hand}（{hand_type}）")
+    # 对手排行
+    rank = 1
+    for player in players:
+        p_alive = _is_alive(player)
+        p_self = _is_self(player)
+        p_hand = player.get("hand", "")
+        p_hand_type = _normalize_hand_type(player.get("handType", ""))
+        label = "你" if p_self else f"对手{rank}"
+        if p_alive:
+            p_hand_str = f" · {p_hand}（{p_hand_type}）" if p_hand else ""
+            result_lines.append(f"  {label} 存活{p_hand_str}")
+        elif p_hand:
+            result_lines.append(f"  {label} 出局 · {p_hand}（{p_hand_type}）")
+        else:
+            result_lines.append(f"  {label} 出局")
+        rank += 1
+    return "\n".join(result_lines)
+
+
 async def _request_fold(
     ctx: object,
     client: HdskyClient,
@@ -689,8 +777,19 @@ async def _act_on_hand(
 
     decision = choice.decision
     actions = game.get("actions", [])
-    if action_override and action_override in actions and decision is not None:
+
+    # 单挑特殊逻辑：对手未看牌→直接跟注；对手已看牌→EV为负也不弃牌
+    is_heads_up = _is_heads_up(game)
+    opponent_seen = _heads_up_opponent_seen(game) if is_heads_up else False
+
+    if action_override and action_override in actions:
         action, reason = action_override, "对手发起比牌，服务端要求应战开牌"
+    elif is_heads_up and not opponent_seen:
+        action, reason = "call", "单挑对手未看牌，直接跟注"
+        ctx.log.info("单挑覆盖: 对手未看牌，直接跟注（EV=%s）", f"{decision.expected_value:.2f}" if decision else "N/A")
+    elif is_heads_up and opponent_seen and not choice.call:
+        action, reason = "call", "单挑对手已看牌，EV为负也不弃牌"
+        ctx.log.info("单挑覆盖: 对手已看牌，EV=%s 仍跟注", f"{decision.expected_value:.2f}" if decision else "N/A")
     elif not choice.call:
         return await _request_fold(ctx, client, cfg, game, hand, hand_type, choice, tracker)
     else:
@@ -742,6 +841,9 @@ async def _poll_loop(ctx: object) -> None:
     turns_taken = 0
     last_rid: Any = None
     tracker = _RoundTracker()
+    round_joined = False
+    last_round_hand = ""
+    last_round_hand_type = ""
 
     async with HdskyClient(log=ctx.log) as client:
         client.set_renewer(hdsky_auth.renewer_for(ctx))  # 401 时自动续期并重试
@@ -766,9 +868,15 @@ async def _poll_loop(ctx: object) -> None:
                 g = game_data.get("game", {})
                 rid = g.get("roundId")
                 if rid and rid != last_rid:
+                    # 上一局结束，推送结果
+                    if last_rid and round_joined:
+                        await _notify_game_result(ctx, cfg, game_data, last_round_hand, last_round_hand_type)
                     last_rid = rid
                     turns_taken = 0
                     tracker = _RoundTracker()
+                    round_joined = False
+                    last_round_hand = ""
+                    last_round_hand_type = ""
                 s = g.get("self", {})
                 # 弃牌/出局后本局不再有任何决策，停止跟踪对手快照与门槛推导。
                 # 否则对手互相缠斗时门槛会递归虚高（单挑反推的不动点在 1.0，
@@ -838,6 +946,13 @@ async def _poll_loop(ctx: object) -> None:
                         # 第一轮蒙牌（盲跟）
                         ctx.log.info("第一轮蒙牌，盲跟")
                         await client.post("/api/portal/zhajinhua/action", {"action": "call"})
+                        turns_taken += 1
+                    elif _is_heads_up(g) and not _heads_up_opponent_seen(g):
+                        # 单挑对手未看牌 → 跳过看牌，直接跟注/开牌
+                        showdown_action = _action_override(actions)
+                        action = showdown_action if showdown_action else "call"
+                        ctx.log.info("单挑对手未看牌，跳过看牌直接%s", action)
+                        await client.post("/api/portal/zhajinhua/action", {"action": action})
                         turns_taken += 1
                     elif "peek" in actions:
                         # 第二轮看牌
