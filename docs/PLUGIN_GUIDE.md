@@ -25,29 +25,32 @@
 
 ```python
 __plugin__ = {
-    "name": "示例功能",            # 显示名
-    "id": "my_feature",           # 必须等于文件名/目录名
+    "name": "示例功能",  # 显示名
+    "id": "my_feature",  # 必须等于文件名/目录名
     "version": "1.0.0",
     "author": "",
     "description": "功能说明",
     "changelog": "v1.0.0 初始版本\n- 实现基础功能\n- 添加配置项",  # 可选，版本更新说明
-    "icon": "",                   # 可选，图标 URL；留空回退平台 logo
-    "scope": "user",              # user | bot | both
+    "icon": "",  # 可选，图标 URL；留空回退平台 logo
+    "scope": "user",  # user | bot | both
     "default_enabled": False,
-    "config_schema": {            # 可选，前端据此生成配置表单
+    "config_schema": {  # 可选，前端据此生成配置表单
         "keyword": {"type": "string", "default": "hello", "label": "触发词"},
     },
-    "requirements": [             # 可选，第三方依赖；启用时由平台代装
+    "requirements": [  # 可选，第三方依赖；启用时由平台代装
         "httpx>=0.27",
     ],
 }
 
+
 async def setup(ctx):
     """启用时调用，在此注册处理器与定时任务。"""
+
     @ctx.on_message(ctx.filters.text)
     async def handler(client, message):
         if ctx.config["keyword"] in (message.text or ""):
             await message.reply("matched")
+
 
 async def teardown(ctx):
     """停用时调用（可选），释放插件自行申请的资源。"""
@@ -86,9 +89,9 @@ async def teardown(ctx):
 async def h(client, message):
     await message.reply("ok")
 
+
 @ctx.on_message(ctx.filters.outgoing & ctx.filters.text, group=-10)
-async def h2(client, message):
-    ...
+async def h2(client, message): ...
 ```
 
 常用过滤器：`ctx.filters.text`、`ctx.filters.photo`、`ctx.filters.command("xxx")`、`ctx.filters.outgoing`、`ctx.filters.incoming`，支持 `&`、`|`、`~` 组合。
@@ -103,8 +106,7 @@ async def h2(client, message):
 
 ```python
 @ctx.on_edited_message(ctx.filters.text)
-async def on_edit(client, message):
-    ...
+async def on_edit(client, message): ...
 ```
 
 ### 注册回调处理器
@@ -137,13 +139,13 @@ await ctx.bot.send_photo(chat_id, "url_or_path")
 ```python
 import httpx
 
+
 async def get_chat_name(chat_id):
     """通过 chat_id 获取群组/频道/私聊的名称"""
     async with httpx.AsyncClient() as client:
         # 平台 API，管理员登录态下可访问
         resp = await client.get(
-            f"http://localhost:18001/api/chats/{chat_id}",
-            headers={"Authorization": f"Bearer {获取管理员令牌}"}
+            f"http://localhost:18001/api/chats/{chat_id}", headers={"Authorization": f"Bearer {获取管理员令牌}"}
         )
         if resp.status_code == 200:
             data = resp.json()
@@ -170,6 +172,7 @@ async def get_chat_name(chat_id):
 await ctx.notify("有新订单")
 await ctx.notify("磁盘空间不足", level="warning")
 await ctx.notify("任务失败", level="error", category="备份")
+
 
 @ctx.on_message(ctx.filters.text)
 async def h(client, message):
@@ -227,7 +230,7 @@ async def setup(ctx):
 ```python
 @ctx.on_message(ctx.filters.photo)
 async def h(client, message):
-    path = await ctx.download(message, subdir="imgs")   # data/plugin_data/<id>/imgs/xxx
+    path = await ctx.download(message, subdir="imgs")  # data/plugin_data/<id>/imgs/xxx
     text = await ocr(path)
 ```
 
@@ -241,10 +244,13 @@ async def h(client, message):
 # 取渲染后的 HTML 源码
 html = await ctx.browser.page_source("https://example.com", timeout=60)
 
+
 # 需要交互时，传一个同步 action(page)，在浏览器线程里执行、返回结果
 def grab(page):
     page.click("#more")
     return page.inner_text("#list")
+
+
 data = await ctx.browser.run("https://example.com", grab, headless=True)
 ```
 
@@ -301,7 +307,7 @@ ctx.kv.keys()
 `ctx.kv` 仅存键值。存储实际文件使用 `ctx.data_dir`，为本插件独享的可写目录（`Path`，首次访问自动创建）：
 
 ```python
-p = ctx.data_dir / "avatars" / "a.jpg"   # data/plugin_data/<id>/avatars/a.jpg
+p = ctx.data_dir / "avatars" / "a.jpg"  # data/plugin_data/<id>/avatars/a.jpg
 p.parent.mkdir(parents=True, exist_ok=True)
 p.write_bytes(img_bytes)
 ```
@@ -514,8 +520,11 @@ async def setup(ctx):
 
 ```python
 __plugin__ = {
-    "name": "我的插件", "id": "my_plugin", "version": "1.0.0", "scope": "user",
-    "render_mode": "vue",     # ← 配置界面改由插件自带的 Vue 组件渲染
+    "name": "我的插件",
+    "id": "my_plugin",
+    "version": "1.0.0",
+    "scope": "user",
+    "render_mode": "vue",  # ← 配置界面改由插件自带的 Vue 组件渲染
     # vue 模式无需 config_schema
 }
 ```
@@ -572,7 +581,7 @@ async def setup(ctx):
 
     @ctx.on_api("/save_rule", methods=["POST"])
     async def save_rule(req):
-        data = req.json or {}          # 前端 body
+        data = req.json or {}  # 前端 body
         ctx.kv.set("rules", data.get("rules", []))
         return {"ok": True}
 ```

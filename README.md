@@ -25,21 +25,23 @@
 ```python
 # ① 元数据：平台靠它在前端显示。必须是纯字面量字典（平台用 AST 静态解析）
 __plugin__ = {
-    "name": "我的功能",        # 必填：前端显示名
-    "id": "my_feature",        # 必填：必须 = 文件名/目录名（去 .py）
-    "version": "1.0.0",        # 必填：插件商店靠它判断有没有更新
-    "scope": "user",           # 必填：user(用户账号) | bot(机器人) | both
-    "author": "你",            # 可选
-    "description": "干啥的",    # 可选
+    "name": "我的功能",  # 必填：前端显示名
+    "id": "my_feature",  # 必填：必须 = 文件名/目录名（去 .py）
+    "version": "1.0.0",  # 必填：插件商店靠它判断有没有更新
+    "scope": "user",  # 必填：user(用户账号) | bot(机器人) | both
+    "author": "你",  # 可选
+    "description": "干啥的",  # 可选
     "default_enabled": False,  # 可选：放入本地 plugins/ 时是否默认启用
-    "config_schema": { ... },  # 可选：前端自动生成配置表单
+    "config_schema": {...},  # 可选：前端自动生成配置表单
 }
+
 
 # ② 启用时调用：在这里注册处理器（可 async 可同步）
 async def setup(ctx):
     @ctx.on_message(ctx.filters.text)
     async def handler(client, message):
         await message.reply("收到")
+
 
 # ③ 停用时调用（可选）：只清理你自己开的资源
 async def teardown(ctx):

@@ -75,18 +75,19 @@ AWBotNest/
 
 ```python
 __plugin__ = {
-    "name": "举牌",            # 必填：前端显示名
-    "id": "jupai",             # 必填：必须等于文件名（去 .py）
-    "version": "1.0.0",        # 必填
-    "scope": "user",           # 必填：user | bot | both
-    "author": "AW",            # 可选
-    "description": "...",       # 可选：前端展示
+    "name": "举牌",  # 必填：前端显示名
+    "id": "jupai",  # 必填：必须等于文件名（去 .py）
+    "version": "1.0.0",  # 必填
+    "scope": "user",  # 必填：user | bot | both
+    "author": "AW",  # 可选
+    "description": "...",  # 可选：前端展示
     "changelog": "v1.0.0 初始版本\n- 功能说明",  # 可选：版本更新说明
-    "icon": "",                # 可选：图标 URL，前端卡片用；空则回退平台 logo
+    "icon": "",  # 可选：图标 URL，前端卡片用；空则回退平台 logo
     "default_enabled": False,  # 可选：上传后是否默认启用
-    "config_schema": {...},    # 可选：前端自动生成配置表单
-    "requirements": [          # 可选：第三方依赖(PEP 508)，启用时由平台代装
-        "httpx>=0.27", "pillow>=10",
+    "config_schema": {...},  # 可选：前端自动生成配置表单
+    "requirements": [  # 可选：第三方依赖(PEP 508)，启用时由平台代装
+        "httpx>=0.27",
+        "pillow>=10",
     ],
 }
 ```
@@ -102,8 +103,7 @@ __plugin__ = {
 ```python
 async def setup(ctx):
     @ctx.on_message(ctx.filters.text, group=-10)
-    async def handler(client, message):
-        ...
+    async def handler(client, message): ...
 ```
 
 ### 3.3 `teardown(ctx)`（可选）
