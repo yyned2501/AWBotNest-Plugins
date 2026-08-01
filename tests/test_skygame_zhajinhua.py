@@ -7,6 +7,7 @@ import pytest
 
 from plugins.skyGame.games import gen_zjh_prob, zjh_prob
 from plugins.skyGame.games.zhajinhua import (
+    _acquire_hand_after_peek,
     _act_on_hand,
     _actual_win_probability,
     _call_decision,
@@ -24,6 +25,7 @@ from plugins.skyGame.games.zhajinhua import (
     _OpponentSnapshot,
     _parse_hand,
     _RoundTracker,
+    _self_hand,
     _snapshot_for_actor,
     _update_round_tracker,
 )
@@ -596,3 +598,71 @@ def test_tracker_stops_accumulating_once_self_folds() -> None:
     # 异常路径：我方弃牌后对手大幅加注，也不产生新快照、不抬高门槛
     assert tracker.snapshots == {}
     assert tracker.peek_snapshots["opp"] == peek_before
+
+
+class _ScriptedGetClient:
+    """按脚本顺序返回 get 响应的假客户端；耗尽后返回错误响应。"""
+
+    def __init__(self, responses: list[dict[str, object]]) -> None:
+        self._responses = responses
+        self.gets = 0
+
+    async def get(self, path: str) -> dict[str, object]:
+        idx = self.gets
+        self.gets += 1
+        if idx < len(self._responses):
+            return self._responses[idx]
+        return {"_error": "no scripted response left"}
+
+
+def test_self_hand_reads_portal_state() -> None:
+    # 正向：正常读出门户 self 里的手牌，并归一组合文本牌型
+    game = {"self": {"hand": "A♠ K♠ Q♠", "handType": "9♠ 3♠ 2♠ → 同花"}}
+    assert _self_hand(game) == ("A♠ K♠ Q♠", "金花")
+
+
+def test_self_hand_returns_empty_when_missing() -> None:
+    # 异常路径：手牌/牌型缺失或为 None 时返回空串，绝不能回退成 "?"
+    # （旧代码默认 "?" 导致 _extract_hand_value 解析失败 → 误判数据不完整而弃牌）
+    assert _self_hand({}) == ("", "")
+    assert _self_hand({"self": {}}) == ("", "")
+    assert _self_hand({"self": {"hand": "", "handType": ""}}) == ("", "")
+    assert _self_hand({"self": {"hand": None, "handType": None}}) == ("", "")
+
+
+@pytest.mark.asyncio
+async def test_acquire_hand_after_peek_uses_existing_hand_without_refetch() -> None:
+    # 正向：看牌响应已带手牌时直接采用，不发起任何重拉
+    client = _ScriptedGetClient([])
+    game = {"self": {"hand": "A♠ K♠ Q♠", "handType": "金花"}}
+    _, hand, hand_type = await _acquire_hand_after_peek(client, game)
+    assert hand == "A♠ K♠ Q♠"
+    assert hand_type == "金花"
+    assert client.gets == 0
+
+
+@pytest.mark.asyncio
+async def test_acquire_hand_after_peek_refetches_until_hand_ready() -> None:
+    # 正向：首次响应缺手牌 → 重拉；重拉先出错也不中断，再拉到就补齐
+    client = _ScriptedGetClient(
+        [
+            {"game": {"self": {"hand": "", "handType": ""}}},
+            {"_error": "transient"},
+            {"game": {"self": {"hand": "A♠ K♠ Q♠", "handType": "金花"}}},
+        ]
+    )
+    out_game, hand, hand_type = await _acquire_hand_after_peek(client, {"self": {}})
+    assert hand == "A♠ K♠ Q♠"
+    assert hand_type == "金花"
+    assert out_game["self"]["hand"] == "A♠ K♠ Q♠"
+    assert client.gets == 3
+
+
+@pytest.mark.asyncio
+async def test_acquire_hand_after_peek_returns_empty_when_never_ready() -> None:
+    # 异常路径：重拉 3 次仍读不到手牌时返回空串（交回轮询等补齐），绝不弃牌
+    client = _ScriptedGetClient([{"game": {"self": {"hand": "", "handType": ""}}} for _ in range(5)])
+    _, hand, hand_type = await _acquire_hand_after_peek(client, {"self": {}})
+    assert hand == ""
+    assert hand_type == ""
+    assert client.gets == 3

@@ -116,6 +116,28 @@ def _normalize_hand_type(hand_type: str) -> str:
     return _HAND_TYPE_ALIASES.get(normalized, normalized)
 
 
+def _self_hand(game: dict[str, Any]) -> tuple[str, str]:
+    """从牌局状态读取我方手牌与归一牌型；缺失时手牌为空串。"""
+    self_state = game.get("self", {})
+    hand = str(self_state.get("hand", "") or "")
+    hand_type = _normalize_hand_type(str(self_state.get("handType", "") or ""))
+    return hand, hand_type
+
+
+async def _acquire_hand_after_peek(client: HdskyClient, game: dict[str, Any]) -> tuple[dict[str, Any], str, str]:
+    """看牌后确保读到我方手牌：响应里缺手牌时重拉状态补齐（最多 3 次短重试）。"""
+    hand, hand_type = _self_hand(game)
+    for _ in range(3):
+        if hand:
+            break
+        await asyncio.sleep(0.5)
+        refetch = await client.get("/api/portal/zhajinhua")
+        if "_error" not in refetch:
+            game = refetch.get("game", {})
+            hand, hand_type = _self_hand(game)
+    return game, hand, hand_type
+
+
 def _parse_hand(hand: str) -> list[int]:
     """解析手牌字符串如 'A♠ K♠ Q♠' 为降序点数列表 [14, 13, 12]。"""
     cards: list[int] = []
@@ -826,23 +848,26 @@ async def _poll_loop(ctx: object) -> None:
                             peek_game = r.get("game")
                             if isinstance(peek_game, dict):
                                 g = peek_game
-                            peek_self = g.get("self", {})
-                            hand = peek_self.get("hand", "?")
-                            hand_type = _normalize_hand_type(peek_self.get("handType", "?"))
-                            ctx.log.info("手牌: %s (%s)", hand, hand_type)
-                            peek_actions = g.get("actions", [])
-                            action_override = _action_override(peek_actions)
-                            fold_pending = await _act_on_hand(
-                                ctx,
-                                client,
-                                cfg,
-                                g,
-                                hand,
-                                hand_type,
-                                seen_threshold,
-                                tracker,
-                                action_override,
-                            )
+                            # 看牌响应里手牌可能还没就绪：重拉状态补齐，别因读不到手牌就弃牌
+                            g, hand, hand_type = await _acquire_hand_after_peek(client, g)
+                            if not hand:
+                                # 仍读不到手牌：本轮不决策（绝不弃牌），等下次轮询补齐手牌再走正常决策
+                                ctx.log.warning("看牌后仍读不到手牌，本轮不决策，等下次轮询补齐")
+                            else:
+                                ctx.log.info("手牌: %s (%s)", hand, hand_type)
+                                peek_actions = g.get("actions", [])
+                                action_override = _action_override(peek_actions)
+                                fold_pending = await _act_on_hand(
+                                    ctx,
+                                    client,
+                                    cfg,
+                                    g,
+                                    hand,
+                                    hand_type,
+                                    seen_threshold,
+                                    tracker,
+                                    action_override,
+                                )
                     else:
                         ctx.log.warning(
                             "轮到我方但没有可执行的预期动作: 牌桌=%s phase=%r actions=%s hand=%s turns=%d",
