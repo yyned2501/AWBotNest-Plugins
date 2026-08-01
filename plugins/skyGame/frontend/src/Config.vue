@@ -36,6 +36,10 @@ const DEFAULTS = {
   zjh_enabled: true,
   zjh_poll_interval: 2,
   zjh_peeked_threshold: 50,
+  zjh_open_enabled: false,
+  zjh_open_max_win_rate: 50,
+  zjh_raise_enabled: false,
+  zjh_raise_min_win_rate: 75,
   zjh_notify_join: true,
   zjh_notify_hand: true,
   zjh_notify_fold_confirm: false,
@@ -287,6 +291,34 @@ async function renewNow() {
               完全按期望收益（EV）决策，不再按牌型勾选：胜率 ×（底池 + 跟注成本）− 跟注成本 ≥ 0 即跟注，否则弃牌。
               胜率随剩余对手数衰减；已看牌且继续下注的对手按其行动时底池赔率反推牌力门槛，再做条件胜率。
             </span>
+          </section>
+
+          <section class="card">
+            <div class="card-h">进攻策略（可选）</div>
+            <span class="help">
+              所有阈值均基于最终实际胜率：蒙牌对手按单挑胜率相乘；已看牌对手按其实际下注反推的最低牌力条件化后相乘。
+              开牌和追加只会在门户 actions 明确允许时发送；默认关闭，建议先观察日志中的服务端成本。
+            </span>
+            <div class="grid">
+              <div class="fld">
+                <label class="row switch">
+                  <input v-model="cfg.zjh_open_enabled" type="checkbox" />
+                  <span>启用低胜率主动开牌</span>
+                </label>
+                <span class="help">正 EV 且最终实际胜率低于阈值时，若允许 open 则发起比牌。</span>
+                <span class="lbl">最高实际胜率：{{ cfg.zjh_open_max_win_rate }}%</span>
+                <input v-model.number="cfg.zjh_open_max_win_rate" type="range" min="0" max="95" step="5" />
+              </div>
+              <div class="fld">
+                <label class="row switch">
+                  <input v-model="cfg.zjh_raise_enabled" type="checkbox" />
+                  <span>启用高胜率主动追加</span>
+                </label>
+                <span class="help">正 EV 且最终实际胜率达到阈值时，若允许 raise 则追加。</span>
+                <span class="lbl">最低实际胜率：{{ cfg.zjh_raise_min_win_rate }}%</span>
+                <input v-model.number="cfg.zjh_raise_min_win_rate" type="range" min="5" max="100" step="5" />
+              </div>
+            </div>
           </section>
 
           <section class="card">

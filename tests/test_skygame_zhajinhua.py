@@ -9,6 +9,7 @@ from plugins.skyGame.games import gen_zjh_prob, zjh_prob
 from plugins.skyGame.games.zhajinhua import (
     _call_decision,
     _choose,
+    _choose_action,
     _extract_hand_value,
     _normalize_hand_type,
     _opponent_counts,
@@ -227,6 +228,59 @@ def test_choose_ignores_hand_type_and_decides_purely_by_ev() -> None:
         call_bet=100,
     )
     assert _choose("散牌", (8, 7, 5), game, 0.5, _RoundTracker()).call is True
+
+
+def test_choose_action_opens_for_low_final_actual_win_rate() -> None:
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True},
+        {"id": "blind", "alive": True, "seen": False},
+        pot=10000,
+        call_bet=100,
+    )
+    choice = _choose("散牌", (8, 7, 5), game, 0.5, _RoundTracker())
+
+    assert choice.decision is not None
+    assert choice.decision.win_probability < 0.5
+    assert choice.decision.expected_value > 0
+    assert _choose_action(choice, ["open", "call"], True, 0.5, False, 0.75)[0] == "open"
+
+
+def test_choose_action_raises_for_high_final_actual_win_rate() -> None:
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True},
+        {"id": "blind", "alive": True, "seen": False},
+        pot=1000,
+        call_bet=100,
+    )
+    choice = _choose("顺子", 11, game, 0.5, _RoundTracker())
+
+    assert choice.decision is not None
+    assert choice.decision.win_probability > 0.75
+    assert _choose_action(choice, ["raise", "call"], False, 0.5, True, 0.75)[0] == "raise"
+
+
+def test_choose_action_falls_back_to_call_when_server_disallows_attack() -> None:
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True},
+        {"id": "blind", "alive": True, "seen": False},
+        pot=10000,
+        call_bet=100,
+    )
+    choice = _choose("散牌", (8, 7, 5), game, 0.5, _RoundTracker())
+
+    assert _choose_action(choice, ["call"], True, 0.5, True, 0.75)[0] == "call"
+
+
+def test_choose_action_folds_for_negative_ev() -> None:
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True},
+        {"id": "blind", "alive": True, "seen": False},
+        pot=100,
+        call_bet=2000,
+    )
+    choice = _choose("对子", (14, 13), game, 0.5, _RoundTracker())
+
+    assert _choose_action(choice, ["open", "raise", "call"], True, 0.5, True, 0.75)[0] == "fold"
 
 
 def test_choose_rejects_negative_ev() -> None:

@@ -60,14 +60,25 @@ class _PlayerState:
     last_action: str
 
 
+@dataclass(frozen=True)
+class _PendingFold:
+    """等待门户二次确认的弃牌通知内容。"""
+
+    rid: Any
+    hand: str
+    hand_type: str
+    choice: _Choice
+
+
 @dataclass
 class _RoundTracker:
-    """一局内的对手下注快照与上一轮公开状态。"""
+    """一局内的对手下注快照、上一轮公开状态和待确认弃牌。"""
 
     players: dict[str, _PlayerState] = field(default_factory=dict)
     pot: float | None = None
     call_bet: float | None = None
     snapshots: dict[str, _OpponentSnapshot] = field(default_factory=dict)
+    pending_fold: _PendingFold | None = None
 
 
 @dataclass(frozen=True)
@@ -307,6 +318,26 @@ def _choose(
     return _Choice(True, "期望收益非负", decision)
 
 
+def _choose_action(
+    choice: _Choice,
+    actions: list[Any],
+    open_enabled: bool,
+    open_threshold: float,
+    raise_enabled: bool,
+    raise_threshold: float,
+) -> tuple[str, str]:
+    """按最终实际胜率选择跟注、主动开牌或追加，动作必须获服务端允许。"""
+    decision = choice.decision
+    if not choice.call or decision is None:
+        return "fold", choice.reason
+    win_probability = decision.win_probability
+    if open_enabled and "open" in actions and win_probability < open_threshold:
+        return "open", f"最终实际胜率{win_probability:.1%}低于主动开牌阈值{open_threshold:.1%}"
+    if raise_enabled and "raise" in actions and win_probability >= raise_threshold:
+        return "raise", f"最终实际胜率{win_probability:.1%}达到追加阈值{raise_threshold:.1%}"
+    return "call", choice.reason
+
+
 def _threshold_summary(decision: _CallDecision) -> str:
     """格式化已看牌对手的隐含牌力门槛与来源。"""
     return ", ".join(
@@ -371,17 +402,26 @@ def _log_decision(
     )
 
 
-def _call_notification(
-    rid: Any, hand: str, hand_type: str, decision: _CallDecision, pot: float, call_bet: float
+def _action_notification(
+    action: str,
+    rid: Any,
+    hand: str,
+    hand_type: str,
+    decision: _CallDecision,
+    pot: float,
+    call_bet: float,
+    reason: str,
 ) -> str:
-    """生成跟注通知：牌桌、手牌、底池成本、对手构成、胜率与期望收益。"""
+    """生成跟注、主动开牌、追加或应战开牌的通知。"""
+    labels = {"call": "跟注", "open": "主动开牌", "raise": "追加", "showdown": "应战开牌"}
     return "\n".join(
         [
-            "🃏 炸金花 · 跟注",
+            f"🃏 炸金花 · {labels[action]}",
             f"牌桌 #{rid} · 手牌 {hand}（{hand_type}）",
-            f"底池 {pot:.0f} · 跟注 {call_bet:.0f}",
-            f"对手 {_opponent_brief(decision)} · 胜率 {decision.win_probability:.1%}",
-            f"期望收益 {decision.expected_value:+.0f}",
+            f"底池 {pot:.0f} · 当前成本 {call_bet:.0f}",
+            f"单挑 {decision.one_vs_one:.1%} · 对手 {_opponent_brief(decision)}",
+            f"最终实际胜率 {decision.win_probability:.1%} · 期望收益 {decision.expected_value:+.0f}",
+            f"原因：{reason}",
         ]
     )
 
@@ -390,10 +430,37 @@ def _fold_notification(rid: Any, hand: str, hand_type: str, reason: str, decisio
     """生成弃牌通知：手牌、概率明细（若有）与弃牌原因。"""
     lines = ["🃏 炸金花 · 弃牌", f"牌桌 #{rid} · 手牌 {hand}（{hand_type}）"]
     if decision is not None:
-        lines.append(f"对手 {_opponent_brief(decision)} · 胜率 {decision.win_probability:.1%}")
-        lines.append(f"期望收益 {decision.expected_value:+.0f}")
+        lines.append(f"单挑 {decision.one_vs_one:.1%} · 对手 {_opponent_brief(decision)}")
+        lines.append(f"最终实际胜率 {decision.win_probability:.1%} · 期望收益 {decision.expected_value:+.0f}")
     lines.append(f"原因：{reason}")
     return "\n".join(lines)
+
+
+async def _request_fold(
+    ctx: object,
+    client: HdskyClient,
+    cfg: dict,
+    game: dict[str, Any],
+    hand: str,
+    hand_type: str,
+    choice: _Choice,
+    tracker: _RoundTracker,
+) -> bool:
+    """请求弃牌；需要双击时延后通知，确认完成后只通知一次。"""
+    result = await client.post("/api/portal/zhajinhua/action", {"action": "fold"})
+    if not result.get("ok"):
+        ctx.log.warning("弃牌请求失败: %s", result.get("error"))
+        return False
+
+    needs_confirm = bool((result.get("game") or game).get("self", {}).get("foldConfirm", False))
+    if needs_confirm:
+        tracker.pending_fold = _PendingFold(game.get("roundId"), hand, hand_type, choice)
+        ctx.log.info("弃牌等待二次确认，通知将在确认成功后发送")
+        return True
+
+    if cfg.get("zjh_notify_hand", True):
+        await ctx.notify(_fold_notification(game.get("roundId"), hand, hand_type, choice.reason, choice.decision))
+    return False
 
 
 async def _act_on_hand(
@@ -405,24 +472,40 @@ async def _act_on_hand(
     hand_type: str,
     fallback_threshold: float,
     tracker: _RoundTracker,
+    action_override: str | None = None,
 ) -> bool:
-    """对已看牌手牌做纯 EV 决策并执行，返回是否需要双击确认弃牌。"""
+    """对已看牌手牌做 EV 决策，并执行服务器允许的动作。"""
     rid = game.get("roundId")
     hand_value = _extract_hand_value(hand_type, hand)
     choice = _choose(hand_type, hand_value, game, fallback_threshold, tracker)
     _log_decision(ctx, hand, hand_type, hand_value, game, choice, tracker)
 
-    if choice.call:
-        decision = choice.decision
-        await client.post("/api/portal/zhajinhua/action", {"action": "call"})
-        if cfg.get("zjh_notify_hand", True) and decision is not None:
-            await ctx.notify(_call_notification(rid, hand, hand_type, decision, game["pot"], game["callBet"]))
-        return False
+    if not choice.call:
+        return await _request_fold(ctx, client, cfg, game, hand, hand_type, choice, tracker)
 
-    await client.post("/api/portal/zhajinhua/action", {"action": "fold"})
-    if cfg.get("zjh_notify_hand", True):
-        await ctx.notify(_fold_notification(rid, hand, hand_type, choice.reason, choice.decision))
-    return bool(game.get("self", {}).get("foldConfirm", False))
+    decision = choice.decision
+    actions = game.get("actions", [])
+    if action_override:
+        action, reason = action_override, "对手发起比牌，EV 非负应战"
+    else:
+        action, reason = _choose_action(
+            choice,
+            actions if isinstance(actions, list) else [],
+            bool(cfg.get("zjh_open_enabled", False)),
+            float(cfg.get("zjh_open_max_win_rate", 50)) / 100,
+            bool(cfg.get("zjh_raise_enabled", False)),
+            float(cfg.get("zjh_raise_min_win_rate", 75)) / 100,
+        )
+    ctx.log.info("执行动作[%s]：%s；服务端可用动作=%s", action, reason, actions)
+    result = await client.post("/api/portal/zhajinhua/action", {"action": action})
+    if not result.get("ok"):
+        ctx.log.warning("动作[%s]请求失败: %s", action, result.get("error"))
+        return False
+    if cfg.get("zjh_notify_hand", True) and decision is not None:
+        await ctx.notify(
+            _action_notification(action, rid, hand, hand_type, decision, game["pot"], game["callBet"], reason)
+        )
+    return False
 
 
 async def _poll_loop(ctx: object) -> None:
@@ -482,10 +565,45 @@ async def _poll_loop(ctx: object) -> None:
                         ctx.log.warning("加入失败: %s", r.get("error"))
 
                 # 轮到我了
-                if joined and is_turn and phase == "playing":
+                if fold_pending and alive and is_turn:
+                    # 双击确认弃牌优先于已看牌的常规决策，避免重复发送弃牌请求/通知。
+                    ctx.log.info("确认弃牌...")
+                    r = await client.post("/api/portal/zhajinhua/action", {"action": "fold"})
+                    if r.get("ok"):
+                        ctx.log.info("确认弃牌成功")
+                        pending = tracker.pending_fold
+                        if cfg.get("zjh_notify_hand", True) and pending is not None:
+                            await ctx.notify(
+                                _fold_notification(
+                                    pending.rid,
+                                    pending.hand,
+                                    pending.hand_type,
+                                    pending.choice.reason,
+                                    pending.choice.decision,
+                                )
+                            )
+                        if cfg.get("zjh_notify_fold_confirm", False):
+                            await ctx.notify("🃏 双击确认弃牌")
+                        fold_pending = False
+                        tracker.pending_fold = None
+                    else:
+                        ctx.log.warning("确认弃牌失败: %s", r.get("error"))
+
+                elif joined and is_turn and phase == "playing":
                     if hand:
-                        # 已经看过牌 → 纯 EV 决策
-                        fold_pending = await _act_on_hand(ctx, client, cfg, g, hand, hand_type, seen_threshold, tracker)
+                        # 对手已发起比牌时，showdown 是唯一应战动作；其余已看牌局面按策略决策。
+                        action_override = "showdown" if "showdown" in actions else None
+                        fold_pending = await _act_on_hand(
+                            ctx,
+                            client,
+                            cfg,
+                            g,
+                            hand,
+                            hand_type,
+                            seen_threshold,
+                            tracker,
+                            action_override,
+                        )
                     elif turns_taken == 0:
                         # 第一轮蒙牌（盲跟）
                         ctx.log.info("第一轮蒙牌，盲跟")
@@ -503,19 +621,18 @@ async def _poll_loop(ctx: object) -> None:
                             hand = peek_self.get("hand", "?")
                             hand_type = _normalize_hand_type(peek_self.get("handType", "?"))
                             ctx.log.info("手牌: %s (%s)", hand, hand_type)
+                            action_override = "showdown" if "showdown" in g.get("actions", []) else None
                             fold_pending = await _act_on_hand(
-                                ctx, client, cfg, g, hand, hand_type, seen_threshold, tracker
+                                ctx,
+                                client,
+                                cfg,
+                                g,
+                                hand,
+                                hand_type,
+                                seen_threshold,
+                                tracker,
+                                action_override,
                             )
-
-                elif fold_pending and alive and is_turn:
-                    # 双击确认弃牌
-                    ctx.log.info("确认弃牌...")
-                    r = await client.post("/api/portal/zhajinhua/action", {"action": "fold"})
-                    if r.get("ok"):
-                        ctx.log.info("确认弃牌成功")
-                        if cfg.get("zjh_notify_fold_confirm", False):
-                            await ctx.notify("🃏 双击确认弃牌")
-                        fold_pending = False
 
                 # 新牌局 CSRF 作废（轮次状态已在本轮开头完成重置）
                 if phase == "waiting" and rid and not joined:

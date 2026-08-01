@@ -23,7 +23,7 @@ from .games import hdsky_auth
 __plugin__ = {
     "name": "天空游戏",
     "id": "skyGame",
-    "version": "1.5.1",
+    "version": "1.6.0",
     "author": "Yy",
     "description": "天空系列游戏统一入口：炸金花自动参与、养马自动养护，左侧按游戏分组配置。",
     "scope": "user",
@@ -224,6 +224,44 @@ __plugin__ = {
             "help": "优先按已看牌对手实际下注时的底池和成本反推；未观测到下注时才使用此回退分位。",
             "order": 23,
         },
+        "zjh_open_enabled": {
+            "type": "boolean",
+            "default": False,
+            "label": "启用低胜率主动开牌",
+            "section": "炸金花",
+            "help": "最终实际胜率低于阈值但 EV 为正时，服务器允许 open 才发起比牌；默认关闭以先观察费用。",
+            "order": 24,
+        },
+        "zjh_open_max_win_rate": {
+            "type": "slider",
+            "default": 50,
+            "label": "主动开牌最高实际胜率(%)",
+            "section": "炸金花",
+            "min": 0,
+            "max": 95,
+            "step": 5,
+            "help": "仅在最终实际胜率低于此值、EV 为正且服务端允许 open 时主动开牌。",
+            "order": 25,
+        },
+        "zjh_raise_enabled": {
+            "type": "boolean",
+            "default": False,
+            "label": "启用高胜率主动追加",
+            "section": "炸金花",
+            "help": "最终实际胜率达到阈值时，服务器允许 raise 才追加；默认关闭以先观察费用。",
+            "order": 26,
+        },
+        "zjh_raise_min_win_rate": {
+            "type": "slider",
+            "default": 75,
+            "label": "主动追加最低实际胜率(%)",
+            "section": "炸金花",
+            "min": 5,
+            "max": 100,
+            "step": 5,
+            "help": "仅在最终实际胜率达到此值、EV 为正且服务端允许 raise 时追加。",
+            "order": 27,
+        },
         "zjh_notify_join": {
             "type": "boolean",
             "default": True,
@@ -254,6 +292,11 @@ __plugin__ = {
         },
     },
     "changelog": (
+        "v1.6.0 更新：\n"
+        "- 修复双击弃牌前重复推送：首次弃牌仅等待确认，确认成功后才推送一次最终结果\n"
+        "- 支持门户应战开牌（showdown）；按最终实际胜率和 EV 决定应战或弃牌\n"
+        "- 新增可选主动开牌/追加：严格以最终实际胜率、EV 与服务端 actions 为条件，默认关闭以先观察服务端费用\n"
+        "- 决策和推送显式展示单挑胜率、看牌门槛和最终实际胜率\n"
         "v1.5.1 修复：\n"
         "- 兼容门户 peek 返回的「手牌 → 同花」组合 handType 文本，正确归一为金花参与 EV 计算，不再因键值缺失保守弃牌\n"
         "v1.5.0 更新：\n"
