@@ -35,6 +35,12 @@ def request_key() -> str:
     return "web_" + secrets.token_hex(16)
 
 
+def is_csrf_error(data: dict[str, Any]) -> bool:
+    """403 响应是否为 CSRF / 请求来源校验失败（重取 CSRF 后可恢复）。"""
+    err = str(data.get("error", "") or "")
+    return "请求来源" in err or "csrf" in err.lower()
+
+
 def read_portal_session(path: str) -> str | None:
     """从 Netscape cookie 文件读取 hdsky_portal_session（每次请求重读，支持原地续期）。"""
     try:
@@ -109,7 +115,13 @@ class HdskyClient:
         self._csrf_at = time.monotonic()
 
     async def _request(
-        self, method: str, path: str, body: dict | None = None, *, _retry: bool = False
+        self,
+        method: str,
+        path: str,
+        body: dict | None = None,
+        *,
+        _retry: bool = False,
+        _csrf_retry: bool = False,
     ) -> dict[str, Any]:
         """通用请求：拼认证头、编解码 JSON；任何异常收敛为 {"_error": ...}。"""
         headers: dict[str, str] = {
@@ -130,7 +142,14 @@ class HdskyClient:
             resp = await self._http.request(method, f"{self._base}{path}", headers=headers, content=content, timeout=10)
             if resp.status_code == 401 and not _retry:
                 return await self._handle_expired(method, path, body)
-            return resp.json()
+            data = resp.json()
+            # CSRF 失效（403「请求来源无效」）：作废缓存重取一次后重试，避免持续失败
+            if resp.status_code == 403 and not _csrf_retry and is_csrf_error(data):
+                if self._log:
+                    self._log.debug("CSRF 校验失败，刷新后重试: %s", path)
+                self.reset_csrf()
+                return await self._request(method, path, body, _retry=_retry, _csrf_retry=True)
+            return data
         except Exception as e:
             return {"_error": str(e)}
 
