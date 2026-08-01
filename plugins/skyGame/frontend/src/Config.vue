@@ -36,6 +36,7 @@ const DEFAULTS = {
   zjh_enabled: true,
   zjh_poll_interval: 2,
   zjh_good_hands: ['豹子', '同花顺', '金花', '顺子', '对子'],
+  zjh_peeked_threshold: 50,
   zjh_notify_join: true,
   zjh_notify_hand: true,
   zjh_notify_fold_confirm: false,
@@ -306,6 +307,17 @@ function toggleHand(h) {
                 </label>
               </div>
               <span class="help">全不选时回退默认五种好牌（豹子/同花顺/金花/顺子/对子）</span>
+            </div>
+          </section>
+
+          <section class="card">
+            <div class="card-h">看牌对手推断</div>
+            <div class="fld">
+              <span class="lbl">未观测到下注时的牌力阈值：{{ cfg.zjh_peeked_threshold }}%</span>
+              <input v-model.number="cfg.zjh_peeked_threshold" type="range" min="0" max="95" step="5" />
+              <span class="help">
+                系统优先按对手看牌后实际下注时的底池和成本反推门槛；轮询漏掉该动作时才使用此回退值。
+              </span>
             </div>
           </section>
 

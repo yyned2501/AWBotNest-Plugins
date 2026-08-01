@@ -12,7 +12,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from . import hdsky_auth
@@ -43,11 +43,41 @@ _HAND_TYPE_ALIASES = {"同花": "金花"}
 
 
 @dataclass(frozen=True)
+class _OpponentSnapshot:
+    """对手看牌后最近一次继续下注前的牌局快照。"""
+
+    pot: float
+    call_bet: float
+    opponents: int
+
+
+@dataclass(frozen=True)
+class _PlayerState:
+    """用于相邻轮询比较的玩家公开状态。"""
+
+    alive: bool
+    seen: bool
+    bet: float | None
+    last_action: str
+
+
+@dataclass
+class _RoundTracker:
+    """一局内的对手下注快照与上一轮公开状态。"""
+
+    players: dict[str, _PlayerState] = field(default_factory=dict)
+    pot: float | None = None
+    call_bet: float | None = None
+    snapshots: dict[str, _OpponentSnapshot] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class _CallDecision:
     """一次跟注的概率和增量期望收益。"""
 
     blind_opponents: int
     seen_opponents: int
+    seen_thresholds: tuple[tuple[float, bool], ...]
     win_probability: float
     expected_value: float
 
@@ -115,36 +145,114 @@ def _extract_hand_value(hand_type: str, hand: str) -> int | tuple[int, ...] | No
     return None
 
 
+def _players(game: dict[str, Any]) -> list[dict[str, Any]]:
+    """返回牌局公开玩家列表，缺失时为空。"""
+    players = game.get("players") or game.get("seats")
+    return [player for player in players if isinstance(player, dict)] if isinstance(players, list) else []
+
+
+def _player_key(player: dict[str, Any], index: int) -> str:
+    """优先以服务端玩家 ID 标识，缺失时仅在本局内使用座位索引。"""
+    player_id = player.get("id")
+    return str(player_id) if player_id else f"seat:{index}"
+
+
+def _is_alive(player: dict[str, Any]) -> bool:
+    """读取玩家是否仍在局。"""
+    return bool(player.get("alive", player.get("active", False)))
+
+
+def _is_self(player: dict[str, Any]) -> bool:
+    """读取玩家是否是本账号。"""
+    return bool(player.get("isSelf") or player.get("self"))
+
+
+def _player_state(player: dict[str, Any]) -> _PlayerState:
+    """提取用于轮询比较的公开状态。"""
+    bet = player.get("bet")
+    return _PlayerState(
+        alive=_is_alive(player),
+        seen=bool(player.get("seen", False)),
+        bet=float(bet) if isinstance(bet, (int, float)) else None,
+        last_action=str(player.get("lastAction", "")),
+    )
+
+
+def _opponent_entries(game: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    """返回仍在局且非自身的对手标识与公开信息。"""
+    return [
+        (_player_key(player, index), player)
+        for index, player in enumerate(_players(game))
+        if not _is_self(player) and _is_alive(player)
+    ]
+
+
 def _opponent_counts(game: dict[str, Any]) -> tuple[int, int]:
     """返回仍在局的蒙牌和已看牌对手数量。"""
-    players = game.get("players") or game.get("seats")
-    if not isinstance(players, list):
+    opponents = _opponent_entries(game)
+    if not opponents and not _players(game):
         return 1, 0
+    seen = sum(1 for _, player in opponents if player.get("seen", False))
+    return len(opponents) - seen, seen
 
-    blind = 0
-    seen = 0
-    for player in players:
-        if not isinstance(player, dict):
+
+def _opponent_threshold(snapshot: _OpponentSnapshot | None) -> float | None:
+    """按对手行动前的底池赔率反推其最小单挑牌力。"""
+    if snapshot is None or snapshot.pot <= 0 or snapshot.call_bet <= 0:
+        return None
+    pot_odds = snapshot.call_bet / (snapshot.pot + snapshot.call_bet)
+    return pot_odds ** (1 / max(snapshot.opponents, 1))
+
+
+def _is_continue_action(last_action: str) -> bool:
+    """判断公开动作文本是否表明玩家看牌后继续下注。"""
+    action = last_action.lower()
+    return any(token in action for token in ("跟", "加", "call", "raise"))
+
+
+def _update_round_tracker(game: dict[str, Any], tracker: _RoundTracker) -> None:
+    """根据相邻轮询记录对手看牌后继续下注时的行动前快照。"""
+    pot = game.get("pot")
+    call_bet = game.get("callBet")
+    if not isinstance(pot, (int, float)) or not isinstance(call_bet, (int, float)):
+        return
+
+    opponents = _opponent_entries(game)
+    previous_opponents = sum(1 for state in tracker.players.values() if state.alive)
+    for index, player in enumerate(_players(game)):
+        if _is_self(player):
             continue
-        if player.get("isSelf") or player.get("self"):
-            continue
-        if not player.get("alive", player.get("active", False)):
-            continue
-        if player.get("seen", False):
-            seen += 1
-        else:
-            blind += 1
-    return blind, seen
+        key = _player_key(player, index)
+        current = _player_state(player)
+        previous = tracker.players.get(key)
+        if previous and current.alive and current.seen:
+            bet_increased = previous.bet is not None and current.bet is not None and current.bet > previous.bet
+            action_changed = current.last_action != previous.last_action and _is_continue_action(current.last_action)
+            if previous.seen and (bet_increased or action_changed):
+                if tracker.pot is not None and tracker.call_bet is not None:
+                    tracker.snapshots[key] = _OpponentSnapshot(
+                        pot=tracker.pot,
+                        call_bet=tracker.call_bet,
+                        opponents=previous_opponents,
+                    )
+        tracker.players[key] = current
+
+    active_keys = {key for key, _ in opponents}
+    tracker.players = {key: state for key, state in tracker.players.items() if key in active_keys}
+    tracker.snapshots = {key: snapshot for key, snapshot in tracker.snapshots.items() if key in active_keys}
+    tracker.pot = float(pot)
+    tracker.call_bet = float(call_bet)
 
 
 def _call_decision(
     hand_type: str,
     hand_value: int | tuple[int, ...] | None,
     game: dict[str, Any],
-    seen_threshold: float,
+    fallback_threshold: float,
+    tracker: _RoundTracker,
 ) -> _CallDecision | None:
-    """按对手看牌状态和底池赔率计算本次跟注的增量 EV。"""
-    if hand_value is None or not 0 <= seen_threshold < 1:
+    """按对手看牌状态及其最近正 EV 行为计算本次跟注的增量 EV。"""
+    if hand_value is None or not 0 <= fallback_threshold < 1:
         return None
 
     pot = game.get("pot")
@@ -160,12 +268,19 @@ def _call_decision(
 
     blind, seen = _opponent_counts(game)
     win_probability = one_vs_one**blind
-    if seen:
-        versus_seen = max(one_vs_one - seen_threshold, 0.0) / (1.0 - seen_threshold)
-        win_probability *= versus_seen**seen
+    seen_thresholds: list[tuple[float, bool]] = []
+    for key, player in _opponent_entries(game):
+        if not player.get("seen", False):
+            continue
+        threshold = _opponent_threshold(tracker.snapshots.get(key))
+        observed = threshold is not None
+        threshold = threshold if threshold is not None else fallback_threshold
+        versus_seen = max(one_vs_one - threshold, 0.0) / (1.0 - threshold)
+        win_probability *= versus_seen
+        seen_thresholds.append((threshold, observed))
 
     expected_value = win_probability * (pot + call_bet) - call_bet
-    return _CallDecision(blind, seen, win_probability, expected_value)
+    return _CallDecision(blind, seen, tuple(seen_thresholds), win_probability, expected_value)
 
 
 def _should_call(
@@ -173,15 +288,33 @@ def _should_call(
     hand_value: int | tuple[int, ...] | None,
     game: dict[str, Any],
     good_hands: list[str],
-    seen_threshold: float,
+    fallback_threshold: float,
+    tracker: _RoundTracker,
 ) -> _CallDecision | None:
     """仅在牌型已启用且跟注为非负 EV 时返回决策详情。"""
     if hand_type not in good_hands:
         return None
-    decision = _call_decision(hand_type, hand_value, game, seen_threshold)
+    decision = _call_decision(hand_type, hand_value, game, fallback_threshold, tracker)
     if decision is None or decision.expected_value < 0:
         return None
     return decision
+
+
+def _threshold_summary(decision: _CallDecision) -> str:
+    """格式化已看牌对手的隐含牌力门槛与来源。"""
+    return ", ".join(
+        f"{threshold:.1%}{'实测' if observed else '回退'}" for threshold, observed in decision.seen_thresholds
+    )
+
+
+def _decision_log(decision: _CallDecision, pot: float, call_bet: float) -> str:
+    """生成包含对手状态、门槛、赔率与 EV 的决策日志详情。"""
+    thresholds = _threshold_summary(decision) or "无"
+    return (
+        f"蒙牌{decision.blind_opponents}/看牌{decision.seen_opponents}，"
+        f"看牌门槛[{thresholds}]，胜率{decision.win_probability:.1%}，"
+        f"底池{pot:.0f}，成本{call_bet:.0f}，EV{decision.expected_value:.0f}"
+    )
 
 
 def _call_notification(hand: str, hand_type: str, decision: _CallDecision) -> str:
@@ -199,6 +332,7 @@ async def _poll_loop(ctx: object) -> None:
     fold_pending = False
     turns_taken = 0
     last_rid: str | None = None
+    tracker = _RoundTracker()
 
     async with HdskyClient(log=ctx.log) as client:
         client.set_renewer(hdsky_auth.renewer_for(ctx))  # 401 时自动续期并重试
@@ -223,6 +357,11 @@ async def _poll_loop(ctx: object) -> None:
 
                 g = game_data.get("game", {})
                 rid = g.get("roundId")
+                if rid and rid != last_rid:
+                    last_rid = rid
+                    turns_taken = 0
+                    tracker = _RoundTracker()
+                _update_round_tracker(g, tracker)
                 phase = g.get("phase", "")
                 actions = g.get("actions", [])
                 s = g.get("self", {})
@@ -249,17 +388,12 @@ async def _poll_loop(ctx: object) -> None:
                     if hand:
                         # 已经看过牌 → 按对手看牌状态、底池和成本决策
                         hand_value = _extract_hand_value(hand_type, hand)
-                        decision = _should_call(hand_type, hand_value, g, good_hands, seen_threshold)
+                        decision = _should_call(hand_type, hand_value, g, good_hands, seen_threshold, tracker)
                         if decision:
                             ctx.log.info(
-                                "跟注（%s，蒙牌%d/看牌%d，胜率%.1f%%，底池%.0f，成本%.0f，EV%.0f）",
+                                "跟注（%s，%s）",
                                 hand_type,
-                                decision.blind_opponents,
-                                decision.seen_opponents,
-                                decision.win_probability * 100,
-                                g["pot"],
-                                g["callBet"],
-                                decision.expected_value,
+                                _decision_log(decision, g["pot"], g["callBet"]),
                             )
                             await client.post("/api/portal/zhajinhua/action", {"action": "call"})
                             if cfg.get("zjh_notify_hand", True):
@@ -291,17 +425,12 @@ async def _poll_loop(ctx: object) -> None:
                             ctx.log.info("手牌: %s (%s)", hand, hand_type)
 
                             hand_value = _extract_hand_value(hand_type, hand)
-                            decision = _should_call(hand_type, hand_value, g, good_hands, seen_threshold)
+                            decision = _should_call(hand_type, hand_value, g, good_hands, seen_threshold, tracker)
                             if decision:
                                 ctx.log.info(
-                                    "跟注（%s，蒙牌%d/看牌%d，胜率%.1f%%，底池%.0f，成本%.0f，EV%.0f）",
+                                    "跟注（%s，%s）",
                                     hand_type,
-                                    decision.blind_opponents,
-                                    decision.seen_opponents,
-                                    decision.win_probability * 100,
-                                    g["pot"],
-                                    g["callBet"],
-                                    decision.expected_value,
+                                    _decision_log(decision, g["pot"], g["callBet"]),
                                 )
                                 await client.post(
                                     "/api/portal/zhajinhua/action",
@@ -330,10 +459,7 @@ async def _poll_loop(ctx: object) -> None:
                             await ctx.notify("🃏 双击确认弃牌")
                         fold_pending = False
 
-                # 新牌局开始 → 重置轮次计数 + 作废旧 CSRF
-                if rid and rid != last_rid:
-                    last_rid = rid
-                    turns_taken = 0
+                # 新牌局 CSRF 作废（轮次状态已在本轮开头完成重置）
                 if phase == "waiting" and rid and not joined:
                     client.reset_csrf()
 
