@@ -23,7 +23,7 @@ from .games import hdsky_auth
 __plugin__ = {
     "name": "天空游戏",
     "id": "skyGame",
-    "version": "1.3.1",
+    "version": "1.3.2",
     "author": "Yy",
     "description": "天空系列游戏统一入口：炸金花自动参与、养马自动养护，左侧按游戏分组配置。",
     "scope": "user",
@@ -222,36 +222,51 @@ __plugin__ = {
             "help": "勾选的牌型跟注，未勾选的弃牌",
             "order": 22,
         },
+        "zjh_peeked_threshold": {
+            "type": "slider",
+            "default": 50,
+            "label": "已看牌对手牌力阈值(%)",
+            "section": "炸金花",
+            "min": 0,
+            "max": 95,
+            "step": 5,
+            "help": "假设对手看牌后仅持有高于此分位的牌才继续跟注，默认 50%。",
+            "order": 23,
+        },
         "zjh_notify_join": {
             "type": "boolean",
             "default": True,
             "label": "通知：加入牌局",
             "section": "炸金花",
-            "order": 23,
+            "order": 24,
         },
         "zjh_notify_hand": {
             "type": "boolean",
             "default": True,
             "label": "通知：手牌决策",
             "section": "炸金花",
-            "order": 24,
+            "order": 25,
         },
         "zjh_notify_fold_confirm": {
             "type": "boolean",
             "default": False,
             "label": "通知：双击确认弃牌",
             "section": "炸金花",
-            "order": 25,
+            "order": 26,
         },
         "zjh_notify_error": {
             "type": "boolean",
             "default": True,
             "label": "通知：异常",
             "section": "炸金花",
-            "order": 26,
+            "order": 27,
         },
     },
     "changelog": (
+        "v1.3.2 更新：\n"
+        "- 炸金花胜率按蒙牌与已看牌对手分开计算，已看牌跟注者按可配置牌力门槛反算\n"
+        "- 跟注改为按底池和本次跟注成本计算增量 EV，胜率未过半但正收益时仍会跟注\n"
+        "- 新增已看牌对手牌力阈值配置，并在日志和通知中展示概率、成本及 EV\n"
         "v1.3.1 更新：\n"
         "- 修复穷举概率表跨牌型排序：散牌/对子/金花/同花顺胜率值域重新计算，不再倒挂\n"
         "- 新增概率表生成脚本；修复 A23 顺子和同花顺被误当作最大顺子的胜率\n"

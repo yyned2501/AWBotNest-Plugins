@@ -12,10 +12,12 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
+from typing import Any
 
 from . import hdsky_auth
 from .hdsky import HdskyClient
-from .zjh_prob import win_prob_n
+from .zjh_prob import win_prob_1v1
 
 # 默认跟注牌型（配置缺省/为空时的回退）
 _DEFAULT_GOOD_HANDS = ["豹子", "同花顺", "金花", "顺子", "对子"]
@@ -38,6 +40,17 @@ _RANK_MAP = {
     "A": 14,
 }
 _HAND_TYPE_ALIASES = {"同花": "金花"}
+
+
+@dataclass(frozen=True)
+class _CallDecision:
+    """一次跟注的概率和增量期望收益。"""
+
+    blind_opponents: int
+    seen_opponents: int
+    win_probability: float
+    expected_value: float
+
 
 _poll_task: asyncio.Task[None] | None = None
 
@@ -102,23 +115,81 @@ def _extract_hand_value(hand_type: str, hand: str) -> int | tuple[int, ...] | No
     return None
 
 
-def _call_prob(hand_type: str, hand_value: int | tuple[int, ...] | None, alive: int) -> float:
-    """根据牌型+具体手牌+剩余人数计算精确胜率（穷举概率表）。"""
-    if hand_value is None:
-        return 0.0
-    opponents = max(alive - 1, 1)
-    return win_prob_n(hand_type, hand_value, opponents)
+def _opponent_counts(game: dict[str, Any]) -> tuple[int, int]:
+    """返回仍在局的蒙牌和已看牌对手数量。"""
+    players = game.get("players") or game.get("seats")
+    if not isinstance(players, list):
+        return 1, 0
+
+    blind = 0
+    seen = 0
+    for player in players:
+        if not isinstance(player, dict):
+            continue
+        if player.get("isSelf") or player.get("self"):
+            continue
+        if not player.get("alive", player.get("active", False)):
+            continue
+        if player.get("seen", False):
+            seen += 1
+        else:
+            blind += 1
+    return blind, seen
 
 
-def _should_call(hand_type: str, hand_value: int | tuple[int, ...] | None, alive: int, good_hands: list[str]) -> bool:
-    """综合牌型、具体手牌与剩余人数判断是否跟注。"""
+def _call_decision(
+    hand_type: str,
+    hand_value: int | tuple[int, ...] | None,
+    game: dict[str, Any],
+    seen_threshold: float,
+) -> _CallDecision | None:
+    """按对手看牌状态和底池赔率计算本次跟注的增量 EV。"""
+    if hand_value is None or not 0 <= seen_threshold < 1:
+        return None
+
+    pot = game.get("pot")
+    call_bet = game.get("callBet")
+    if not isinstance(pot, (int, float)) or not isinstance(call_bet, (int, float)):
+        return None
+    if pot <= 0 or call_bet <= 0:
+        return None
+
+    one_vs_one = win_prob_1v1(hand_type, hand_value)
+    if one_vs_one <= 0:
+        return None
+
+    blind, seen = _opponent_counts(game)
+    win_probability = one_vs_one**blind
+    if seen:
+        versus_seen = max(one_vs_one - seen_threshold, 0.0) / (1.0 - seen_threshold)
+        win_probability *= versus_seen**seen
+
+    expected_value = win_probability * (pot + call_bet) - call_bet
+    return _CallDecision(blind, seen, win_probability, expected_value)
+
+
+def _should_call(
+    hand_type: str,
+    hand_value: int | tuple[int, ...] | None,
+    game: dict[str, Any],
+    good_hands: list[str],
+    seen_threshold: float,
+) -> _CallDecision | None:
+    """仅在牌型已启用且跟注为非负 EV 时返回决策详情。"""
     if hand_type not in good_hands:
-        return False
-    win = _call_prob(hand_type, hand_value, alive)
-    # 人数越多门槛越高：2 人时 > 25%，5 人时 > 35%
-    opponents = max(alive - 1, 1)
-    threshold = 0.25 + min(opponents, 8) * 0.02
-    return win >= threshold
+        return None
+    decision = _call_decision(hand_type, hand_value, game, seen_threshold)
+    if decision is None or decision.expected_value < 0:
+        return None
+    return decision
+
+
+def _call_notification(hand: str, hand_type: str, decision: _CallDecision) -> str:
+    """生成包含对手状态、胜率和 EV 的跟注通知。"""
+    opponents = f"蒙{decision.blind_opponents}/看{decision.seen_opponents}"
+    return (
+        f"🃏 跟注: {hand} ({hand_type}) {opponents} 胜率{decision.win_probability:.1%} EV{decision.expected_value:.0f}"
+    )
 
 
 async def _poll_loop(ctx: object) -> None:
@@ -140,6 +211,7 @@ async def _poll_loop(ctx: object) -> None:
                 # 每轮读最新配置（cookie 路径/门户地址可能被改）
                 client.configure(str(cfg.get("hdsky_cookie_file", "") or ""), str(cfg.get("hdsky_base_url", "") or ""))
                 good_hands = _good_hands(cfg)
+                seen_threshold = float(cfg.get("zjh_peeked_threshold", 50)) / 100
 
                 # 获取牌局状态
                 game_data = await client.get("/api/portal/zhajinhua")
@@ -175,26 +247,30 @@ async def _poll_loop(ctx: object) -> None:
                 # 轮到我了
                 if joined and is_turn and phase == "playing":
                     if hand:
-                        # 已经看过牌 → 根据牌型+剩余人数决策
-                        alive_n = _alive_count(g)
+                        # 已经看过牌 → 按对手看牌状态、底池和成本决策
                         hand_value = _extract_hand_value(hand_type, hand)
-                        if _should_call(hand_type, hand_value, alive_n, good_hands):
-                            ctx.log.info("跟注（%s，剩余 %d 人）", hand_type, alive_n)
+                        decision = _should_call(hand_type, hand_value, g, good_hands, seen_threshold)
+                        if decision:
+                            ctx.log.info(
+                                "跟注（%s，蒙牌%d/看牌%d，胜率%.1f%%，底池%.0f，成本%.0f，EV%.0f）",
+                                hand_type,
+                                decision.blind_opponents,
+                                decision.seen_opponents,
+                                decision.win_probability * 100,
+                                g["pot"],
+                                g["callBet"],
+                                decision.expected_value,
+                            )
                             await client.post("/api/portal/zhajinhua/action", {"action": "call"})
                             if cfg.get("zjh_notify_hand", True):
-                                await ctx.notify(f"🃏 跟注: {hand} ({hand_type}) 剩余{alive_n}人")
+                                await ctx.notify(_call_notification(hand, hand_type, decision))
                         else:
-                            ctx.log.info(
-                                "弃牌（%s，剩余 %d 人，胜率不足）",
-                                hand_type,
-                                alive_n,
-                            )
+                            ctx.log.info("弃牌（%s，牌型未启用或跟注 EV 为负）", hand_type)
                             await client.post("/api/portal/zhajinhua/action", {"action": "fold"})
                             if fc:
                                 fold_pending = True
-                            else:
-                                if cfg.get("zjh_notify_hand", True):
-                                    await ctx.notify(f"🃏 弃牌: {hand} ({hand_type}) 剩余{alive_n}人")
+                            elif cfg.get("zjh_notify_hand", True):
+                                await ctx.notify(f"🃏 弃牌: {hand} ({hand_type})")
                     elif turns_taken == 0:
                         # 第一轮蒙牌（盲跟）
                         ctx.log.info("第一轮蒙牌，盲跟")
@@ -205,27 +281,36 @@ async def _poll_loop(ctx: object) -> None:
                         ctx.log.info("轮到我了！看牌...")
                         r = await client.post("/api/portal/zhajinhua/action", {"action": "peek"})
                         if r.get("ok"):
-                            hand = r.get("game", {}).get("self", {}).get("hand", "?")
-                            hand_type = _normalize_hand_type(r.get("game", {}).get("self", {}).get("handType", "?"))
-                            fc = r.get("game", {}).get("self", {}).get("foldConfirm", False)
+                            peek_game = r.get("game")
+                            if isinstance(peek_game, dict):
+                                g = peek_game
+                            peek_self = g.get("self", {})
+                            hand = peek_self.get("hand", "?")
+                            hand_type = _normalize_hand_type(peek_self.get("handType", "?"))
+                            fc = peek_self.get("foldConfirm", False)
                             ctx.log.info("手牌: %s (%s)", hand, hand_type)
 
-                            alive_n = _alive_count(g)
                             hand_value = _extract_hand_value(hand_type, hand)
-                            if _should_call(hand_type, hand_value, alive_n, good_hands):
-                                ctx.log.info("跟注（%s，剩余 %d 人）", hand_type, alive_n)
+                            decision = _should_call(hand_type, hand_value, g, good_hands, seen_threshold)
+                            if decision:
+                                ctx.log.info(
+                                    "跟注（%s，蒙牌%d/看牌%d，胜率%.1f%%，底池%.0f，成本%.0f，EV%.0f）",
+                                    hand_type,
+                                    decision.blind_opponents,
+                                    decision.seen_opponents,
+                                    decision.win_probability * 100,
+                                    g["pot"],
+                                    g["callBet"],
+                                    decision.expected_value,
+                                )
                                 await client.post(
                                     "/api/portal/zhajinhua/action",
                                     {"action": "call"},
                                 )
                                 if cfg.get("zjh_notify_hand", True):
-                                    await ctx.notify(f"🃏 跟注: {hand} ({hand_type}) 剩余{alive_n}人")
+                                    await ctx.notify(_call_notification(hand, hand_type, decision))
                             else:
-                                ctx.log.info(
-                                    "弃牌（%s，剩余 %d 人，胜率不足）",
-                                    hand_type,
-                                    alive_n,
-                                )
+                                ctx.log.info("弃牌（%s，牌型未启用或跟注 EV 为负）", hand_type)
                                 await client.post(
                                     "/api/portal/zhajinhua/action",
                                     {"action": "fold"},
@@ -233,7 +318,7 @@ async def _poll_loop(ctx: object) -> None:
                                 if fc:
                                     fold_pending = True
                                 elif cfg.get("zjh_notify_hand", True):
-                                    await ctx.notify(f"🃏 弃牌: {hand} ({hand_type}) 剩余{alive_n}人")
+                                    await ctx.notify(f"🃏 弃牌: {hand} ({hand_type})")
 
                 elif fold_pending and alive and is_turn:
                     # 双击确认弃牌
