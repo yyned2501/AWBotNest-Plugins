@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
 
 from . import hdsky_auth
 from .hdsky import HdskyClient, request_key
@@ -101,12 +102,17 @@ async def _care_once(ctx: object, cfg: dict, client: HdskyClient) -> None:
         await _notify_result(ctx, cfg, r, "遛马失败")
         return
 
-    # 官方赛：每日免费报名一次（signupOpen 由服务端控制）
+    # 官方赛：每日免费报名一次（kv 持久化，避免重复报名）
     official = (horse.get("competitions", {}) or {}).get("official", {}) or {}
     eligibility = official.get("eligibility", {}) or {}
-    if cfg.get("horse_auto_official_race", False) and official.get("signupOpen") and eligibility.get("canRace"):
+    today = datetime.date.today().isoformat()
+    if ctx.kv.get("horse:race_last_signup_date") == today:
+        ctx.log.debug("今日已报名官方赛，明天再检查")
+    elif cfg.get("horse_auto_official_race", False) and official.get("signupOpen") and eligibility.get("canRace"):
         r = await client.post("/api/portal/horse/race/action", {"action": "official_join", "requestKey": request_key()})
         ctx.log.info("报名官方赛马")
+        if r.get("result", {}).get("ok", r.get("ok", False)):
+            ctx.kv.set("horse:race_last_signup_date", today)
         await _notify_result(ctx, cfg, r, "官方赛报名失败")
         return
 

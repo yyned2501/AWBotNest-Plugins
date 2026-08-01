@@ -23,7 +23,7 @@ from .games import hdsky_auth
 __plugin__ = {
     "name": "天空游戏",
     "id": "skyGame",
-    "version": "1.2.0",
+    "version": "1.2.1",
     "author": "Yy",
     "description": "天空系列游戏统一入口：炸金花自动参与、养马自动养护，左侧按游戏分组配置。",
     "scope": "user",
@@ -252,7 +252,17 @@ __plugin__ = {
         },
     },
     "changelog": (
+        "v1.2.1 更新：\n"
+        "- 养马官方赛报名前检查 ctx.kv 今日是否已报名，已报名跳过直到明天\n"
         "v1.2.0 更新：\n"
+        "- 门户 Cookie 自动续期：会话过期时从 MoviePilot CookieCloud 拉浏览器 cookie 快照，"
+        "优先复用快照内仍有效的门户会话；否则触发门户登录，用 PT 站 cookie 读 HDSky 站内信"
+        "验证码并自动验证，写回 cookie 文件，全程无需人工干预\n"
+        "- 双触发：游戏轮询遇到 401 即时续期 + 看门狗定期体检主动续期\n"
+        "- HdskyClient 支持 401 自动续期重试；续期防抖（10 分钟内不重复发验证码）、失败通知节流\n"
+        "- 新增配置区「Cookie 自动续期」（CookieCloud 地址/UUID/密钥、UID、体检间隔）\n"
+        "- 配置界面支持手动「立即续期」按钮\n"
+        "v1.1.0 更新：\n"
         "- 门户 Cookie 自动续期：会话过期时从 MoviePilot CookieCloud 拉浏览器 cookie 快照，"
         "优先复用快照内仍有效的门户会话；否则触发门户登录，用 PT 站 cookie 读 HDSky 站内信"
         "验证码并自动验证，写回 cookie 文件，全程无需人工干预\n"
