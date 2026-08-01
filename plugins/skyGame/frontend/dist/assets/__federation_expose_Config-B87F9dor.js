@@ -69,18 +69,14 @@ const _hoisted_46 = { class: "row switch" };
 const _hoisted_47 = { class: "fld" };
 const _hoisted_48 = { class: "card" };
 const _hoisted_49 = { class: "fld" };
-const _hoisted_50 = { class: "hand-grid" };
-const _hoisted_51 = ["checked", "onChange"];
-const _hoisted_52 = { class: "card" };
-const _hoisted_53 = { class: "fld" };
-const _hoisted_54 = { class: "lbl" };
-const _hoisted_55 = { class: "card" };
-const _hoisted_56 = { class: "row switch" };
-const _hoisted_57 = { class: "row switch" };
-const _hoisted_58 = { class: "row switch" };
-const _hoisted_59 = { class: "row switch" };
-const _hoisted_60 = { class: "savebar" };
-const _hoisted_61 = ["disabled"];
+const _hoisted_50 = { class: "lbl" };
+const _hoisted_51 = { class: "card" };
+const _hoisted_52 = { class: "row switch" };
+const _hoisted_53 = { class: "row switch" };
+const _hoisted_54 = { class: "row switch" };
+const _hoisted_55 = { class: "row switch" };
+const _hoisted_56 = { class: "savebar" };
+const _hoisted_57 = ["disabled"];
 
 const {ref,reactive,onMounted} = await importShared('vue');
 
@@ -125,7 +121,6 @@ const DEFAULTS = {
   // 炸金花
   zjh_enabled: true,
   zjh_poll_interval: 2,
-  zjh_good_hands: ['豹子', '同花顺', '金花', '顺子', '对子'],
   zjh_peeked_threshold: 50,
   zjh_notify_join: true,
   zjh_notify_hand: true,
@@ -146,9 +141,6 @@ const GROUPS = [
   { key: 'horse', label: '养马', icon: '🐴' },
   { key: 'zjh', label: '炸金花', icon: '🃏' },
 ];
-
-// 炸金花可勾选的牌型
-const HAND_TYPES = ['豹子', '同花顺', '金花', '顺子', '对子', '散牌'];
 
 const group = ref('global');
 const loading = ref(true);
@@ -191,17 +183,6 @@ async function renewNow() {
   } finally {
     renewing.value = false;
   }
-}
-
-// 跟注牌型多选：zjh_good_hands 是字符串数组
-function hasHand(h) {
-  return Array.isArray(cfg.zjh_good_hands) && cfg.zjh_good_hands.includes(h)
-}
-function toggleHand(h) {
-  if (!Array.isArray(cfg.zjh_good_hands)) cfg.zjh_good_hands = [];
-  const i = cfg.zjh_good_hands.indexOf(h);
-  if (i >= 0) cfg.zjh_good_hands.splice(i, 1);
-  else cfg.zjh_good_hands.push(h);
 }
 
 return (_ctx, _cache) => {
@@ -526,7 +507,7 @@ return (_ctx, _cache) => {
                   ], 64))
                 : (group.value === 'zjh')
                   ? (_openBlock(), _createElementBlock(_Fragment, { key: 2 }, [
-                      _cache[83] || (_cache[83] = _createElementVNode("h3", { class: "det-title" }, "炸金花", -1)),
+                      _cache[80] || (_cache[80] = _createElementVNode("h3", { class: "det-title" }, "炸金花", -1)),
                       _createElementVNode("section", _hoisted_45, [
                         _cache[71] || (_cache[71] = _createElementVNode("div", { class: "card-h" }, "基础设置", -1)),
                         _createElementVNode("label", _hoisted_46, [
@@ -541,7 +522,7 @@ return (_ctx, _cache) => {
                         _cache[72] || (_cache[72] = _createElementVNode("span", {
                           class: "help",
                           style: {"margin-top":"-4px"}
-                        }, "轮询牌局：自动加入 → 看牌 → 好牌跟注 / 烂牌弃牌", -1)),
+                        }, "轮询牌局：自动加入 → 首轮盲跟 → 看牌后按期望收益决策", -1)),
                         _createElementVNode("div", _hoisted_47, [
                           _cache[69] || (_cache[69] = _createElementVNode("span", { class: "lbl" }, "轮询间隔(秒)", -1)),
                           _withDirectives(_createElementVNode("input", {
@@ -562,32 +543,14 @@ return (_ctx, _cache) => {
                           _cache[70] || (_cache[70] = _createElementVNode("span", { class: "help" }, "Cookie 与门户地址见「全局设置」", -1))
                         ])
                       ]),
+                      _cache[81] || (_cache[81] = _createElementVNode("section", { class: "card" }, [
+                        _createElementVNode("div", { class: "card-h" }, "决策策略"),
+                        _createElementVNode("span", { class: "help" }, " 完全按期望收益（EV）决策，不再按牌型勾选：胜率 ×（底池 + 跟注成本）− 跟注成本 ≥ 0 即跟注，否则弃牌。 胜率随剩余对手数衰减；已看牌且继续下注的对手按其行动时底池赔率反推牌力门槛，再做条件胜率。 ")
+                      ], -1)),
                       _createElementVNode("section", _hoisted_48, [
-                        _cache[75] || (_cache[75] = _createElementVNode("div", { class: "card-h" }, "跟注牌型", -1)),
+                        _cache[74] || (_cache[74] = _createElementVNode("div", { class: "card-h" }, "看牌对手推断", -1)),
                         _createElementVNode("div", _hoisted_49, [
-                          _cache[73] || (_cache[73] = _createElementVNode("span", { class: "lbl" }, "勾选的牌型跟注，未勾选的弃牌", -1)),
-                          _createElementVNode("div", _hoisted_50, [
-                            (_openBlock(), _createElementBlock(_Fragment, null, _renderList(HAND_TYPES, (h) => {
-                              return _createElementVNode("label", {
-                                key: h,
-                                class: "row switch"
-                              }, [
-                                _createElementVNode("input", {
-                                  type: "checkbox",
-                                  checked: hasHand(h),
-                                  onChange: $event => (toggleHand(h))
-                                }, null, 40, _hoisted_51),
-                                _createElementVNode("span", null, _toDisplayString(h), 1)
-                              ])
-                            }), 64))
-                          ]),
-                          _cache[74] || (_cache[74] = _createElementVNode("span", { class: "help" }, "全不选时回退默认五种好牌（豹子/同花顺/金花/顺子/对子）", -1))
-                        ])
-                      ]),
-                      _createElementVNode("section", _hoisted_52, [
-                        _cache[77] || (_cache[77] = _createElementVNode("div", { class: "card-h" }, "看牌对手推断", -1)),
-                        _createElementVNode("div", _hoisted_53, [
-                          _createElementVNode("span", _hoisted_54, "未观测到下注时的牌力阈值：" + _toDisplayString(cfg.zjh_peeked_threshold) + "%", 1),
+                          _createElementVNode("span", _hoisted_50, "未观测到下注时的牌力阈值：" + _toDisplayString(cfg.zjh_peeked_threshold) + "%", 1),
                           _withDirectives(_createElementVNode("input", {
                             "onUpdate:modelValue": _cache[21] || (_cache[21] = $event => ((cfg.zjh_peeked_threshold) = $event)),
                             type: "range",
@@ -602,54 +565,54 @@ return (_ctx, _cache) => {
                               { number: true }
                             ]
                           ]),
-                          _cache[76] || (_cache[76] = _createElementVNode("span", { class: "help" }, " 系统优先按对手看牌后实际下注时的底池和成本反推门槛；轮询漏掉该动作时才使用此回退值。 ", -1))
+                          _cache[73] || (_cache[73] = _createElementVNode("span", { class: "help" }, " 系统优先按对手看牌后实际下注时的底池和成本反推门槛；轮询漏掉该动作时才使用此回退值。 ", -1))
                         ])
                       ]),
-                      _createElementVNode("section", _hoisted_55, [
-                        _cache[82] || (_cache[82] = _createElementVNode("div", { class: "card-h" }, "通知", -1)),
-                        _createElementVNode("label", _hoisted_56, [
+                      _createElementVNode("section", _hoisted_51, [
+                        _cache[79] || (_cache[79] = _createElementVNode("div", { class: "card-h" }, "通知", -1)),
+                        _createElementVNode("label", _hoisted_52, [
                           _withDirectives(_createElementVNode("input", {
                             "onUpdate:modelValue": _cache[22] || (_cache[22] = $event => ((cfg.zjh_notify_join) = $event)),
                             type: "checkbox"
                           }, null, 512), [
                             [_vModelCheckbox, cfg.zjh_notify_join]
                           ]),
-                          _cache[78] || (_cache[78] = _createElementVNode("span", null, "加入牌局", -1))
+                          _cache[75] || (_cache[75] = _createElementVNode("span", null, "加入牌局", -1))
                         ]),
-                        _createElementVNode("label", _hoisted_57, [
+                        _createElementVNode("label", _hoisted_53, [
                           _withDirectives(_createElementVNode("input", {
                             "onUpdate:modelValue": _cache[23] || (_cache[23] = $event => ((cfg.zjh_notify_hand) = $event)),
                             type: "checkbox"
                           }, null, 512), [
                             [_vModelCheckbox, cfg.zjh_notify_hand]
                           ]),
-                          _cache[79] || (_cache[79] = _createElementVNode("span", null, "手牌决策（跟注/弃牌）", -1))
+                          _cache[76] || (_cache[76] = _createElementVNode("span", null, "手牌决策（跟注/弃牌）", -1))
                         ]),
-                        _createElementVNode("label", _hoisted_58, [
+                        _createElementVNode("label", _hoisted_54, [
                           _withDirectives(_createElementVNode("input", {
                             "onUpdate:modelValue": _cache[24] || (_cache[24] = $event => ((cfg.zjh_notify_fold_confirm) = $event)),
                             type: "checkbox"
                           }, null, 512), [
                             [_vModelCheckbox, cfg.zjh_notify_fold_confirm]
                           ]),
-                          _cache[80] || (_cache[80] = _createElementVNode("span", null, "双击确认弃牌", -1))
+                          _cache[77] || (_cache[77] = _createElementVNode("span", null, "双击确认弃牌", -1))
                         ]),
-                        _createElementVNode("label", _hoisted_59, [
+                        _createElementVNode("label", _hoisted_55, [
                           _withDirectives(_createElementVNode("input", {
                             "onUpdate:modelValue": _cache[25] || (_cache[25] = $event => ((cfg.zjh_notify_error) = $event)),
                             type: "checkbox"
                           }, null, 512), [
                             [_vModelCheckbox, cfg.zjh_notify_error]
                           ]),
-                          _cache[81] || (_cache[81] = _createElementVNode("span", null, "异常", -1))
+                          _cache[78] || (_cache[78] = _createElementVNode("span", null, "异常", -1))
                         ])
                       ]),
-                      _createElementVNode("div", _hoisted_60, [
+                      _createElementVNode("div", _hoisted_56, [
                         _createElementVNode("button", {
                           class: "btn primary lg",
                           disabled: saving.value,
                           onClick: save
-                        }, _toDisplayString(saving.value ? '保存中…' : '保存配置'), 9, _hoisted_61)
+                        }, _toDisplayString(saving.value ? '保存中…' : '保存配置'), 9, _hoisted_57)
                       ])
                     ], 64))
                   : _createCommentVNode("", true)
@@ -660,6 +623,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const Config = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-1a17d94f"]]);
+const Config = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-d8f6721b"]]);
 
 export { Config as default };

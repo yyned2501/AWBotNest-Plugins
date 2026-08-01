@@ -35,7 +35,6 @@ const DEFAULTS = {
   // 炸金花
   zjh_enabled: true,
   zjh_poll_interval: 2,
-  zjh_good_hands: ['豹子', '同花顺', '金花', '顺子', '对子'],
   zjh_peeked_threshold: 50,
   zjh_notify_join: true,
   zjh_notify_hand: true,
@@ -56,9 +55,6 @@ const GROUPS = [
   { key: 'horse', label: '养马', icon: '🐴' },
   { key: 'zjh', label: '炸金花', icon: '🃏' },
 ]
-
-// 炸金花可勾选的牌型
-const HAND_TYPES = ['豹子', '同花顺', '金花', '顺子', '对子', '散牌']
 
 const group = ref('global')
 const loading = ref(true)
@@ -101,17 +97,6 @@ async function renewNow() {
   } finally {
     renewing.value = false
   }
-}
-
-// 跟注牌型多选：zjh_good_hands 是字符串数组
-function hasHand(h) {
-  return Array.isArray(cfg.zjh_good_hands) && cfg.zjh_good_hands.includes(h)
-}
-function toggleHand(h) {
-  if (!Array.isArray(cfg.zjh_good_hands)) cfg.zjh_good_hands = []
-  const i = cfg.zjh_good_hands.indexOf(h)
-  if (i >= 0) cfg.zjh_good_hands.splice(i, 1)
-  else cfg.zjh_good_hands.push(h)
 }
 </script>
 
@@ -288,7 +273,7 @@ function toggleHand(h) {
               <input v-model="cfg.zjh_enabled" type="checkbox" />
               <span>启用自动参与</span>
             </label>
-            <span class="help" style="margin-top:-4px">轮询牌局：自动加入 → 看牌 → 好牌跟注 / 烂牌弃牌</span>
+            <span class="help" style="margin-top:-4px">轮询牌局：自动加入 → 首轮盲跟 → 看牌后按期望收益决策</span>
             <div class="fld">
               <span class="lbl">轮询间隔(秒)</span>
               <input v-model.number="cfg.zjh_poll_interval" class="inp" type="number" min="1" max="10" step="0.5" />
@@ -297,17 +282,11 @@ function toggleHand(h) {
           </section>
 
           <section class="card">
-            <div class="card-h">跟注牌型</div>
-            <div class="fld">
-              <span class="lbl">勾选的牌型跟注，未勾选的弃牌</span>
-              <div class="hand-grid">
-                <label v-for="h in HAND_TYPES" :key="h" class="row switch">
-                  <input type="checkbox" :checked="hasHand(h)" @change="toggleHand(h)" />
-                  <span>{{ h }}</span>
-                </label>
-              </div>
-              <span class="help">全不选时回退默认五种好牌（豹子/同花顺/金花/顺子/对子）</span>
-            </div>
+            <div class="card-h">决策策略</div>
+            <span class="help">
+              完全按期望收益（EV）决策，不再按牌型勾选：胜率 ×（底池 + 跟注成本）− 跟注成本 ≥ 0 即跟注，否则弃牌。
+              胜率随剩余对手数衰减；已看牌且继续下注的对手按其行动时底池赔率反推牌力门槛，再做条件胜率。
+            </span>
           </section>
 
           <section class="card">
@@ -384,7 +363,6 @@ function toggleHand(h) {
 .row { display: flex; align-items: center; gap: 10px; }
 .row.switch { cursor: pointer; font-size: 13px; color: var(--text-primary, #e8ebf0); }
 .row.switch input { accent-color: var(--accent, #6ea8fe); }
-.hand-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 6px 16px; }
 
 .inp {
   width: 100%; min-width: 0; box-sizing: border-box;

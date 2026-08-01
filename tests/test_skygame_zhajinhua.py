@@ -8,6 +8,7 @@ import pytest
 from plugins.skyGame.games import gen_zjh_prob, zjh_prob
 from plugins.skyGame.games.zhajinhua import (
     _call_decision,
+    _choose,
     _extract_hand_value,
     _normalize_hand_type,
     _opponent_counts,
@@ -15,7 +16,6 @@ from plugins.skyGame.games.zhajinhua import (
     _OpponentSnapshot,
     _parse_hand,
     _RoundTracker,
-    _should_call,
     _update_round_tracker,
 )
 
@@ -109,7 +109,8 @@ def test_tracker_records_seen_opponent_bet_increase_using_prior_snapshot() -> No
     _update_round_tracker(before, tracker)
     _update_round_tracker(after, tracker)
 
-    assert tracker.snapshots["opponent"] == _OpponentSnapshot(pot=500, call_bet=100, opponents=2)
+    # 行动者面对的是其余存活对手（不含自己）：self + opponent + blind 中对手面对 1 人
+    assert tracker.snapshots["opponent"] == _OpponentSnapshot(pot=500, call_bet=100, opponents=1)
 
 
 def test_tracker_records_continue_last_action_when_bet_unavailable() -> None:
@@ -195,30 +196,64 @@ def test_call_decision_falls_back_for_unobserved_seen_opponent() -> None:
     assert decision.seen_thresholds == ((0.75, False),)
 
 
-def test_should_call_accepts_positive_ev_below_fifty_percent_win_rate() -> None:
+def test_choose_calls_positive_ev_below_fifty_percent_win_rate() -> None:
     game = _game(
         {"id": "self", "alive": True, "isSelf": True},
         {"id": "blind", "alive": True, "seen": False},
         pot=10000,
         call_bet=100,
     )
-    decision = _should_call("散牌", (8, 7, 5), game, ["散牌"], 0.5, _RoundTracker())
+    choice = _choose("散牌", (8, 7, 5), game, 0.5, _RoundTracker())
 
-    assert decision is not None
-    assert decision.win_probability < 0.5
-    assert decision.expected_value > 0
+    assert choice.call is True
+    assert choice.decision is not None
+    assert choice.decision.win_probability < 0.5
+    assert choice.decision.expected_value > 0
 
 
-def test_should_call_rejects_negative_ev_and_unselected_hand_type() -> None:
+def test_choose_ignores_hand_type_and_decides_purely_by_ev() -> None:
+    # 纯 EV 决策：只要期望收益非负，散牌也照样跟注，不再按牌型门控
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True},
+        {"id": "blind", "alive": True, "seen": False},
+        pot=10000,
+        call_bet=100,
+    )
+    assert _choose("散牌", (8, 7, 5), game, 0.5, _RoundTracker()).call is True
+
+
+def test_choose_rejects_negative_ev() -> None:
     game = _game(
         {"id": "self", "alive": True, "isSelf": True},
         {"id": "blind", "alive": True, "seen": False},
         pot=100,
         call_bet=2000,
     )
-    tracker = _RoundTracker()
-    assert _should_call("对子", (14, 13), game, ["对子"], 0.5, tracker) is None
-    assert _should_call("同花顺", 14, game, ["顺子"], 0.5, tracker) is None
+    choice = _choose("对子", (14, 13), game, 0.5, _RoundTracker())
+    assert choice.call is False
+    assert "期望收益为负" in choice.reason
+
+
+def test_choose_rejects_invalid_financial_data() -> None:
+    choice = _choose("豹子", 14, {"pot": 0, "callBet": 100, "players": []}, 0.5, _RoundTracker())
+    assert choice.call is False
+    assert choice.decision is None
+    assert "数据不完整" in choice.reason
+
+
+def test_choose_calls_for_straight_under_normal_pot() -> None:
+    # 回归：顺子单挑胜率 >0.9，正常底池/成本下应为大幅正 EV 跟注，不应被弃
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True},
+        {"id": "blind", "alive": True, "seen": False},
+        pot=7500,
+        call_bet=3000,
+    )
+    choice = _choose("顺子", 11, game, 0.5, _RoundTracker())
+    assert choice.call is True
+    assert choice.decision is not None
+    assert choice.decision.one_vs_one > 0.9
+    assert choice.decision.expected_value > 0
 
 
 def test_call_decision_rejects_invalid_financial_data() -> None:
