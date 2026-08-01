@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -81,6 +82,7 @@ class _RoundTracker:
     call_bet: float | None = None
     peek_snapshots: dict[str, _OpponentSnapshot] = field(default_factory=dict)
     snapshots: dict[str, _OpponentSnapshot] = field(default_factory=dict)
+    self_thresholds: dict[str, float] = field(default_factory=dict)
     pending_fold: _PendingFold | None = None
 
 
@@ -205,6 +207,43 @@ def _opponent_counts(game: dict[str, Any]) -> tuple[int, int]:
     return len(opponents) - seen, seen
 
 
+def _actual_win_probability(hand_threshold: float, blind_opponents: int, seen_thresholds: tuple[float, ...]) -> float:
+    """按蒙牌和已看牌对手权重计算实际胜率。"""
+    if not 0 < hand_threshold <= 1 or blind_opponents < 0:
+        return 0.0
+    probability = hand_threshold**blind_opponents
+    for seen_threshold in seen_thresholds:
+        if not 0 <= seen_threshold < 1 or hand_threshold <= seen_threshold:
+            return 0.0
+        probability *= (hand_threshold - seen_threshold) / (1 - seen_threshold)
+    return probability
+
+
+def _hand_threshold_for_actual_win_probability(
+    actual_threshold: float, blind_opponents: int, seen_thresholds: tuple[float, ...]
+) -> float | None:
+    """用二分法反推达到实际胜率门槛所需的最低单挑牌力。"""
+    if not 0 < actual_threshold < 1 or blind_opponents < 0:
+        return None
+    if blind_opponents == 0 and not seen_thresholds:
+        return None
+    if any(not 0 <= threshold < 1 for threshold in seen_thresholds):
+        return None
+    if blind_opponents == 0 and len(seen_thresholds) == 1:
+        threshold = seen_thresholds[0]
+        return threshold + actual_threshold * (1 - threshold)
+
+    lower = math.nextafter(max(seen_thresholds, default=0.0), 1.0)
+    upper = 1.0
+    for _ in range(80):
+        middle = (lower + upper) / 2
+        if _actual_win_probability(middle, blind_opponents, seen_thresholds) < actual_threshold:
+            lower = middle
+        else:
+            upper = middle
+    return upper
+
+
 def _opponent_threshold(snapshot: _OpponentSnapshot | None) -> float | None:
     """反推对手在该快照下牌局整体胜率的盈亏平衡门槛。"""
     if snapshot is None or snapshot.pot <= 0 or snapshot.call_bet <= 0:
@@ -213,17 +252,12 @@ def _opponent_threshold(snapshot: _OpponentSnapshot | None) -> float | None:
 
 
 def _opponent_hand_threshold(snapshot: _OpponentSnapshot | None) -> float | None:
-    """按蒙牌与已看牌对手的权重反推对手最低单挑牌力。"""
-    game_threshold = _opponent_threshold(snapshot)
-    if game_threshold is None or snapshot is None:
+    """按蒙牌与已看牌对手权重精确反推对手最低单挑牌力。"""
+    actual_threshold = _opponent_threshold(snapshot)
+    if actual_threshold is None or snapshot is None:
         return None
     blind_opponents = snapshot.blind_opponents if snapshot.blind_opponents is not None else snapshot.opponents
-    known_weight = 1.0
-    for threshold in snapshot.seen_thresholds:
-        known_weight *= max(1.0 - threshold, 0.0)
-    if known_weight <= 0:
-        return None
-    return (game_threshold / known_weight) ** (1 / max(blind_opponents, 1))
+    return _hand_threshold_for_actual_win_probability(actual_threshold, blind_opponents, snapshot.seen_thresholds)
 
 
 def _combined_opponent_threshold(
@@ -236,6 +270,41 @@ def _combined_opponent_threshold(
         if (threshold := _opponent_hand_threshold(snapshot)) is not None
     ]
     return max(thresholds, default=None)
+
+
+def _combined_self_threshold(tracker: _RoundTracker) -> float | None:
+    """返回我方本局已确认行动门槛中的最高值。"""
+    return max(tracker.self_thresholds.values(), default=None)
+
+
+def _self_key(game: dict[str, Any]) -> str | None:
+    """返回本账号在本局公开玩家列表中的标识。"""
+    return next((_player_key(player, index) for index, player in enumerate(_players(game)) if _is_self(player)), None)
+
+
+def _record_self_threshold(game: dict[str, Any], tracker: _RoundTracker, action: str, log: Any = None) -> float | None:
+    """记录我方一次理性行动对应的最低单挑牌型门槛。"""
+    pot = game.get("pot")
+    call_bet = game.get("callBet")
+    self_key = _self_key(game)
+    if not isinstance(pot, (int, float)) or not isinstance(call_bet, (int, float)) or self_key is None:
+        return None
+    snapshot = _snapshot_for_actor(game, tracker, self_key, float(pot), float(call_bet))
+    threshold = _opponent_hand_threshold(snapshot)
+    if threshold is not None:
+        tracker.self_thresholds[action] = max(threshold, tracker.self_thresholds.get(action, threshold))
+    if log:
+        combined = _combined_self_threshold(tracker)
+        log.info(
+            "记录我方%s门槛: 行动前底池=%.0f 成本=%.0f 蒙=%d 看门槛=%s → 综合门槛=%s",
+            "上牌" if action == "peek" else "下注",
+            snapshot.pot,
+            snapshot.call_bet,
+            snapshot.blind_opponents,
+            snapshot.seen_thresholds,
+            f"{combined:.3f}" if combined is not None else "无法推断",
+        )
+    return threshold
 
 
 def _snapshot_for_actor(
@@ -255,10 +324,12 @@ def _snapshot_for_actor(
         if not seen:
             blind_opponents += 1
             continue
-        if not _is_self(player):
+        if _is_self(player):
+            threshold = _combined_self_threshold(tracker)
+        else:
             threshold = _combined_opponent_threshold(tracker.peek_snapshots.get(key), tracker.snapshots.get(key))
-            if threshold is not None:
-                seen_thresholds.append(threshold)
+        if threshold is not None:
+            seen_thresholds.append(threshold)
     return _OpponentSnapshot(
         pot=pot,
         call_bet=call_bet,
@@ -275,57 +346,83 @@ def _is_continue_action(last_action: str) -> bool:
 
 
 def _update_round_tracker(game: dict[str, Any], tracker: _RoundTracker, log: Any = None) -> None:
-    """根据相邻轮询记录对手上牌及看牌后继续下注的行动前快照。"""
+    """根据相邻轮询记录双方上牌、继续下注前的快照和牌型门槛。"""
     pot = game.get("pot")
     call_bet = game.get("callBet")
     if not isinstance(pot, (int, float)) or not isinstance(call_bet, (int, float)):
         return
 
-    opponents = _opponent_entries(game)
-    # 上一轮存活对手数（不含自己）；行动者面对的是其余存活对手，需再减自身一人。
     for index, player in enumerate(_players(game)):
-        if _is_self(player):
-            continue
         key = _player_key(player, index)
         current = _player_state(player)
         previous = tracker.players.get(key)
+        is_self = _is_self(player)
         if previous and current.alive and current.seen and tracker.pot is not None and tracker.call_bet is not None:
             snapshot = _snapshot_for_actor(game, tracker, key, tracker.pot, tracker.call_bet)
             if not previous.seen:
-                tracker.peek_snapshots[key] = snapshot
-                if log:
-                    inferred = _opponent_hand_threshold(snapshot)
-                    log.info(
-                        "记录对手上牌快照 %s: 上牌前底池=%.0f 成本=%.0f 面对对手=%d → 上牌门槛=%s",
-                        key,
-                        snapshot.pot,
-                        snapshot.call_bet,
-                        snapshot.opponents,
-                        f"{inferred:.3f}" if inferred is not None else "无法推断",
-                    )
+                threshold = _opponent_hand_threshold(snapshot)
+                if is_self:
+                    if threshold is not None:
+                        tracker.self_thresholds["peek"] = threshold
+                    if log:
+                        log.info(
+                            "记录我方上牌门槛: 上牌前底池=%.0f 成本=%.0f 蒙=%d 看门槛=%s → 门槛=%s",
+                            snapshot.pot,
+                            snapshot.call_bet,
+                            snapshot.blind_opponents,
+                            snapshot.seen_thresholds,
+                            f"{threshold:.3f}" if threshold is not None else "无法推断",
+                        )
+                else:
+                    tracker.peek_snapshots[key] = snapshot
+                    if log:
+                        log.info(
+                            "记录对手上牌快照 %s: 上牌前底池=%.0f 成本=%.0f 蒙=%d 看门槛=%s → 门槛=%s",
+                            key,
+                            snapshot.pot,
+                            snapshot.call_bet,
+                            snapshot.blind_opponents,
+                            snapshot.seen_thresholds,
+                            f"{threshold:.3f}" if threshold is not None else "无法推断",
+                        )
             else:
                 bet_increased = previous.bet is not None and current.bet is not None and current.bet > previous.bet
                 action_changed = current.last_action != previous.last_action and _is_continue_action(
                     current.last_action
                 )
                 if bet_increased or action_changed:
-                    tracker.snapshots[key] = snapshot
-                    if log:
-                        peek_snapshot = tracker.peek_snapshots.get(key)
-                        inferred = _combined_opponent_threshold(peek_snapshot, snapshot)
-                        peek_threshold = _opponent_hand_threshold(peek_snapshot)
-                        log.info(
-                            "记录对手下注快照 %s: 行动前底池=%.0f 成本=%.0f 面对对手=%d → 上牌门槛=%s 综合门槛=%s",
-                            key,
-                            snapshot.pot,
-                            snapshot.call_bet,
-                            snapshot.opponents,
-                            f"{peek_threshold:.3f}" if peek_threshold is not None else "未观测",
-                            f"{inferred:.3f}" if inferred is not None else "无法推断",
-                        )
+                    threshold = _opponent_hand_threshold(snapshot)
+                    if is_self:
+                        if threshold is not None:
+                            tracker.self_thresholds["continue"] = max(
+                                threshold, tracker.self_thresholds.get("peek", threshold)
+                            )
+                        if log:
+                            combined = _combined_self_threshold(tracker)
+                            log.info(
+                                "记录我方下注门槛: 行动前底池=%.0f 成本=%.0f 蒙=%d 看门槛=%s → 综合门槛=%s",
+                                snapshot.pot,
+                                snapshot.call_bet,
+                                snapshot.blind_opponents,
+                                snapshot.seen_thresholds,
+                                f"{combined:.3f}" if combined is not None else "无法推断",
+                            )
+                    else:
+                        tracker.snapshots[key] = snapshot
+                        if log:
+                            inferred = _combined_opponent_threshold(tracker.peek_snapshots.get(key), snapshot)
+                            log.info(
+                                "记录对手下注快照 %s: 行动前底池=%.0f 成本=%.0f 蒙=%d 看门槛=%s → 综合门槛=%s",
+                                key,
+                                snapshot.pot,
+                                snapshot.call_bet,
+                                snapshot.blind_opponents,
+                                snapshot.seen_thresholds,
+                                f"{inferred:.3f}" if inferred is not None else "无法推断",
+                            )
         tracker.players[key] = current
 
-    active_keys = {key for key, _ in opponents}
+    active_keys = {_player_key(player, index) for index, player in enumerate(_players(game)) if _is_alive(player)}
     tracker.players = {key: state for key, state in tracker.players.items() if key in active_keys}
     tracker.peek_snapshots = {key: snapshot for key, snapshot in tracker.peek_snapshots.items() if key in active_keys}
     tracker.snapshots = {key: snapshot for key, snapshot in tracker.snapshots.items() if key in active_keys}
@@ -356,7 +453,6 @@ def _call_decision(
         return None
 
     blind, seen = _opponent_counts(game)
-    win_probability = one_vs_one**blind
     seen_thresholds: list[tuple[float, bool]] = []
     for key, player in _opponent_entries(game):
         if not player.get("seen", False):
@@ -364,9 +460,9 @@ def _call_decision(
         threshold = _combined_opponent_threshold(tracker.peek_snapshots.get(key), tracker.snapshots.get(key))
         observed = threshold is not None
         threshold = threshold if threshold is not None else fallback_threshold
-        versus_seen = max(one_vs_one - threshold, 0.0) / (1.0 - threshold)
-        win_probability *= versus_seen
         seen_thresholds.append((threshold, observed))
+
+    win_probability = _actual_win_probability(one_vs_one, blind, tuple(threshold for threshold, _ in seen_thresholds))
 
     expected_value = win_probability * (pot + call_bet) - call_bet
     return _CallDecision(one_vs_one, blind, seen, tuple(seen_thresholds), win_probability, expected_value)
@@ -580,6 +676,8 @@ async def _act_on_hand(
             float(cfg.get("zjh_raise_min_win_rate", 75)) / 100,
         )
 
+    if action in {"call", "raise", "open"}:
+        _record_self_threshold(game, tracker, "continue", ctx.log)
     if action_override:
         ctx.log.info(
             "应战开牌: 牌桌=%s phase=%r alive=%s isTurn=%s actions=%s",
@@ -713,6 +811,7 @@ async def _poll_loop(ctx: object) -> None:
                     elif "peek" in actions:
                         # 第二轮看牌
                         ctx.log.info("轮到我了！看牌...")
+                        _record_self_threshold(g, tracker, "peek", ctx.log)
                         r = await client.post("/api/portal/zhajinhua/action", {"action": "peek"})
                         if r.get("ok"):
                             peek_game = r.get("game")

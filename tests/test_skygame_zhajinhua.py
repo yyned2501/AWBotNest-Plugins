@@ -8,11 +8,14 @@ import pytest
 from plugins.skyGame.games import gen_zjh_prob, zjh_prob
 from plugins.skyGame.games.zhajinhua import (
     _act_on_hand,
+    _actual_win_probability,
     _call_decision,
     _choose,
     _choose_action,
     _combined_opponent_threshold,
+    _combined_self_threshold,
     _extract_hand_value,
+    _hand_threshold_for_actual_win_probability,
     _normalize_hand_type,
     _opponent_counts,
     _opponent_hand_threshold,
@@ -20,6 +23,7 @@ from plugins.skyGame.games.zhajinhua import (
     _OpponentSnapshot,
     _parse_hand,
     _RoundTracker,
+    _snapshot_for_actor,
     _update_round_tracker,
 )
 
@@ -149,7 +153,32 @@ def test_opponent_counts_uses_conservative_fallback_without_players() -> None:
     assert _opponent_counts({}) == (1, 0)
 
 
-def test_opponent_threshold_reflects_ev_zero_pot_odds() -> None:
+def test_hand_threshold_round_trips_actual_win_probability() -> None:
+    cases = (
+        (0.5, 1, (), 0.5),
+        (0.5, 2, (), 0.5**0.5),
+        (0.5, 0, (0.3,), 0.65),
+        (0.5, 1, (0.3,), None),
+        (0.5, 1, (0.5,), None),
+        (0.5, 0, (0.3, 0.4), None),
+    )
+
+    for actual_threshold, blind_opponents, seen_thresholds, expected in cases:
+        hand_threshold = _hand_threshold_for_actual_win_probability(actual_threshold, blind_opponents, seen_thresholds)
+        assert hand_threshold is not None
+        if expected is not None:
+            assert hand_threshold == pytest.approx(expected)
+        assert _actual_win_probability(hand_threshold, blind_opponents, seen_thresholds) == pytest.approx(
+            actual_threshold
+        )
+
+
+def test_hand_threshold_rejects_invalid_or_opponent_free_state() -> None:
+    assert _hand_threshold_for_actual_win_probability(0, 1, ()) is None
+    assert _hand_threshold_for_actual_win_probability(1, 1, ()) is None
+    assert _hand_threshold_for_actual_win_probability(0.5, 0, ()) is None
+    assert _actual_win_probability(0.3, 1, (0.5,)) == 0
+
     one_opponent = _OpponentSnapshot(pot=100, call_bet=100, opponents=1)
     two_blind_opponents = _OpponentSnapshot(pot=100, call_bet=100, opponents=2, blind_opponents=2)
 
@@ -168,7 +197,50 @@ def test_combined_opponent_threshold_requires_passing_peek_and_continue_decision
     assert _combined_opponent_threshold(None, None) is None
 
 
-def test_tracker_records_seen_opponent_bet_increase_using_prior_snapshot() -> None:
+def test_tracker_records_self_peek_threshold_and_uses_it_for_opponent() -> None:
+    tracker = _RoundTracker()
+    before = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": False, "bet": 100},
+        {"id": "opponent", "alive": True, "seen": False, "bet": 100},
+        pot=100,
+        call_bet=100,
+    )
+    after = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": True, "bet": 100},
+        {"id": "opponent", "alive": True, "seen": False, "bet": 100},
+        pot=100,
+        call_bet=100,
+    )
+
+    _update_round_tracker(before, tracker)
+    _update_round_tracker(after, tracker)
+
+    assert tracker.self_thresholds["peek"] == pytest.approx(0.5)
+    snapshot = _snapshot_for_actor(after, tracker, "opponent", pot=100, call_bet=100)
+    assert snapshot.blind_opponents == 0
+    assert snapshot.seen_thresholds == (pytest.approx(0.5),)
+
+
+def test_tracker_self_threshold_never_decreases_after_continue() -> None:
+    tracker = _RoundTracker(self_thresholds={"peek": 0.8})
+    before = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": True, "bet": 100},
+        {"id": "opponent", "alive": True, "seen": False, "bet": 100},
+        pot=900,
+        call_bet=100,
+    )
+    after = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": True, "bet": 200},
+        {"id": "opponent", "alive": True, "seen": False, "bet": 100},
+        pot=1100,
+        call_bet=100,
+    )
+
+    _update_round_tracker(before, tracker)
+    _update_round_tracker(after, tracker)
+
+    assert _combined_self_threshold(tracker) == pytest.approx(0.8)
+
     tracker = _RoundTracker()
     before = _game(
         {"id": "self", "alive": True, "isSelf": True, "seen": True, "bet": 100},
