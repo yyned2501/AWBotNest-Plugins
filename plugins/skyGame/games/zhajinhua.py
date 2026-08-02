@@ -657,50 +657,7 @@ def _fold_notification(rid: Any, hand: str, hand_type: str, reason: str, decisio
 
 
 def _game_result_notification(game_data: dict[str, Any], hand: str, hand_type: str) -> str:
-    """生成牌局结束通知：本局结果、存活玩家与手牌。"""
-    game = game_data.get("game", {})
-    s = game.get("self", {})
-    alive = s.get("alive", False)
-    players = _players(game)
-    result_lines = ["🃏 炸金花 · 对局结束"]
-    if alive:
-        result_lines.append("状态：存活（等待下一局）")
-    else:
-        result_lines.append("状态：出局")
-    if hand:
-        result_lines.append(f"本局手牌 {hand}（{hand_type}）")
-    # 存活玩家列表
-    survivors = []
-    for player in players:
-        if _is_alive(player):
-            label = "你" if _is_self(player) else "对手"
-            survivors.append(label)
-    if survivors:
-        result_lines.append(f"剩余玩家：{'、'.join(survivors)}")
-    return "\n".join(result_lines)
-
-
-async def _notify_game_result(
-    ctx: object,
-    cfg: dict[str, Any],
-    game_data: dict[str, Any],
-    hand: str,
-    hand_type: str,
-) -> None:
-    """推送牌局结束结果通知。"""
-    if not cfg.get("zjh_notify_hand", True):
-        return
-    notification = _game_result_notification(game_data, hand, hand_type)
-    await ctx.notify(notification)
-
-
-def _game_result_notification(
-    game_data: dict[str, Any],
-    hand: str,
-    hand_type: str,
-    tracker: _RoundTracker,
-) -> str:
-    """生成牌局结束通知：本局结果、对手排行、奖金等。"""
+    """生成牌局结束通知：本局结果、我方手牌、对手排行与摊牌手牌。"""
     game = game_data.get("game", {})
     s = game.get("self", {})
     alive = s.get("alive", False)
@@ -719,7 +676,11 @@ def _game_result_notification(
         p_self = _is_self(player)
         p_hand = player.get("hand", "")
         p_hand_type = _normalize_hand_type(player.get("handType", ""))
-        label = "你" if p_self else f"对手{rank}"
+        if p_self:
+            label = "你"
+        else:
+            label = f"对手{rank}"
+            rank += 1
         if p_alive:
             p_hand_str = f" · {p_hand}（{p_hand_type}）" if p_hand else ""
             result_lines.append(f"  {label} 存活{p_hand_str}")
@@ -727,8 +688,21 @@ def _game_result_notification(
             result_lines.append(f"  {label} 出局 · {p_hand}（{p_hand_type}）")
         else:
             result_lines.append(f"  {label} 出局")
-        rank += 1
     return "\n".join(result_lines)
+
+
+async def _notify_game_result(
+    ctx: object,
+    cfg: dict[str, Any],
+    game_data: dict[str, Any],
+    hand: str,
+    hand_type: str,
+) -> None:
+    """推送牌局结束结果通知。"""
+    if not cfg.get("zjh_notify_hand", True):
+        return
+    notification = _game_result_notification(game_data, hand, hand_type)
+    await ctx.notify(notification)
 
 
 async def _request_fold(

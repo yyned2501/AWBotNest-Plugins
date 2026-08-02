@@ -16,11 +16,13 @@ from plugins.skyGame.games.zhajinhua import (
     _combined_opponent_threshold,
     _combined_self_threshold,
     _extract_hand_value,
+    _game_result_notification,
     _hand_threshold_for_actual_win_probability,
     _heads_up_opponent_seen,
     _in_hand,
     _is_heads_up,
     _normalize_hand_type,
+    _notify_game_result,
     _opponent_counts,
     _opponent_hand_threshold,
     _opponent_threshold,
@@ -813,3 +815,89 @@ async def test_act_on_hand_heads_up_showdown_override_still_wins() -> None:
     assert pending_fold is False
     # showdown 覆盖优先于单挑特殊逻辑
     assert client.requests == [("/api/portal/zhajinhua/action", {"action": "showdown"})]
+
+
+class _CapturingContext:
+    """记录 notify 推送内容的假上下文。"""
+
+    def __init__(self) -> None:
+        self.messages: list[str] = []
+
+    async def notify(self, message: str, *args: object, **kwargs: object) -> None:
+        self.messages.append(message)
+
+
+def test_game_result_notification_three_arg_call_renders_hand_and_reveals() -> None:
+    # 回归：修复前存在两个同名函数，四参版本遮蔽三参版本，
+    # 调用方用三参 → TypeError 崩溃。此三参调用即崩溃现场。
+    game_data = {
+        "game": {
+            "self": {"alive": True},
+            "players": [
+                {"id": "self", "isSelf": True, "alive": True, "hand": "A♠ K♠ Q♠", "handType": "金花"},
+                {"id": "opp1", "alive": True, "hand": "K♣ K♦ 9♠", "handType": "对子"},
+                {"id": "opp2", "alive": False, "hand": "2♠ 3♥ 5♦", "handType": "散牌"},
+            ],
+        }
+    }
+
+    notification = _game_result_notification(game_data, "A♠ K♠ Q♠", "金花")
+
+    lines = notification.splitlines()
+    assert lines[0] == "🃏 炸金花 · 本局获胜"
+    assert "手牌 A♠ K♠ Q♠（金花）" in notification
+    assert "你 存活 · A♠ K♠ Q♠（金花）" in notification
+    assert "对手1 存活 · K♣ K♦ 9♠（对子）" in notification
+    assert "对手2 出局 · 2♠ 3♥ 5♦（散牌）" in notification
+
+
+def test_game_result_notification_ranks_only_opponents() -> None:
+    # 回归：排行计数只对非本账号递增，单对手应显示“对手1”而非“对手2”。
+    game_data = {
+        "game": {
+            "self": {"alive": False},
+            "players": [
+                {"id": "self", "isSelf": True, "alive": False},
+                {"id": "opp", "alive": True, "hand": "K♣ K♦ 9♠", "handType": "对子"},
+            ],
+        }
+    }
+
+    notification = _game_result_notification(game_data, "", "")
+
+    assert "本局结束" in notification
+    assert "手牌" not in notification
+    assert "你 出局" in notification
+    assert "对手1 存活 · K♣ K♦ 9♠（对子）" in notification
+    assert "对手2" not in notification
+
+
+@pytest.mark.asyncio
+async def test_notify_game_result_pushes_rendered_notification() -> None:
+    # 正向：开启通知时推送渲染后的结果文本。
+    ctx = _CapturingContext()
+    game_data = {
+        "game": {
+            "self": {"alive": True},
+            "players": [
+                {"id": "self", "isSelf": True, "alive": True, "hand": "A♠ K♠ Q♠", "handType": "金花"},
+                {"id": "opp", "alive": True, "hand": "K♣ K♦ 9♠", "handType": "对子"},
+            ],
+        }
+    }
+
+    await _notify_game_result(ctx, {"zjh_notify_hand": True}, game_data, "A♠ K♠ Q♠", "金花")
+
+    assert len(ctx.messages) == 1
+    assert "本局获胜" in ctx.messages[0]
+    assert "A♠ K♠ Q♠" in ctx.messages[0]
+
+
+@pytest.mark.asyncio
+async def test_notify_game_result_disabled_pushes_nothing() -> None:
+    # 异常路径：关闭通知开关时不推送。
+    ctx = _CapturingContext()
+
+    await _notify_game_result(ctx, {"zjh_notify_hand": False}, {"game": {}}, "A♠", "对子")
+
+    assert ctx.messages == []
