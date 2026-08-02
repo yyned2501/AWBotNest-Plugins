@@ -6,11 +6,13 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any
 
 import pytest
 
-from plugins.skyGame.games.hdsky import HdskyClient, is_csrf_error
+from plugins.skyGame.games.hdsky import HdskyClient, _DebugRecorder, _redact, is_csrf_error
 
 
 class _FakeResp:
@@ -124,3 +126,86 @@ async def test_non_csrf_403_not_retried() -> None:
     assert result == {"ok": False, "error": "权限不足"}
     posts = [c for c in client._http.calls if c["method"] == "POST"]
     assert len(posts) == 1  # 未重试
+
+
+# ── 调试记录：脱敏 / 追加 / 轮转 / 静默失败 ──
+
+
+def test_redact_masks_sensitive_keys_and_recurses() -> None:
+    data = {
+        "csrfToken": "secret",
+        "nested": {"token": "s2", "name": "Yy"},
+        "list": [{"cookie": "c"}, {"ok": 1}],
+    }
+    out = _redact(data)
+    assert out["csrfToken"] == "***"
+    assert out["nested"]["token"] == "***"
+    assert out["nested"]["name"] == "Yy"
+    assert out["list"][0]["cookie"] == "***"
+    assert out["list"][1]["ok"] == 1
+
+
+def test_debug_recorder_appends_redacted_jsonl(tmp_path: Path) -> None:
+    # 正向：逐条追加 JSONL，敏感字段脱敏
+    f = tmp_path / "d.jsonl"
+    rec = _DebugRecorder(str(f))
+    rec.record("POST", "/api/portal/horse/action", {"action": "walk"}, {"ok": True, "result": {"csrfToken": "s"}})
+    rec.record("GET", "/api/portal/horse", None, {"ok": True})
+
+    lines = f.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 2
+    first = json.loads(lines[0])
+    assert first["method"] == "POST"
+    assert first["path"] == "/api/portal/horse/action"
+    assert first["request"] == {"action": "walk"}
+    assert first["response"]["result"]["csrfToken"] == "***"
+
+
+def test_debug_recorder_rotates_when_over_max(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # 异常路径：超过大小上限先轮转为 .1 再写新记录
+    from plugins.skyGame.games import hdsky as hdsky_mod
+
+    monkeypatch.setattr(hdsky_mod, "_DEBUG_MAX_BYTES", 10)
+    f = tmp_path / "d.jsonl"
+    f.write_text("x" * 50 + "\n", encoding="utf-8")
+
+    _DebugRecorder(str(f)).record("GET", "/api/portal/horse", None, {"ok": True})
+
+    assert (tmp_path / "d.jsonl.1").exists()
+    lines = f.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0])["path"] == "/api/portal/horse"
+
+
+def test_debug_recorder_swallows_write_errors(tmp_path: Path) -> None:
+    # 异常路径：目标是目录无法写入时静默吞掉，绝不抛出影响主流程
+    _DebugRecorder(str(tmp_path)).record("GET", "/x", None, {"ok": True})
+
+
+@pytest.mark.asyncio
+async def test_client_traces_request_when_debug_enabled(tmp_path: Path) -> None:
+    # 正向：开启调试后，客户端每次请求/响应落盘
+    f = tmp_path / "d.jsonl"
+    client = _make_client([_FakeResp(200, {"horse": {"balance": 123}})])
+    client._debug = _DebugRecorder(str(f))
+
+    result = await client.get("/api/portal/horse")
+
+    assert result == {"horse": {"balance": 123}}
+    lines = f.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 1
+    rec = json.loads(lines[0])
+    assert rec["method"] == "GET"
+    assert rec["response"] == {"horse": {"balance": 123}}
+
+
+@pytest.mark.asyncio
+async def test_client_does_not_trace_when_debug_disabled(tmp_path: Path) -> None:
+    # 异常路径：configure 关闭调试 → 不落盘
+    f = tmp_path / "d.jsonl"
+    client = _make_client([_FakeResp(200, {"ok": True})])
+    client.configure("/nonexistent_cookie.txt", "https://example.test", debug_enabled=False, debug_file=str(f))
+
+    assert client._debug is None
+    await client.get("/api/portal/horse")
+    assert not f.exists()

@@ -828,7 +828,12 @@ async def _poll_loop(ctx: object) -> None:
                     continue
 
                 # 每轮读最新配置（cookie 路径/门户地址可能被改）
-                client.configure(str(cfg.get("hdsky_cookie_file", "") or ""), str(cfg.get("hdsky_base_url", "") or ""))
+                client.configure(
+                    str(cfg.get("hdsky_cookie_file", "") or ""),
+                    str(cfg.get("hdsky_base_url", "") or ""),
+                    debug_enabled=bool(cfg.get("hdsky_debug", False)),
+                    debug_file=str(cfg.get("hdsky_debug_file", "") or ""),
+                )
                 seen_threshold = float(cfg.get("zjh_peeked_threshold", 50)) / 100
 
                 # 获取牌局状态

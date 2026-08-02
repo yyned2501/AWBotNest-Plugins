@@ -1,5 +1,5 @@
 # =============================================================================
-# AWBotNest 插件：天空游戏 (skyGame) v1.11.3
+# AWBotNest 插件：天空游戏 (skyGame) v1.11.4
 #
 # 天空系列游戏的统一入口：Vue 配置界面左侧按游戏分组，各游戏逻辑拆到
 # games/ 子模块，互不干扰。当前收录：
@@ -23,7 +23,7 @@ from .games import hdsky_auth
 __plugin__ = {
     "name": "天空游戏",
     "id": "skyGame",
-    "version": "1.11.3",
+    "version": "1.11.4",
     "author": "Yy",
     "description": "天空系列游戏统一入口：炸金花自动参与、养马自动养护，左侧按游戏分组配置。",
     "scope": "user",
@@ -62,6 +62,23 @@ __plugin__ = {
             "label": "HDSky 门户地址",
             "section": "全局设置",
             "order": 4,
+        },
+        "hdsky_debug": {
+            "type": "boolean",
+            "default": False,
+            "label": "门户调试记录",
+            "section": "全局设置",
+            "order": 5,
+            "help": "开启后把每次门户 API 的请求与响应（脱敏后）追加写入调试文件，"
+            "供事后核对实际请求；不改变平台日志级别",
+        },
+        "hdsky_debug_file": {
+            "type": "string",
+            "default": "/app/data/hdsky_debug.jsonl",
+            "label": "调试记录文件路径",
+            "section": "全局设置",
+            "order": 6,
+            "help": "容器内 JSONL 路径（宿主 appdata/awbotnest/data 目录）；超过 10MB 自动轮转为 .1",
         },
         # ── Cookie 自动续期 ──
         "auth_auto_renew": {
@@ -292,6 +309,10 @@ __plugin__ = {
         },
     },
     "changelog": (
+        "v1.11.4 更新：\n"
+        "- 新增门户调试记录开关（全局设置·门户调试记录）：开启后把每次门户 API 的请求与响应"
+        "脱敏后追加写入 JSONL 调试文件（默认 /app/data/hdsky_debug.jsonl，超 10MB 轮转），"
+        "供事后核对推送与实际请求；不改平台日志级别、不影响其它插件\n"
         "v1.11.3 更新：\n"
         "- 遛马按门户响应的 remainMs 冷却退避：冷却约 45 分钟且期间 canWalk 仍为 true，"
         "记下冷却到期时间、未到就不再尝试，不再每 2 分钟撞一次冷却\n"

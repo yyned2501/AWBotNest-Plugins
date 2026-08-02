@@ -12,7 +12,9 @@
 
 from __future__ import annotations
 
+import datetime
 import json
+import os
 import secrets
 import ssl
 import time
@@ -25,6 +27,8 @@ import httpx
 # 平台跑在容器内，cookie 放数据卷挂载目录（宿主 appdata/awbotnest/data → 容器 /app/data）
 DEFAULT_COOKIE_FILE = "/app/data/hdsky_cookie.txt"
 DEFAULT_BASE_URL = "https://hdsky.supertimi.de:8443"
+# 门户调试记录文件（JSONL）：仅当配置开启 hdsky_debug 时写入
+DEFAULT_DEBUG_FILE = "/app/data/hdsky_debug.jsonl"
 
 # CSRF 最长缓存时间（秒）：门户 token 会过期，超时自动重取
 _CSRF_MAX_AGE = 1800
@@ -67,6 +71,52 @@ def make_ssl_ctx() -> ssl.SSLContext:
     return ctx
 
 
+# 调试文件超过该大小后轮转一次（覆盖旧 .1），避免无限增长
+_DEBUG_MAX_BYTES = 10 * 1024 * 1024
+
+# 调试记录需脱敏的字段名（小写匹配）：令牌/会话类值一律替换为 ***
+_SENSITIVE_KEYS = {"csrftoken", "token", "cookie", "session", "authorization", "password"}
+
+
+def _redact(value: Any) -> Any:
+    """递归脱敏：敏感字段值替换为 ***，避免调试文件泄露凭证。"""
+    if isinstance(value, dict):
+        return {key: ("***" if str(key).lower() in _SENSITIVE_KEYS else _redact(val)) for key, val in value.items()}
+    if isinstance(value, list):
+        return [_redact(item) for item in value]
+    return value
+
+
+class _DebugRecorder:
+    """把门户 API 的请求/响应追加写入 JSONL 调试文件，供事后核对实际请求。"""
+
+    def __init__(self, path: str) -> None:
+        self._path = path
+
+    def record(self, method: str, path: str, body: dict | None, response: dict[str, Any]) -> None:
+        """追加一条记录；任何失败都静默，绝不影响插件主流程。"""
+        try:
+            self._rotate_if_needed()
+            entry = {
+                "ts": datetime.datetime.now().isoformat(timespec="seconds"),
+                "method": method,
+                "path": path,
+                "request": _redact(body),
+                "response": _redact(response),
+            }
+            with open(self._path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+
+    def _rotate_if_needed(self) -> None:
+        try:
+            if os.path.getsize(self._path) > _DEBUG_MAX_BYTES:
+                os.replace(self._path, self._path + ".1")
+        except FileNotFoundError:
+            pass
+
+
 class HdskyClient:
     """hdsky 门户 API 客户端。长连接复用，支持热更新 cookie 路径与地址。"""
 
@@ -77,6 +127,7 @@ class HdskyClient:
         self._csrf: str | None = None
         self._csrf_at: float = 0.0
         self._renewer: Callable[[], Awaitable[bool]] | None = None
+        self._debug: _DebugRecorder | None = None
         self._http = httpx.AsyncClient(verify=make_ssl_ctx())
 
     async def __aenter__(self) -> HdskyClient:
@@ -89,13 +140,21 @@ class HdskyClient:
         """关闭底层连接。"""
         await self._http.aclose()
 
-    def configure(self, cookie_file: str, base_url: str) -> None:
+    def configure(
+        self,
+        cookie_file: str,
+        base_url: str,
+        *,
+        debug_enabled: bool = False,
+        debug_file: str = "",
+    ) -> None:
         """热更新连接参数（每轮轮询开头调用一次即可，值不变时无副作用）。"""
         self._cookie_file = cookie_file or DEFAULT_COOKIE_FILE
         base = (base_url or DEFAULT_BASE_URL).rstrip("/")
         if base != self._base:
             self._base = base
             self.reset_csrf()
+        self._debug = _DebugRecorder(debug_file or DEFAULT_DEBUG_FILE) if debug_enabled else None
 
     def reset_csrf(self) -> None:
         """作废缓存的 CSRF（接口报错或换站时调用，下次 POST 自动重取）。"""
@@ -105,6 +164,11 @@ class HdskyClient:
     def set_renewer(self, renewer: Callable[[], Awaitable[bool]] | None) -> None:
         """注入会话续期回调（无参，异步返回是否成功）。收到 401 时自动调用一次。"""
         self._renewer = renewer
+
+    def _trace(self, method: str, path: str, body: dict | None, response: dict[str, Any]) -> None:
+        """开启调试时记录一次请求/响应（脱敏后写入调试文件）。"""
+        if self._debug is not None:
+            self._debug.record(method, path, body, response)
 
     async def _ensure_csrf(self) -> None:
         """惰性获取 CSRF；过期自动刷新。"""
@@ -149,9 +213,12 @@ class HdskyClient:
                     self._log.debug("CSRF 校验失败，刷新后重试: %s", path)
                 self.reset_csrf()
                 return await self._request(method, path, body, _retry=_retry, _csrf_retry=True)
+            self._trace(method, path, body, data)
             return data
         except Exception as e:
-            return {"_error": str(e)}
+            error = {"_error": str(e)}
+            self._trace(method, path, body, error)
+            return error
 
     async def _handle_expired(self, method: str, path: str, body: dict | None) -> dict[str, Any]:
         """会话过期（401）：有 renewer 则续期一次并重试，否则收敛为错误。"""

@@ -159,7 +159,12 @@ async def _care_loop(ctx: object) -> None:
                     continue
 
                 # 每轮读最新配置（cookie 路径/门户地址可能被改）
-                client.configure(str(cfg.get("hdsky_cookie_file", "") or ""), str(cfg.get("hdsky_base_url", "") or ""))
+                client.configure(
+                    str(cfg.get("hdsky_cookie_file", "") or ""),
+                    str(cfg.get("hdsky_base_url", "") or ""),
+                    debug_enabled=bool(cfg.get("hdsky_debug", False)),
+                    debug_file=str(cfg.get("hdsky_debug_file", "") or ""),
+                )
                 await _care_once(ctx, cfg, client)
                 await asyncio.sleep(interval)
 
