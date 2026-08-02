@@ -7,21 +7,26 @@ import pytest
 
 from plugins.skyGame.games import gen_zjh_prob, zjh_prob
 from plugins.skyGame.games.zhajinhua import (
+    _FOLD_CONFIRM_MAX_RETRIES,
     _acquire_hand_after_peek,
     _act_on_hand,
     _actual_win_probability,
     _blind_call_cost,
     _blind_decision,
+    _blind_notification,
     _blind_peek_or_call,
     _call_decision,
+    _Choice,
     _choose,
     _choose_action,
     _combined_opponent_threshold,
     _combined_self_threshold,
+    _confirm_fold,
     _extract_hand_value,
     _game_result_notification,
     _hand_threshold_for_actual_win_probability,
     _heads_up_blind_action,
+    _heads_up_blind_notification,
     _heads_up_opponent_seen,
     _heads_up_stop_loss_action,
     _in_hand,
@@ -33,6 +38,7 @@ from plugins.skyGame.games.zhajinhua import (
     _opponent_threshold,
     _OpponentSnapshot,
     _parse_hand,
+    _PendingFold,
     _RoundTracker,
     _self_hand,
     _snapshot_for_actor,
@@ -1137,3 +1143,129 @@ async def test_notify_game_result_disabled_pushes_nothing() -> None:
     await _notify_game_result(ctx, {"zjh_notify_hand": False}, {"game": {}}, "A♠", "对子")
 
     assert ctx.messages == []
+
+
+class _RecordingContext:
+    """同时记录 notify 推送与提供日志接口的假上下文。"""
+
+    def __init__(self) -> None:
+        self.messages: list[str] = []
+        self.log = _FakeLog()
+
+    async def notify(self, message: str, *args: object, **kwargs: object) -> None:
+        self.messages.append(message)
+
+
+class _ResultClient:
+    """按固定响应返回 post 结果的假客户端，用于模拟确认弃牌成功/失败。"""
+
+    def __init__(self, response: dict[str, object]) -> None:
+        self._response = response
+        self.requests: list[tuple[str, dict[str, object]]] = []
+
+    async def post(self, path: str, body: dict[str, object]) -> dict[str, object]:
+        self.requests.append((path, body))
+        return self._response
+
+
+def _pending_fold() -> _PendingFold:
+    return _PendingFold(rid=123, hand="2♠ 3♥ 5♦", hand_type="散牌", choice=_Choice(False, "跟注期望收益为负", None))
+
+
+def test_blind_notification_renders_call_with_ev_detail() -> None:
+    # 正向：蒙牌盲跟通知带半价成本、蒙牌胜率与期望收益。
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": False},
+        {"id": "one", "alive": True, "seen": False},
+        {"id": "two", "alive": True, "seen": False},
+        pot=10000,
+        call_bet=100,
+    )
+    decision = _blind_decision(game, 0.5, _RoundTracker())
+    assert decision is not None
+
+    notification = _blind_notification("call", 5010, decision, 10000, 100, "蒙牌半价盲跟划算")
+
+    lines = notification.splitlines()
+    assert lines[0] == "🃏 炸金花 · 蒙牌盲跟"
+    assert "牌桌 #5010 · 未看牌" in notification
+    assert "半价成本 50" in notification
+    assert "蒙牌胜率 25.0%" in notification
+    assert "原因：蒙牌半价盲跟划算" in notification
+
+
+def test_blind_notification_renders_peek_without_decision() -> None:
+    # 异常路径：牌局数据不完整（无评估明细）时看牌通知仍可渲染，只缺概率行。
+    notification = _blind_notification("peek", 5011, None, 0, 0, "牌局数据不完整，先看牌再按实际手牌决策")
+
+    lines = notification.splitlines()
+    assert lines[0] == "🃏 炸金花 · 看牌买信息"
+    assert "牌桌 #5011 · 未看牌" in notification
+    assert "半价成本" not in notification
+    assert "原因：牌局数据不完整，先看牌再按实际手牌决策" in notification
+
+
+def test_heads_up_blind_notification_renders_showdown_and_call() -> None:
+    # 正向：单挑蒙牌应战开牌与盲跟两种决策都带对手看牌状态与原因。
+    game = _blind_heads_up_game(opp_seen=True)
+    decision = _blind_decision(game, 0.5, _RoundTracker())
+
+    showdown = _heads_up_blind_notification("showdown", 5012, True, decision, 1000, 100)
+    assert showdown.splitlines()[0] == "🃏 炸金花 · 单挑蒙牌 · 应战开牌"
+    assert "对手已看牌" in showdown
+    assert "直接比大小" in showdown
+
+    call = _heads_up_blind_notification("call", 5012, False, decision, 1000, 100)
+    assert "单挑蒙牌 · 盲跟" in call
+    assert "对手未看牌" in call
+    assert "盲跟保住半价优惠" in call
+
+
+@pytest.mark.asyncio
+async def test_confirm_fold_success_notifies_and_clears_pending() -> None:
+    # 正向：确认弃牌成功 → 推送弃牌通知、清空待确认状态并返回 True。
+    ctx = _RecordingContext()
+    client = _ResultClient({"ok": True})
+    tracker = _RoundTracker(pending_fold=_pending_fold())
+
+    result = await _confirm_fold(ctx, client, {"zjh_notify_hand": True}, tracker)
+
+    assert result is True
+    assert tracker.pending_fold is None
+    assert client.requests == [("/api/portal/zhajinhua/action", {"action": "fold"})]
+    assert len(ctx.messages) == 1
+    assert "弃牌" in ctx.messages[0]
+
+
+@pytest.mark.asyncio
+async def test_confirm_fold_failure_keeps_pending_for_retry() -> None:
+    # 异常路径（回归死循环 bug）：门户拒绝确认 → 返回 False 且保留待确认状态，
+    # 交给调用方按重试计数处理，而不是无声丢弃或无限重发。
+    ctx = _RecordingContext()
+    client = _ResultClient({"ok": False, "error": "not your turn"})
+    tracker = _RoundTracker(pending_fold=_pending_fold())
+
+    result = await _confirm_fold(ctx, client, {"zjh_notify_hand": True}, tracker)
+
+    assert result is False
+    assert tracker.pending_fold is not None
+    assert ctx.messages == []
+
+
+@pytest.mark.asyncio
+async def test_confirm_fold_respects_notify_toggle() -> None:
+    # 异常路径：关闭手牌通知开关时确认成功也不推送，但仍清空待确认状态。
+    ctx = _RecordingContext()
+    client = _ResultClient({"ok": True})
+    tracker = _RoundTracker(pending_fold=_pending_fold())
+
+    result = await _confirm_fold(ctx, client, {"zjh_notify_hand": False}, tracker)
+
+    assert result is True
+    assert tracker.pending_fold is None
+    assert ctx.messages == []
+
+
+def test_fold_confirm_max_retries_is_bounded() -> None:
+    # 回归：确认弃牌重试必须有正上限，避免门户持续拒绝时每轮无限重发。
+    assert _FOLD_CONFIRM_MAX_RETRIES > 0
