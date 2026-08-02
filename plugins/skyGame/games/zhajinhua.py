@@ -9,8 +9,9 @@
 #     （半价划算，别去看牌翻倍）；EV < 0 看牌买信息，牌大再上、牌小弃
 #   - 看牌后完全按增量期望收益（EV）决策：EV ≥ 0 跟注，否则弃牌
 #   - 单挑且对手已看牌、EV 为负 → 比牌止损（showdown/open）或弃牌，绝不连跟
-#   - 胜率按对手看牌状态分开计算：蒙牌对手用 p^n，已看牌且继续下注的对手
-#     按其行动时底池赔率反推牌力门槛再做条件胜率
+#   - 胜率按对手看牌状态分开计算：已看牌（手牌确定）对蒙牌对手用 t^B；蒙牌（手牌未知）
+#     不能把平均胜率 0.5 当固定手牌，需对未知手牌强度积分（三人全蒙为 1/3 而非 0.5²）；
+#     已看牌且继续下注的对手按其行动时底池赔率反推牌力门槛再做条件胜率
 #   - 支持双击弃牌确认
 #   - 新牌局作废 CSRF（下次 POST 自动重取）
 
@@ -292,6 +293,33 @@ def _actual_win_probability(hand_threshold: float, blind_opponents: int, seen_th
     return probability
 
 
+def _blind_win_probability(blind_opponents: int, seen_thresholds: tuple[float, ...]) -> float:
+    """蒙牌（手牌未知）时对蒙牌与已看牌对手的实际胜率——对未知手牌强度精确积分。
+
+    手牌未知时不能把平均单挑胜率 0.5 当固定手牌代进 `t^B`，那会低估：「赢对手A」
+    「赢对手B」两件事经我方手牌强弱相关，并不独立。三个随机手牌的玩家各以 1/3 概率
+    最大，而非 0.5²=1/4。正确做法是把我方手牌强度 t 视为近似 Uniform[0,1] 的随机量积分：
+
+        P = ∫₀¹ t^B · Πᵢ max(0, (t − Tᵢ)/(1 − Tᵢ)) dt
+
+    展开为多项式后逐项精确积分（闭式、无近似）。全蒙牌无看牌对手退化为 1/(B+1)，
+    单挑纯蒙牌为 1/2；已看牌对手按其门槛 Tᵢ 进入条件胜率因子。
+    """
+    if blind_opponents < 0 or any(not 0 <= threshold < 1 for threshold in seen_thresholds):
+        return 0.0
+
+    # 分子多项式 P(t) = t^B · Πᵢ (t − Tᵢ)，系数按升幂排列 [c0, c1, ..., cn]。
+    poly = [0.0] * blind_opponents + [1.0]
+    denominator = 1.0
+    for threshold in seen_thresholds:
+        poly = [-threshold * poly[0]] + [poly[i - 1] - threshold * poly[i] for i in range(1, len(poly))] + [poly[-1]]
+        denominator *= 1.0 - threshold
+
+    lower = max(seen_thresholds, default=0.0)
+    integral = sum(coefficient * (1.0 - lower ** (power + 1)) / (power + 1) for power, coefficient in enumerate(poly))
+    return max(integral / denominator, 0.0)
+
+
 def _hand_threshold_for_actual_win_probability(
     actual_threshold: float, blind_opponents: int, seen_thresholds: tuple[float, ...]
 ) -> float | None:
@@ -560,11 +588,14 @@ def _blind_call_cost(call_bet: float) -> float:
 
 
 def _blind_decision(game: dict[str, Any], fallback_threshold: float, tracker: _RoundTracker) -> _CallDecision | None:
-    """蒙牌（未看牌）决策评估：手牌未知按平均单挑胜率 0.5 估，跟注成本按半价计。
+    """蒙牌（未看牌）决策评估：手牌未知，胜率对未知手牌强度积分，跟注成本按半价计。
 
     用于「蒙还是看」的 EV 决策——EV ≥ 0 时蒙牌半价跟注本身就划算，继续盲跟；
-    EV < 0 时平均手牌已不划算，看牌买信息（牌大再上、牌小弃）。与看牌决策同构，
-    差别仅在单挑胜率取平均值、成本取半价。
+    EV < 0 时平均手牌已不划算，看牌买信息（牌大再上、牌小弃）。
+
+    胜率不能把平均单挑胜率 0.5 当固定手牌代进 `t^B`（那会低估：三人全蒙应为 1/3 而非
+    0.5²=1/4），改用 `_blind_win_probability` 对未知手牌强度精确积分；`one_vs_one` 字段
+    仍记平均单挑胜率 0.5 作展示。成本取已看牌半价。
     """
     if not 0 <= fallback_threshold < 1:
         return None
@@ -580,9 +611,7 @@ def _blind_decision(game: dict[str, Any], fallback_threshold: float, tracker: _R
     seen = len(seen_thresholds)
 
     blind_cost = _blind_call_cost(float(call_bet))
-    win_probability = _actual_win_probability(
-        _BLIND_ONE_VS_ONE, blind, tuple(threshold for threshold, _ in seen_thresholds)
-    )
+    win_probability = _blind_win_probability(blind, tuple(threshold for threshold, _ in seen_thresholds))
     expected_value = win_probability * (pot + blind_cost) - blind_cost
     return _CallDecision(_BLIND_ONE_VS_ONE, blind, seen, tuple(seen_thresholds), win_probability, expected_value)
 

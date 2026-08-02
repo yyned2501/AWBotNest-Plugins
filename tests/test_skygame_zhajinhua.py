@@ -15,6 +15,7 @@ from plugins.skyGame.games.zhajinhua import (
     _blind_decision,
     _blind_notification,
     _blind_peek_or_call,
+    _blind_win_probability,
     _call_decision,
     _Choice,
     _choose,
@@ -584,9 +585,10 @@ def test_blind_decision_all_blind_uses_average_hand_and_positive_ev() -> None:
     assert decision.one_vs_one == 0.5
     assert decision.blind_opponents == 2
     assert decision.seen_opponents == 0
-    assert decision.win_probability == pytest.approx(0.25)
-    # 半价成本 50：EV = 0.25 × (10000 + 50) − 50
-    assert decision.expected_value == pytest.approx(0.25 * (10000 + 50) - 50)
+    # 手牌未知对两个蒙牌对手积分：三人全蒙各以 1/3 概率最大，而非 0.5²=1/4
+    assert decision.win_probability == pytest.approx(1 / 3)
+    # 半价成本 50：EV = 1/3 × (10000 + 50) − 50
+    assert decision.expected_value == pytest.approx((10000 + 50) / 3 - 50)
     assert decision.expected_value > 0
 
 
@@ -621,7 +623,8 @@ def test_blind_decision_negative_ev_against_strong_seen_bettor() -> None:
     assert decision is not None
     assert decision.seen_opponents == 1
     assert decision.seen_thresholds == ((0.9, False),)
-    assert decision.win_probability == 0.0
+    # 蒙牌对一个门槛 0.9 的已看牌对手积分：(1 − 0.9)/2 = 0.05，仍几乎必败
+    assert decision.win_probability == pytest.approx(0.05)
     assert decision.expected_value < 0
 
 
@@ -631,6 +634,29 @@ def test_blind_decision_rejects_invalid_financial_data() -> None:
     assert _blind_decision({"pot": 100, "callBet": -1, "players": []}, 0.5, tracker) is None
     assert _blind_decision({"pot": 100, "callBet": 100}, -0.1, tracker) is None
     assert _blind_decision({"pot": 100, "callBet": 100}, 1.0, tracker) is None
+
+
+def test_blind_win_probability_all_blind_is_one_over_n() -> None:
+    # 回归核心（用户实测牌桌 #5081：三人全蒙误报 25%）：N 个随机手牌玩家各以 1/N 概率最大。
+    # 旧实现把平均单挑胜率 0.5 当固定手牌代进 t^B，三人全蒙得 0.5²=0.25，低估了真实的 1/3。
+    assert _blind_win_probability(1, ()) == pytest.approx(1 / 2)  # 单挑纯蒙牌
+    assert _blind_win_probability(2, ()) == pytest.approx(1 / 3)  # 三人全蒙
+    assert _blind_win_probability(3, ()) == pytest.approx(1 / 4)  # 四人全蒙
+
+
+def test_blind_win_probability_seen_opponent_uses_threshold_integral() -> None:
+    # 蒙牌对单个门槛 T 的已看牌对手积分得 (1 − T)/2；门槛越高越必败。
+    assert _blind_win_probability(0, (0.9,)) == pytest.approx(0.05)
+    assert _blind_win_probability(0, (0.5,)) == pytest.approx(0.25)
+    # 一个蒙牌 + 一个门槛 0.5 的已看牌对手：∫₀¹ t·(t−0.5)/0.5 dt = 5/24
+    assert _blind_win_probability(1, (0.5,)) == pytest.approx(5 / 24)
+
+
+def test_blind_win_probability_rejects_invalid_thresholds() -> None:
+    # 异常路径：负蒙牌数或越界门槛返回 0。
+    assert _blind_win_probability(-1, ()) == 0.0
+    assert _blind_win_probability(1, (1.0,)) == 0.0
+    assert _blind_win_probability(1, (-0.1,)) == 0.0
 
 
 def test_blind_peek_or_call_blind_calls_on_positive_ev() -> None:
@@ -1190,7 +1216,7 @@ def test_blind_notification_renders_call_with_ev_detail() -> None:
     assert lines[0] == "🃏 炸金花 · 蒙牌盲跟"
     assert "牌桌 #5010 · 未看牌" in notification
     assert "半价成本 50" in notification
-    assert "蒙牌胜率 25.0%" in notification
+    assert "蒙牌胜率 33.3%" in notification
     assert "原因：蒙牌半价盲跟划算" in notification
 
 
