@@ -14,9 +14,10 @@ from .zjh_state import _is_alive, _is_self, _opponent_entries, _players
 
 
 def _threshold_summary(decision: _CallDecision) -> str:
-    """格式化已看牌对手的隐含牌力门槛与来源。"""
+    """格式化已看牌对手的隐含牌力范围（下界~上界）与来源。"""
     return ", ".join(
-        f"{threshold:.1%}{'实测' if observed else '回退'}" for threshold, observed in decision.seen_thresholds
+        f"{lower:.0%}~{upper:.0%}{'实测' if observed else '回退'}"
+        for lower, upper, observed in decision.seen_thresholds
     )
 
 

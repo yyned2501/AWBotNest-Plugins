@@ -1,5 +1,5 @@
 # =============================================================================
-# AWBotNest 插件：天空游戏 (skyGame) v1.12.1
+# AWBotNest 插件：天空游戏 (skyGame) v1.13.0
 #
 # 天空系列游戏的统一入口：Vue 配置界面左侧按游戏分组，各游戏逻辑拆到
 # games/ 子模块，互不干扰。当前收录：
@@ -14,7 +14,7 @@
 #   games/zhajinhua.py   炸金花轮询编排入口（加入/轮询/弃牌确认/启停）
 #   games/zjh_hand.py    炸金花手牌解析（花色点数/牌型归一/查表键值）
 #   games/zjh_state.py   炸金花牌局公开状态读取（玩家列表/存活/看牌/自身标识）
-#   games/zjh_model.py   炸金花概率模型、门槛推断、轮询跟踪与 EV 决策
+#   games/zjh_model.py   炸金花概率模型、门槛推断、轮询跟踪、范围上限/反诈唬与 EV 决策
 #   games/zjh_notify.py  炸金花通知与决策日志
 #   games/zjh_prob.py    炸金花穷举概率表（自动生成）
 #   games/horse.py       养马养护循环
@@ -28,7 +28,7 @@ from .games import hdsky_auth
 __plugin__ = {
     "name": "天空游戏",
     "id": "skyGame",
-    "version": "1.12.1",
+    "version": "1.13.0",
     "author": "Yy",
     "description": "天空系列游戏统一入口：炸金花自动参与、养马自动养护，左侧按游戏分组配置。",
     "scope": "user",
@@ -284,6 +284,43 @@ __plugin__ = {
             "help": "仅在最终实际胜率达到此值、EV 为正且服务端允许 raise 时追加。",
             "order": 27,
         },
+        "zjh_call_range_cap": {
+            "type": "slider",
+            "default": 85,
+            "label": "平跟对手牌力上限(%)",
+            "section": "炸金花",
+            "min": 50,
+            "max": 100,
+            "step": 5,
+            "show_if": {"zjh_enabled": True},
+            "help": "只平跟/看牌不追加的对手，牌力按[推断门槛, 此上限]估计。"
+            "设 100 = 回到旧行为（默认对手可能持任意强牌）。",
+            "order": 28,
+        },
+        "zjh_raise_range_floor": {
+            "type": "slider",
+            "default": 75,
+            "label": "加注对手牌力下限(%)",
+            "section": "炸金花",
+            "min": 50,
+            "max": 100,
+            "step": 5,
+            "show_if": {"zjh_enabled": True},
+            "help": "追加过的对手，牌力按[max(推断门槛, 此下限), 100]估计；低于推断门槛时以推断门槛为准。",
+            "order": 29,
+        },
+        "zjh_bluff_rate": {
+            "type": "slider",
+            "default": 8,
+            "label": "反诈唬基线(%)",
+            "section": "炸金花",
+            "min": 0,
+            "max": 30,
+            "step": 1,
+            "show_if": {"zjh_enabled": True},
+            "help": "每个已看牌对手有该比例概率是纯空气牌（诈唬），抬高我方胜率让 bot 更敢跟。设 0 = 关闭反诈唬。",
+            "order": 30,
+        },
         "zjh_notify_join": {
             "type": "boolean",
             "default": True,
@@ -314,6 +351,14 @@ __plugin__ = {
         },
     },
     "changelog": (
+        "v1.13.0 更新：\n"
+        "- 炸金花看牌后胜率模型加固（放松方向，让 bot 更敢跟、少弃牌）：已看牌对手的手牌不再默认"
+        "可能是直到最强的任意牌，改按动作类型套用范围——平跟/仅看牌对手按[推断门槛, 牌力上限]、"
+        "加注对手按[牌力下限, 100]估计；并叠加反诈唬基线，每个已看牌对手有固定比例视为纯空气牌，"
+        "抬高我方胜率。门槛反推与蒙牌精确积分两条路径一字未改\n"
+        "- 新增三项可调配置（炸金花分区）：平跟对手牌力上限(默认85%)、加注对手牌力下限(默认75%)、"
+        "反诈唬基线(默认8%)。上限设 100 且反诈唬设 0 时逐值还原 v1.12.1 行为，便于回退与 A/B\n"
+        "- 跟注/弃牌通知的对手门槛改为展示「下界~上界 实测/回退」的范围形式\n"
         "v1.12.1 更新：\n"
         "- 炸金花纯代码重构，行为完全不变：原 1159 行的 games/zhajinhua.py 按职责拆为五个子模块——"
         "zjh_hand（手牌解析）、zjh_state（牌局状态读取）、zjh_model（概率模型/门槛推断/跟踪/EV 决策）、"

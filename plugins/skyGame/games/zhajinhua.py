@@ -34,6 +34,7 @@ from .zjh_hand import (
 )
 from .zjh_model import (
     _FOLD_CONFIRM_MAX_RETRIES,
+    _NEUTRAL_RANGE_MODEL,
     _action_override,
     _actual_win_probability,
     _blind_call_cost,
@@ -47,12 +48,19 @@ from .zjh_model import (
     _combined_opponent_threshold,
     _combined_self_threshold,
     _hand_threshold_for_actual_win_probability,
+    _is_raise_action,
     _opponent_hand_threshold,
     _opponent_threshold,
     _OpponentSnapshot,
     _PendingFold,
+    _range_factor,
+    _ranged_win_probability,
+    _RangeModel,
     _record_self_threshold,
     _RoundTracker,
+    _seen_factor,
+    _seen_opponent_ranges,
+    _SeenRange,
     _snapshot_for_actor,
     _update_round_tracker,
 )
@@ -68,9 +76,12 @@ from .zjh_state import _in_hand, _opponent_counts
 
 __all__ = [
     "_FOLD_CONFIRM_MAX_RETRIES",
+    "_NEUTRAL_RANGE_MODEL",
     "_OpponentSnapshot",
     "_PendingFold",
+    "_RangeModel",
     "_RoundTracker",
+    "_SeenRange",
     "_Choice",
     "_acquire_hand_after_peek",
     "_act_on_hand",
@@ -91,12 +102,17 @@ __all__ = [
     "_game_result_notification",
     "_hand_threshold_for_actual_win_probability",
     "_in_hand",
+    "_is_raise_action",
     "_normalize_hand_type",
     "_notify_game_result",
     "_opponent_counts",
     "_opponent_hand_threshold",
     "_opponent_threshold",
     "_parse_hand",
+    "_range_factor",
+    "_ranged_win_probability",
+    "_seen_factor",
+    "_seen_opponent_ranges",
     "_self_hand",
     "_snapshot_for_actor",
     "_update_round_tracker",
@@ -181,7 +197,7 @@ async def _act_on_hand(
     """对已看牌手牌做 EV 决策，并执行服务器允许的动作。"""
     rid = game.get("roundId")
     hand_value = _extract_hand_value(hand_type, hand)
-    choice = _choose(hand_type, hand_value, game, fallback_threshold, tracker)
+    choice = _choose(hand_type, hand_value, game, fallback_threshold, tracker, _RangeModel.from_config(cfg))
     _log_decision(ctx, hand, hand_type, hand_value, game, choice, tracker)
 
     decision = choice.decision

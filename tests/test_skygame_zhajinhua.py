@@ -8,6 +8,7 @@ import pytest
 from plugins.skyGame.games import gen_zjh_prob, zjh_prob
 from plugins.skyGame.games.zhajinhua import (
     _FOLD_CONFIRM_MAX_RETRIES,
+    _NEUTRAL_RANGE_MODEL,
     _acquire_hand_after_peek,
     _act_on_hand,
     _actual_win_probability,
@@ -27,6 +28,7 @@ from plugins.skyGame.games.zhajinhua import (
     _game_result_notification,
     _hand_threshold_for_actual_win_probability,
     _in_hand,
+    _is_raise_action,
     _normalize_hand_type,
     _notify_game_result,
     _opponent_counts,
@@ -35,7 +37,13 @@ from plugins.skyGame.games.zhajinhua import (
     _OpponentSnapshot,
     _parse_hand,
     _PendingFold,
+    _range_factor,
+    _ranged_win_probability,
+    _RangeModel,
     _RoundTracker,
+    _seen_factor,
+    _seen_opponent_ranges,
+    _SeenRange,
     _self_hand,
     _snapshot_for_actor,
     _update_round_tracker,
@@ -404,7 +412,7 @@ def test_call_decision_uses_observed_threshold_for_seen_opponent() -> None:
     one_vs_one = zjh_prob.win_prob_1v1("对子", (14, 13))
     expected = max(one_vs_one - 0.5, 0) / 0.5
     assert decision.win_probability == pytest.approx(expected)
-    assert decision.seen_thresholds == ((0.5, True),)
+    assert decision.seen_thresholds == ((0.5, 1.0, True),)
 
 
 def test_call_decision_uses_combined_peek_and_continue_threshold() -> None:
@@ -423,7 +431,7 @@ def test_call_decision_uses_combined_peek_and_continue_threshold() -> None:
     assert decision is not None
     one_vs_one = zjh_prob.win_prob_1v1("对子", (14, 13))
     assert decision.win_probability == pytest.approx(max(one_vs_one - 0.5, 0) / 0.5)
-    assert decision.seen_thresholds == ((0.5, True),)
+    assert decision.seen_thresholds == ((0.5, 1.0, True),)
 
 
 def test_call_decision_falls_back_for_unobserved_seen_opponent() -> None:
@@ -434,7 +442,7 @@ def test_call_decision_falls_back_for_unobserved_seen_opponent() -> None:
     decision = _call_decision("对子", (14, 13), game, 0.75, _RoundTracker())
 
     assert decision is not None
-    assert decision.seen_thresholds == ((0.75, False),)
+    assert decision.seen_thresholds == ((0.75, 1.0, False),)
 
 
 def test_choose_calls_positive_ev_below_fifty_percent_win_rate() -> None:
@@ -617,7 +625,7 @@ def test_blind_decision_negative_ev_against_strong_seen_bettor() -> None:
 
     assert decision is not None
     assert decision.seen_opponents == 1
-    assert decision.seen_thresholds == ((0.9, False),)
+    assert decision.seen_thresholds == ((0.9, 1.0, False),)
     # 蒙牌对一个门槛 0.9 的已看牌对手积分：(1 − 0.9)/2 = 0.05，仍几乎必败
     assert decision.win_probability == pytest.approx(0.05)
     assert decision.expected_value < 0
@@ -1158,3 +1166,128 @@ async def test_confirm_fold_respects_notify_toggle() -> None:
 def test_fold_confirm_max_retries_is_bounded() -> None:
     # 回归：确认弃牌重试必须有正上限，避免门户持续拒绝时每轮无限重发。
     assert _FOLD_CONFIRM_MAX_RETRIES > 0
+
+
+# ── 阶段二：范围上限 + 反诈唬补丁 ──────────────────────────────────────────────
+
+
+def test_ranged_win_probability_matches_actual_under_neutral_model() -> None:
+    # 向后兼容核心：中性模型（上界 1.0、诈唬 0）下新模型逐值等于旧 _actual_win_probability，
+    # 保证「平跟上限 100 & 反诈唬 0」可精确回退到 v1.12.1 行为。
+    cases = [
+        (0.6, 0, ((0.4, 1.0),)),
+        (0.7, 1, ((0.5, 1.0),)),
+        (0.8, 2, ((0.3, 1.0), (0.6, 1.0))),
+        (0.5, 1, ()),
+        (0.45, 0, ((0.5, 1.0),)),  # t ≤ 门槛 → 两者都得 0
+    ]
+    for one_vs_one, blind, bounds in cases:
+        seen_ranges = [_SeenRange(lower, upper, True) for lower, upper in bounds]
+        thresholds = tuple(lower for lower, _ in bounds)
+        assert _ranged_win_probability(one_vs_one, blind, seen_ranges, 0.0) == pytest.approx(
+            _actual_win_probability(one_vs_one, blind, thresholds)
+        )
+
+
+def test_range_factor_edges_and_degenerate_fallback() -> None:
+    assert _range_factor(0.3, 0.5, 0.85) == 0.0  # t ≤ 下界 → 必败
+    assert _range_factor(0.9, 0.5, 0.85) == 1.0  # t ≥ 上界 → 必胜
+    assert _range_factor(0.675, 0.5, 0.85) == pytest.approx(0.5)  # 区间中点线性
+    # 退化区间（上界 ≤ 下界）回落上界 1.0，即旧的 (t - lo)/(1 - lo)
+    assert _range_factor(0.75, 0.5, 0.5) == pytest.approx((0.75 - 0.5) / (1.0 - 0.5))
+    assert _range_factor(0.75, 0.6, 0.5) == pytest.approx((0.75 - 0.6) / (1.0 - 0.6))
+
+
+def test_seen_factor_bluff_raises_win_probability() -> None:
+    seen_range = _SeenRange(0.5, 0.85, True)
+    hand_threshold = 0.7
+    base = _range_factor(hand_threshold, 0.5, 0.85)
+    # 诈唬 0 时等于纯范围胜率
+    assert _seen_factor(hand_threshold, seen_range, 0.0) == pytest.approx(base)
+    # 诈唬 > 0 混入单挑胜率 t，抬高胜率（放松方向）
+    assert _seen_factor(hand_threshold, seen_range, 0.1) == pytest.approx(0.9 * base + 0.1 * hand_threshold)
+    assert _seen_factor(hand_threshold, seen_range, 0.1) > base
+
+
+def test_is_raise_action_detects_raise_keywords() -> None:
+    assert _is_raise_action("加注") is True
+    assert _is_raise_action("Raise") is True
+    assert _is_raise_action("跟注") is False
+    assert _is_raise_action("看牌") is False
+    assert _is_raise_action("call") is False
+
+
+def test_seen_opponent_ranges_map_actions_to_bounds() -> None:
+    # 范围映射：平跟对手 [推断门槛, 上限]，加注对手 [max(门槛, 下限), 1.0]。
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True},
+        {"id": "caller", "alive": True, "seen": True},
+        {"id": "raiser", "alive": True, "seen": True},
+    )
+    tracker = _RoundTracker(
+        snapshots={
+            "caller": _OpponentSnapshot(pot=100, call_bet=100, opponents=1, is_raise=False),
+            "raiser": _OpponentSnapshot(pot=100, call_bet=100, opponents=1, is_raise=True),
+        }
+    )
+    model = _RangeModel(call_cap=0.85, raise_floor=0.75, bluff=0.08)
+    blind, ranges = _seen_opponent_ranges(game, tracker, 0.1, model)
+
+    assert blind == 0
+    # 平跟对手：[推断门槛 0.5, 上限 0.85]
+    assert ranges[0].lower == pytest.approx(0.5)
+    assert ranges[0].upper == pytest.approx(0.85)
+    assert ranges[0].observed is True
+    # 加注对手：[max(0.5, 0.75)=0.75, 1.0]
+    assert ranges[1].lower == pytest.approx(0.75)
+    assert ranges[1].upper == pytest.approx(1.0)
+    assert ranges[1].observed is True
+
+
+def test_call_decision_range_and_bluff_loosen_win_probability() -> None:
+    # 放松方向：同一手牌、同一已看牌对手，封顶 + 反诈唬比中性模型胜率与 EV 都更高，
+    # 且只改上界/胜率、不改推断门槛。
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True},
+        {"id": "seen", "alive": True, "seen": True},
+        pot=1000,
+        call_bet=100,
+    )
+    tracker = _RoundTracker(snapshots={"seen": _OpponentSnapshot(pot=100, call_bet=100, opponents=1)})
+    neutral = _call_decision("对子", (14, 13), game, 0.1, tracker)
+    loosened = _call_decision(
+        "对子", (14, 13), game, 0.1, tracker, _RangeModel(call_cap=0.85, raise_floor=0.75, bluff=0.08)
+    )
+
+    assert neutral is not None and loosened is not None
+    assert loosened.win_probability > neutral.win_probability
+    assert loosened.expected_value > neutral.expected_value
+    # 中性模型上界仍记 1.0（旧行为），放松模型上界收到 0.85，推断门槛同为 0.5
+    assert neutral.seen_thresholds == ((0.5, 1.0, True),)
+    assert loosened.seen_thresholds == ((0.5, 0.85, True),)
+
+
+def test_choose_flips_to_call_when_range_model_loosens_ev() -> None:
+    # 端到端放松：同一手牌、同一对手，中性模型 EV 为负而弃，开启封顶 + 反诈唬后 EV 转正而跟。
+    one_vs_one = zjh_prob.win_prob_1v1("对子", (14, 13))
+    neutral_win = _ranged_win_probability(one_vs_one, 0, [_SeenRange(0.5, 1.0, True)], 0.0)
+    loosened_win = _ranged_win_probability(one_vs_one, 0, [_SeenRange(0.5, 0.85, True)], 0.08)
+    assert loosened_win > neutral_win
+
+    # 底池取「中性弃」与「放松跟」两条 EV=0 临界点的中点，确保两侧符号相反
+    call_bet = 100.0
+    pot = ((1 / neutral_win - 1) + (1 / loosened_win - 1)) / 2 * call_bet
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True},
+        {"id": "seen", "alive": True, "seen": True},
+        pot=pot,
+        call_bet=call_bet,
+    )
+    tracker = _RoundTracker(snapshots={"seen": _OpponentSnapshot(pot=100, call_bet=100, opponents=1)})
+
+    neutral_choice = _choose("对子", (14, 13), game, 0.1, tracker, _NEUTRAL_RANGE_MODEL)
+    loosened_choice = _choose(
+        "对子", (14, 13), game, 0.1, tracker, _RangeModel(call_cap=0.85, raise_floor=0.75, bluff=0.08)
+    )
+    assert neutral_choice.call is False
+    assert loosened_choice.call is True

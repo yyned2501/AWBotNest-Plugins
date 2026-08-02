@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from .zjh_prob import win_prob_1v1
@@ -38,6 +38,7 @@ class _OpponentSnapshot:
     opponents: int
     blind_opponents: int | None = None
     seen_thresholds: tuple[float, ...] = ()
+    is_raise: bool = False
 
 
 @dataclass(frozen=True)
@@ -65,12 +66,16 @@ class _RoundTracker:
 
 @dataclass(frozen=True)
 class _CallDecision:
-    """一次跟注的概率和增量期望收益。"""
+    """一次跟注的概率和增量期望收益。
+
+    `seen_thresholds` 每项为 `(下界, 上界, 是否实测)`：已看牌对手被建模为牌力
+     uniform[下界, 上界]。中性配置（上界 1.0、无诈唬）时等价旧的单门槛模型。
+    """
 
     one_vs_one: float
     blind_opponents: int
     seen_opponents: int
-    seen_thresholds: tuple[tuple[float, bool], ...]
+    seen_thresholds: tuple[tuple[float, float, bool], ...]
     win_probability: float
     expected_value: float
 
@@ -82,6 +87,44 @@ class _Choice:
     call: bool
     reason: str
     decision: _CallDecision | None
+
+
+@dataclass(frozen=True)
+class _SeenRange:
+    """一个已看牌对手被建模的牌力区间 [lower, upper] 及门槛是否实测反推。"""
+
+    lower: float
+    upper: float
+    observed: bool
+
+
+@dataclass(frozen=True)
+class _RangeModel:
+    """范围上限 + 反诈唬基线的可调参数（均为 0~1 分数）。
+
+    - call_cap：平跟/仅看牌对手牌力上界（扣除顶级强牌慢打概率），下界为推断门槛。
+    - raise_floor：加注对手牌力下界（加注信号至少这么强），上界恒为 1.0。
+    - bluff：任一跟注被视为纯空气牌诈唬的概率，避免把对手范围锁太死而吃诈唬亏。
+
+    中性配置 `(1.0, 0.0, 0.0)` 精确还原旧的单门槛均匀分布模型（v1.12.0 行为）。
+    """
+
+    call_cap: float = 1.0
+    raise_floor: float = 0.0
+    bluff: float = 0.0
+
+    @classmethod
+    def from_config(cls, cfg: dict[str, Any]) -> _RangeModel:
+        """从插件配置（百分比）解析；非法/缺失值回退中性（关闭）。"""
+        return cls(
+            call_cap=float(cfg.get("zjh_call_range_cap", 100)) / 100,
+            raise_floor=float(cfg.get("zjh_raise_range_floor", 0)) / 100,
+            bluff=float(cfg.get("zjh_bluff_rate", 0)) / 100,
+        )
+
+
+# 中性范围模型：上界 1.0、无加注下限、无诈唬 —— 逐值等价旧的 _actual_win_probability。
+_NEUTRAL_RANGE_MODEL = _RangeModel()
 
 
 def _actual_win_probability(hand_threshold: float, blind_opponents: int, seen_thresholds: tuple[float, ...]) -> float:
@@ -244,6 +287,12 @@ def _is_continue_action(last_action: str) -> bool:
     return any(token in action for token in ("跟", "加", "call", "raise"))
 
 
+def _is_raise_action(last_action: str) -> bool:
+    """判断公开动作文本是否为加注（区别于平跟）：含「加」或 raise。"""
+    action = last_action.lower()
+    return "加" in action or "raise" in action
+
+
 def _update_round_tracker(game: dict[str, Any], tracker: _RoundTracker, log: Any = None) -> None:
     """根据相邻轮询记录双方上牌、继续下注前的快照和牌型门槛。"""
     pot = game.get("pot")
@@ -307,7 +356,7 @@ def _update_round_tracker(game: dict[str, Any], tracker: _RoundTracker, log: Any
                                 f"{combined:.3f}" if combined is not None else "无法推断",
                             )
                     else:
-                        tracker.snapshots[key] = snapshot
+                        tracker.snapshots[key] = replace(snapshot, is_raise=_is_raise_action(current.last_action))
                         if log:
                             inferred = _combined_opponent_threshold(tracker.peek_snapshots.get(key), snapshot)
                             log.info(
@@ -345,14 +394,81 @@ def _seen_opponent_thresholds(
     return blind, seen_thresholds
 
 
+def _range_factor(hand_threshold: float, lower: float, upper: float) -> float:
+    """我方牌力 t 击败一个 uniform[lower, upper] 对手的条件胜率。
+
+    上界 1.0 时退化为旧的 `(t - lower)/(1 - lower)`；区间退化（upper ≤ lower，
+    如推断门槛已高于封顶）回落 upper=1.0，保证健壮且与旧行为一致。
+    """
+    if upper <= lower:
+        upper = 1.0
+    if hand_threshold <= lower:
+        return 0.0
+    if hand_threshold >= upper:
+        return 1.0
+    return (hand_threshold - lower) / (upper - lower)
+
+
+def _seen_factor(hand_threshold: float, seen_range: _SeenRange, bluff: float) -> float:
+    """对单个已看牌对手的胜率：范围胜率 blended 反诈唬基线。
+
+    以概率 bluff 视对手为纯空气牌（随机弱牌，我方胜率≈单挑胜率 t），
+    其余概率按 uniform[lower, upper] 范围计算。bluff=0 时即纯范围胜率。
+    """
+    range_win = _range_factor(hand_threshold, seen_range.lower, seen_range.upper)
+    return (1 - bluff) * range_win + bluff * hand_threshold
+
+
+def _seen_opponent_ranges(
+    game: dict[str, Any], tracker: _RoundTracker, fallback_threshold: float, range_model: _RangeModel
+) -> tuple[int, list[_SeenRange]]:
+    """统计蒙牌对手数，并按动作类型为每个已看牌对手构造牌力区间。
+
+    加注对手：[max(推断门槛, raise_floor), 1.0]；平跟/仅看牌：[推断门槛, call_cap]。
+    门槛实测反推优先，缺失才用回退分位；observed 标记来源。
+    """
+    blind, _ = _opponent_counts(game)
+    ranges: list[_SeenRange] = []
+    for key, player in _opponent_entries(game):
+        if not player.get("seen", False):
+            continue
+        threshold = _combined_opponent_threshold(tracker.peek_snapshots.get(key), tracker.snapshots.get(key))
+        observed = threshold is not None
+        lower = threshold if threshold is not None else fallback_threshold
+        continue_snapshot = tracker.snapshots.get(key)
+        is_raise = bool(continue_snapshot.is_raise) if continue_snapshot is not None else False
+        if is_raise:
+            ranges.append(_SeenRange(max(lower, range_model.raise_floor), 1.0, observed))
+        else:
+            ranges.append(_SeenRange(lower, range_model.call_cap, observed))
+    return blind, ranges
+
+
+def _ranged_win_probability(
+    hand_threshold: float, blind_opponents: int, seen_ranges: list[_SeenRange], bluff: float
+) -> float:
+    """带范围上限与反诈唬基线的实际胜率：蒙牌对手 t^B，已看牌对手连乘各自 seen_factor。"""
+    if not 0 < hand_threshold <= 1 or blind_opponents < 0:
+        return 0.0
+    probability = hand_threshold**blind_opponents
+    for seen_range in seen_ranges:
+        probability *= _seen_factor(hand_threshold, seen_range, bluff)
+    return probability
+
+
 def _call_decision(
     hand_type: str,
     hand_value: int | tuple[int, ...] | None,
     game: dict[str, Any],
     fallback_threshold: float,
     tracker: _RoundTracker,
+    range_model: _RangeModel | None = None,
 ) -> _CallDecision | None:
-    """按对手看牌状态及其最近正 EV 行为计算本次跟注的增量 EV。"""
+    """按对手看牌状态及其最近正 EV 行为计算本次跟注的增量 EV。
+
+    range_model 为空时用中性模型（平跟上限 1.0、加注下限 0.0、诈唬率 0），
+    此时胜率逐值等于旧的 `_actual_win_probability`，便于回退与 A/B。
+    """
     if hand_value is None or not 0 <= fallback_threshold < 1:
         return None
 
@@ -367,13 +483,15 @@ def _call_decision(
     if one_vs_one <= 0:
         return None
 
-    blind, seen_thresholds = _seen_opponent_thresholds(game, tracker, fallback_threshold)
-    seen = len(seen_thresholds)
+    model = range_model if range_model is not None else _NEUTRAL_RANGE_MODEL
+    blind, ranges = _seen_opponent_ranges(game, tracker, fallback_threshold, model)
+    seen = len(ranges)
 
-    win_probability = _actual_win_probability(one_vs_one, blind, tuple(threshold for threshold, _ in seen_thresholds))
+    win_probability = _ranged_win_probability(one_vs_one, blind, ranges, model.bluff)
 
     expected_value = win_probability * (pot + call_bet) - call_bet
-    return _CallDecision(one_vs_one, blind, seen, tuple(seen_thresholds), win_probability, expected_value)
+    seen_thresholds = tuple((rng.lower, rng.upper, rng.observed) for rng in ranges)
+    return _CallDecision(one_vs_one, blind, seen, seen_thresholds, win_probability, expected_value)
 
 
 # 蒙牌未知手牌按「平均单挑胜率」估计：随机两手牌对称，任一手压过对手的概率为 0.5。
@@ -411,7 +529,9 @@ def _blind_decision(game: dict[str, Any], fallback_threshold: float, tracker: _R
     blind_cost = _blind_call_cost(float(call_bet))
     win_probability = _blind_win_probability(blind, tuple(threshold for threshold, _ in seen_thresholds))
     expected_value = win_probability * (pot + blind_cost) - blind_cost
-    return _CallDecision(_BLIND_ONE_VS_ONE, blind, seen, tuple(seen_thresholds), win_probability, expected_value)
+    # 蒙牌胜率仍走精确积分（范围/诈唬只作用于已看牌真金决策），门槛上界记 1.0 保持字段形状一致
+    seen_threshold_ranges = tuple((threshold, 1.0, observed) for threshold, observed in seen_thresholds)
+    return _CallDecision(_BLIND_ONE_VS_ONE, blind, seen, seen_threshold_ranges, win_probability, expected_value)
 
 
 def _blind_peek_or_call(
@@ -438,9 +558,10 @@ def _choose(
     game: dict[str, Any],
     fallback_threshold: float,
     tracker: _RoundTracker,
+    range_model: _RangeModel | None = None,
 ) -> _Choice:
     """纯 EV 决策：跟注当且仅当数据有效且增量期望收益非负。"""
-    decision = _call_decision(hand_type, hand_value, game, fallback_threshold, tracker)
+    decision = _call_decision(hand_type, hand_value, game, fallback_threshold, tracker, range_model)
     if decision is None:
         return _Choice(False, "牌局数据不完整，保守弃牌", None)
     if decision.expected_value < 0:
