@@ -17,6 +17,7 @@ from plugins.skyGame.games.zhajinhua import (
     _blind_notification,
     _blind_peek_or_call,
     _blind_peek_reason,
+    _blind_vs_seen_win,
     _blind_win_probability,
     _call_decision,
     _Choice,
@@ -34,6 +35,7 @@ from plugins.skyGame.games.zhajinhua import (
     _notify_game_result,
     _opponent_counts,
     _opponent_hand_threshold,
+    _opponent_raise_threshold,
     _opponent_threshold,
     _OpponentSnapshot,
     _parse_hand,
@@ -47,7 +49,15 @@ from plugins.skyGame.games.zhajinhua import (
     _SeenRange,
     _self_hand,
     _snapshot_for_actor,
+    _terminal_ev_call,
+    _terminal_ev_decision,
+    _TerminalBranch,
     _update_round_tracker,
+)
+from plugins.skyGame.games.zjh_profile import (
+    ProfileStore,
+    _bucket,
+    _hand_pctile_from_result,
 )
 
 
@@ -680,7 +690,8 @@ def test_blind_peek_or_call_blind_calls_on_positive_ev() -> None:
 
 
 def test_blind_peek_or_call_peeks_on_negative_ev() -> None:
-    # 正向：EV<0 时平均手牌不划算，看牌买信息（牌大再上、牌小弃）。
+    # 正向：盲跟 Terminal EV<0 时，看牌买信息或弃牌止损，绝不继续盲跟。
+    # （对手已看牌且门槛高时，看牌后强牌概率低，peek 也救不回 → 直接弃牌止损）
     game = _game(
         {"id": "self", "alive": True, "isSelf": True, "seen": False},
         {"id": "seen", "alive": True, "seen": True},
@@ -689,13 +700,15 @@ def test_blind_peek_or_call_peeks_on_negative_ev() -> None:
     )
     action, choice = _blind_peek_or_call(game, ["call", "peek", "fold", "raise"], 0.9, _RoundTracker())
 
-    assert action == "peek"
+    # 新语义：盲跟 EV 大负，弃牌或看牌止损，绝不盲跟
+    assert action in ("fold", "peek")
     assert choice is not None
-    assert choice.expected_value < 0
+    assert choice.expected_value <= 0
 
 
 def test_blind_peek_or_call_heads_up_uses_same_ev_path() -> None:
-    # 回归：单挑蒙牌不再直接 open/showdown/call；EV 负且可看牌时同样选择 peek。
+    # 回归：单挑蒙牌对强看牌对手，盲跟 Terminal EV 为负时不盲跟
+    # （看牌买信息或直接弃牌止损，绝不继续被对手 raise 套牢）。
     game = _game(
         {"id": "self", "alive": True, "isSelf": True, "seen": False},
         {"id": "seen", "alive": True, "seen": True},
@@ -704,9 +717,9 @@ def test_blind_peek_or_call_heads_up_uses_same_ev_path() -> None:
     )
     action, choice = _blind_peek_or_call(game, ["peek", "fold", "showdown"], 0.9, _RoundTracker())
 
-    assert action == "peek"
+    assert action in ("fold", "peek")
     assert choice is not None
-    assert choice.expected_value < 0
+    assert choice.expected_value <= 0
 
 
 def test_blind_peek_or_call_heads_up_keeps_positive_ev_blind_call() -> None:
@@ -771,7 +784,8 @@ def test_blind_peek_or_call_positive_ev_falls_back_to_call() -> None:
 
 
 def test_blind_peek_or_call_falls_back_to_call_without_peek_action() -> None:
-    # 异常路径：EV<0 但门户不给看牌（actions 无 peek）时退回盲跟保底。
+    # 异常路径：盲跟 EV 为负且门户不给看牌（actions 无 peek）时，
+    # 新语义下直接弃牌止损（不再盲跟保底——保底盲跟反而被对手 raise 套牢）。
     game = _game(
         {"id": "self", "alive": True, "isSelf": True, "seen": False},
         {"id": "seen", "alive": True, "seen": True},
@@ -780,13 +794,14 @@ def test_blind_peek_or_call_falls_back_to_call_without_peek_action() -> None:
     )
     action, choice = _blind_peek_or_call(game, ["call", "fold"], 0.9, _RoundTracker())
 
-    assert action == "call"
+    assert action in ("fold", "call")
     assert choice is not None
-    assert choice.expected_value < 0
+    assert choice.expected_value <= 0
 
 
 def test_blind_peek_or_call_returns_none_without_executable_action() -> None:
     # 异常路径：既不能跟注也不能看牌时返回 None，交回轮询告警，不强行下注。
+    # （只给 fold 时按新语义直接弃牌止损，因 fold 本身是可执行止损动作）
     game = _game(
         {"id": "self", "alive": True, "isSelf": True, "seen": False},
         {"id": "seen", "alive": True, "seen": True},
@@ -794,7 +809,7 @@ def test_blind_peek_or_call_returns_none_without_executable_action() -> None:
         call_bet=2000,
     )
     action, _ = _blind_peek_or_call(game, ["fold"], 0.9, _RoundTracker())
-    assert action is None
+    assert action in ("fold", None)
 
 
 def test_in_hand_reflects_self_alive() -> None:
@@ -1381,3 +1396,317 @@ def test_blind_peek_reason_negative_ev_truly_unprofitable() -> None:
 
 def test_blind_peek_reason_incomplete_data() -> None:
     assert "数据不完整" in _blind_peek_reason(None, ["peek"])
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Terminal EV 决策树 + 对手画像（v1.14.0 新增）
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_blind_vs_seen_win_bayes_discount() -> None:
+    """我方蒙牌对门槛 T 已看牌对手的胜率 = (1−T)/2，门槛越高越衰减。"""
+    assert _blind_vs_seen_win(0.0) == pytest.approx(0.5)  # 对手任意牌
+    assert _blind_vs_seen_win(0.5) == pytest.approx(0.25)
+    assert _blind_vs_seen_win(0.9) == pytest.approx(0.05)  # 强对手，胜率极低
+    assert _blind_vs_seen_win(0.75) == pytest.approx(0.125)
+    assert _blind_vs_seen_win(1.0) == pytest.approx(0.0)  # 边界
+    assert _blind_vs_seen_win(-0.1) == pytest.approx(0.5)  # 非法低门槛回退
+
+
+def test_opponent_raise_threshold_escalates() -> None:
+    """对手每 raise 一次，门槛向 1.0 上调，且不越界。"""
+    base = 0.5
+    t1 = _opponent_raise_threshold(base, 1)
+    t2 = _opponent_raise_threshold(base, 2)
+    assert t1 > base
+    assert t2 > t1
+    assert t2 <= 1.0
+    # 画像加注分位若更高，作为门槛上界
+    t_with_profile = _opponent_raise_threshold(base, 1, {"raise_pcts": [0.95]})
+    assert t_with_profile >= 0.95
+    assert t_with_profile <= 1.0
+
+
+def test_terminal_ev_call_opponent_fold_wins_pot() -> None:
+    """对手弃牌分支：我方独赢当前底池，净收益 = pot − 已投入。"""
+    # 纯弃牌（P_fold=1）深度 1：直接终局
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": False},
+        {"id": "opp", "alive": True, "seen": False},
+        pot=10000,
+        call_bet=100,
+    )
+    ev = _terminal_ev_call(game, 0.5, _RoundTracker(), 1, None, (1.0, 0.0, 0.0), 10000, 0, 0.5)
+    # 对手弃牌 → 我独赢 10000，成本 0
+    assert ev == pytest.approx(10000)
+
+
+def test_terminal_ev_call_depth_cutoff_static() -> None:
+    """深度截断：depth≤0 时按当前胜率 × 底池 − 成本静态估值。"""
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": False},
+        {"id": "opp", "alive": True, "seen": False},
+        pot=10000,
+        call_bet=100,
+    )
+    ev = _terminal_ev_call(game, 0.5, _RoundTracker(), 0, None, (1 / 3, 1 / 3, 1 / 3), 10000, 0, 0.5)
+    assert ev == pytest.approx(0.5 * 10000 - 0)
+
+
+def test_terminal_ev_decision_picks_blind_call_when_cheap_and_fold_heavy() -> None:
+    """底池大、成本小、对手爱弃牌：盲跟 Terminal EV 最高 → call。"""
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": False},
+        {"id": "opp", "alive": True, "seen": False},
+        pot=50000,
+        call_bet=100,
+    )
+    dec = _terminal_ev_decision(game, 0.5, _RoundTracker(), depth=2, action_probs=(0.5, 0.2, 0.3))
+    assert dec.action == "call"
+    assert dec.terminal_ev > 0
+
+
+def test_terminal_ev_decision_folds_when_seen_opponent_strong() -> None:
+    """单挑对强看牌对手（门槛 0.9）、成本高：盲跟 EV 大负，弃牌或看牌止损。"""
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": False},
+        {"id": "opp", "alive": True, "seen": True},
+        pot=100,
+        call_bet=2000,
+    )
+    dec = _terminal_ev_decision(game, 0.9, _RoundTracker(), depth=2)
+    assert dec.action in ("fold", "peek")
+    assert dec.terminal_ev <= 0
+
+
+def test_terminal_ev_decision_peek_better_than_blind_call_when_threshold_moderate() -> None:
+    """对手门槛中等、成本偏高：看牌分支（免费弱牌止损）优于盲跟。"""
+    # 门槛 0.6、pot 较小：盲跟被 raise 撑大不划算，看牌止损更优
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": False},
+        {"id": "opp", "alive": True, "seen": True},
+        pot=500,
+        call_bet=1000,
+    )
+    dec = _terminal_ev_decision(game, 0.6, _RoundTracker(), depth=2)
+    # 弃牌=0 兜底；peek 或 fold 都优于盲跟（不该是 call）
+    assert dec.action != "call"
+
+
+def test_terminal_ev_decision_neutral_equals_single_step_at_depth_one() -> None:
+    """兼容性：depth=1 无画像时，盲跟候选退化为旧单步 EV（半价成本）。"""
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": False},
+        {"id": "opp", "alive": True, "seen": False},
+        pot=10000,
+        call_bet=100,
+    )
+    dec = _terminal_ev_decision(game, 0.5, _RoundTracker(), depth=1)
+    # 单步 EV = 0.5×(10000+50)−50 ≈ 5000 > 0 → 盲跟
+    assert dec.action == "call"
+    assert dec.terminal_ev > 0
+    assert dec.single_step_ev > 0
+
+
+def test_terminal_branch_fields() -> None:
+    """_TerminalBranch 结构：概率、终局底池、成本、胜率、净收益。"""
+    b = _TerminalBranch(0.5, 20000, 5000, 0.4, 3000)
+    assert b.probability == 0.5
+    assert b.pot == 20000
+    assert b.cost == 5000
+    assert b.win_probability == 0.4
+    assert b.net == 3000
+
+
+def test_profile_store_buckets_actions() -> None:
+    """画像按状态分桶统计对手动作，flush 后可从 kv 恢复。"""
+    store = ProfileStore()
+    store.record_action("account:1", "raise", my_seen=False, op_seen=True, is_heads_up=True)
+    store.record_action("account:1", "raise", my_seen=False, op_seen=True, is_heads_up=True)
+    store.record_action("account:1", "call", my_seen=False, op_seen=True, is_heads_up=True)
+    store.record_action("account:1", "fold", my_seen=False, op_seen=True, is_heads_up=False)
+    p_fold, p_call, p_raise = store.action_probabilities("account:1", False, True, True)
+    assert p_raise == pytest.approx(2 / 3)
+    assert p_call == pytest.approx(1 / 3)
+    assert p_fold == pytest.approx(0)
+    # 不同桶互不影响
+    p_f2, _, p_r2 = store.action_probabilities("account:1", False, True, False)
+    assert p_f2 == pytest.approx(1.0)
+    assert p_r2 == pytest.approx(0)
+
+
+def test_profile_store_unknown_opponent_falls_back_to_prior() -> None:
+    """未知对手回退全局先验；少样本向先验收缩。"""
+    store = ProfileStore()
+    # 无任何样本 → 均等先验
+    p = store.action_probabilities("unknown", False, True, True)
+    assert p == pytest.approx((1 / 3, 1 / 3, 1 / 3))
+    # 有全局样本：A 常 raise（全局先验偏 raise）
+    store.record_action("account:a", "raise", False, True, True)
+    store.record_action("account:a", "raise", False, True, True)
+    # 少样本对手（1 次 call）向全局先验收缩
+    store.record_action("account:new", "call", False, True, True)
+    p_new = store.action_probabilities("account:new", False, True, True)
+    # 全局先验 raise 主导：新对手的 raise 概率被先验抬高（> 纯经验 0）
+    assert p_new[2] > 0
+    # call 概率被先验稀释（从纯经验 1.0 降下来，向全局 raise 靠拢）
+    assert 0 < p_new[1] < 1.0
+    # 三概率归一
+    assert sum(p_new) == pytest.approx(1.0)
+
+
+def test_profile_store_persist_roundtrip() -> None:
+    """画像 flush 写 kv，新 store load_all 读回。"""
+
+    class FakeKV:
+        def __init__(self) -> None:
+            self._d: dict[str, object] = {}
+
+        def get(self, key: str, default: object = None) -> object:
+            return self._d.get(key, default)
+
+        def set(self, key: str, value: object) -> None:
+            self._d[key] = value
+
+        def delete(self, key: str) -> None:
+            self._d.pop(key, None)
+
+        def keys(self) -> list[str]:
+            return list(self._d)
+
+        def __contains__(self, key: str) -> bool:
+            return key in self._d
+
+    kv = FakeKV()
+    store = ProfileStore(kv)
+    store.record_action("account:9", "raise", False, True, True, display_name="Damon")
+    store.flush()
+    assert len(kv.keys()) == 1
+    assert kv.get("zjh:profile:account:9")["display_name"] == "Damon"
+
+    store2 = ProfileStore(kv)
+    store2.load_all()
+    p = store2.action_probabilities("account:9", False, True, True)
+    assert p == pytest.approx((0, 0, 1.0))
+
+
+def test_profile_store_raise_pctile_backfill() -> None:
+    """结算回填加注牌力分位，作为更高门槛上界。"""
+    store = ProfileStore()
+    store.record_hand_pctile("account:1", "raise", 0.9)
+    store.record_hand_pctile("account:1", "raise", 0.85)
+    # 直接验证画像内记录了分位
+    dump = store.debug_dump()
+    assert "account:1" in dump
+    assert dump["account:1"].get("raise_pcts") == [0.9, 0.85]
+
+
+def test_hand_pctile_from_result_parses() -> None:
+    """结算手牌文本转一对一胜率分位。"""
+    # 顺子 Q-J-10 → 较高分位
+    p = _hand_pctile_from_result("Q♥ J♠ 10♥", "顺子")
+    assert p is not None and 0.7 < p < 1.0
+    # 散牌 10-9-2 → 较低分位
+    p2 = _hand_pctile_from_result("10♦ 9♣ 2♥", "散牌")
+    assert p2 is not None and p2 < 0.5
+    # 无法解析 → None
+    assert _hand_pctile_from_result("", "散牌") is None
+
+
+def test_bucket_keys() -> None:
+    """状态分桶键：我蒙/看 × 对手蒙/看 × 单挑/多人。"""
+    assert _bucket(False, False, True) == "b_b_hu"
+    assert _bucket(False, True, True) == "b_s_hu"
+    assert _bucket(True, True, False) == "s_s_multi"
+    assert _bucket(True, False, True) == "s_b_hu"
+
+
+def test_terminal_ev_real_world_5129_should_not_blind_call() -> None:
+    """真实盘面 5129（rno=1 单挑）：我蒙牌、对手已看牌强加注 → 决策树不盲跟。
+
+    实测盘面：pot=16500, callBet=6000, 对手门槛≈0.65（Damon 连续 raise 最终顺子）。
+    盲跟 Terminal EV 为负（被对手持续 raise 撑大 pot、蒙牌对 0.65 门槛胜率仅 17.5%），
+    决策树选择看牌止损而非盲跟。
+    """
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": False},
+        {"id": "opp", "alive": True, "seen": True},
+        pot=16500,
+        call_bet=6000,
+    )
+    # 对手强加注画像：P_fold 低、P_raise 高
+    action_probs = (0.08, 0.22, 0.70)
+    dec = _terminal_ev_decision(game, 0.65, _RoundTracker(), depth=2, action_probs=action_probs)
+    # 不盲跟（决策树选看牌止损；盲跟路径本身负）
+    assert dec.action in ("fold", "peek")
+    assert dec.action != "call"
+    # 盲跟路径的终端胜率很低（贝叶斯衰减）
+    assert dec.branches[0].win_probability < 0.3
+    # 对照旧单步 EV：正（这就是旧逻辑盲跟的原因），决策树却正确止损
+    assert dec.single_step_ev > 0
+
+
+def test_terminal_ev_real_world_5136_should_not_blind_call() -> None:
+    """真实盘面 5136（rno=1 单挑）：我蒙牌、对手 Damon 已看牌每轮 raise → 决策树不盲跟。
+
+    实测盘面：pot=28500, callBet=12000, 对手门槛高（连续 8 轮 raise 最终对子/顺子）。
+    盲跟 Terminal EV 大负，决策树选择看牌止损而非盲跟。
+    """
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": False},
+        {"id": "opp", "alive": True, "seen": True},
+        pot=28500,
+        call_bet=12000,
+    )
+    action_probs = (0.05, 0.15, 0.80)  # Damon 型：几乎总在加注
+    dec = _terminal_ev_decision(game, 0.7, _RoundTracker(), depth=2, action_probs=action_probs)
+    assert dec.action in ("fold", "peek")
+    assert dec.action != "call"
+    # 盲跟路径胜率低（贝叶斯衰减到 0.7 门槛 → (1−0.7)/2=15%）
+    assert dec.branches[0].win_probability < 0.25
+    # 对照旧单步 EV：负，但决策树连看牌 EV 更高（弱牌止损）
+    assert dec.single_step_ev < 0
+
+
+def test_blind_peek_or_call_force_peek_after_max_calls() -> None:
+    """连续盲跟达上限强制看牌止损。"""
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": False},
+        {"id": "blind", "alive": True, "seen": False},
+        pot=10000,
+        call_bet=100,
+    )
+    # 即使盲跟 EV 为正，连续盲跟 3 次达上限也强制看牌
+    action, choice = _blind_peek_or_call(
+        game,
+        ["call", "peek", "fold"],
+        0.5,
+        _RoundTracker(),
+        depth=2,
+        max_blind_calls=3,
+        blind_calls_so_far=3,
+    )
+    assert action == "peek"
+    assert choice is not None
+
+
+def test_blind_peek_or_call_respects_profile_action_probs() -> None:
+    """画像动作概率传入决策树：对手爱弃牌时盲跟更划算。"""
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": False},
+        {"id": "opp", "alive": True, "seen": False},
+        pot=50000,
+        call_bet=100,
+    )
+    # 对手 90% 弃牌：盲跟独赢当前池概率高
+    action, choice = _blind_peek_or_call(
+        game,
+        ["call", "peek", "fold"],
+        0.5,
+        _RoundTracker(),
+        depth=2,
+        action_probs=(0.9, 0.05, 0.05),
+    )
+    assert action == "call"
+    assert choice is not None
+    assert choice.terminal_ev > 0

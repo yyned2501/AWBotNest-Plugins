@@ -1,5 +1,5 @@
 # =============================================================================
-# AWBotNest 插件：天空游戏 (skyGame) v1.13.3
+# AWBotNest 插件：天空游戏 (skyGame) v1.14.0
 #
 # 天空系列游戏的统一入口：Vue 配置界面左侧按游戏分组，各游戏逻辑拆到
 # games/ 子模块，互不干扰。当前收录：
@@ -14,7 +14,8 @@
 #   games/zhajinhua.py   炸金花轮询编排入口（加入/轮询/弃牌确认/启停）
 #   games/zjh_hand.py    炸金花手牌解析（花色点数/牌型归一/查表键值）
 #   games/zjh_state.py   炸金花牌局公开状态读取（玩家列表/存活/看牌/自身标识）
-#   games/zjh_model.py   炸金花概率模型、门槛推断、轮询跟踪、范围上限/反诈唬与 EV 决策
+#   games/zjh_model.py   炸金花概率模型、门槛推断、轮询跟踪、范围上限/反诈唬、Terminal EV 决策树
+#   games/zjh_profile.py 炸金花按玩家 ID 的对手画像（动作频率分桶 + 跨局 kv 持久化）
 #   games/zjh_notify.py  炸金花通知与决策日志
 #   games/zjh_prob.py    炸金花穷举概率表（自动生成）
 #   games/horse.py       养马养护循环
@@ -28,7 +29,7 @@ from .games import hdsky_auth
 __plugin__ = {
     "name": "天空游戏",
     "id": "skyGame",
-    "version": "1.13.3",
+    "version": "1.14.0",
     "author": "Yy",
     "description": "天空系列游戏统一入口：炸金花自动参与、养马自动养护，左侧按游戏分组配置。",
     "scope": "user",
@@ -321,6 +322,41 @@ __plugin__ = {
             "help": "每个已看牌对手有该比例概率是纯空气牌（诈唬），抬高我方胜率让 bot 更敢跟。设 0 = 关闭反诈唬。",
             "order": 30,
         },
+        "zjh_terminal_depth": {
+            "type": "slider",
+            "default": 2,
+            "label": "蒙牌决策树深度(轮)",
+            "section": "炸金花",
+            "min": 1,
+            "max": 3,
+            "step": 1,
+            "show_if": {"zjh_enabled": True},
+            "help": "蒙牌盲跟用决策树推演未来 N 轮对手动作再算终局 EV（而非只看当前一步）。设 1 = 退回旧单步 EV 行为。",
+            "order": 31,
+        },
+        "zjh_blind_max_calls": {
+            "type": "slider",
+            "default": 3,
+            "label": "蒙牌连续盲跟上限(轮)",
+            "section": "炸金花",
+            "min": 0,
+            "max": 10,
+            "step": 1,
+            "show_if": {"zjh_enabled": True},
+            "help": "蒙牌连续盲跟达该轮数后强制看牌止损（对手持续加注是强牌信号，避免蒙牌闭眼跟被套牢）。"
+            "设 0 = 不限，纯按终局 EV 决策。",
+            "order": 32,
+        },
+        "zjh_profile_enabled": {
+            "type": "boolean",
+            "default": True,
+            "label": "对手画像",
+            "section": "炸金花",
+            "show_if": {"zjh_enabled": True},
+            "help": "按玩家 ID 跨局统计每个对手在各状态下的跟注/加注/弃牌频率，供蒙牌决策树预测对手动作。"
+            "未知对手用全局先验。关闭后决策树用均等先验。",
+            "order": 33,
+        },
         "zjh_notify_join": {
             "type": "boolean",
             "default": True,
@@ -351,6 +387,16 @@ __plugin__ = {
         },
     },
     "changelog": (
+        "v1.14.0 更新：\n"
+        "- 蒙牌决策从「单步 EV」升级为「Terminal EV 决策树」：递归推演未来数轮对手跟/加/弃动作，"
+        "条件胜率随对手加注贝叶斯衰减，求到达摊牌/弃牌的终局期望。修复单步 EV 把「跟这手就摊牌」当事实、"
+        "而实际单挑无开牌就停不下来、对手持续加注把底池滚大导致的蒙牌盲跟巨亏"
+        "（实测 5129 局蒙牌 10-9-2 输 81000、5136 输 13 万；决策树现判看牌/弃牌止损）\n"
+        "- 新增按玩家 ID 的对手画像：跨局统计每个对手在各状态（我蒙/看 × 对手蒙/看 × 单挑/多人）下的"
+        "跟/加/弃频率，供决策树预测对手动作；未知对手用全局先验。画像存 kv 延迟落盘，结算回填真实手牌分位\n"
+        "- 新增连续盲跟上限：蒙牌连续盲跟达配置轮数后强制看牌止损，避免「蒙牌闭眼跟」被对手加注套牢\n"
+        "- 新增配置：zjh_terminal_depth（决策树深度，1=退回旧单步 EV）、zjh_blind_max_calls（连续盲跟上限）、"
+        "zjh_profile_enabled（对手画像开关），Vue 界面同步新增「蒙牌决策」卡片\n"
         "v1.13.3 更新：\n"
         "- 修复蒙牌 EV≥0 时盲跟后被对手加注导致后续投入翻倍的巨额亏损：蒙牌 EV≥0 时优先用 showdown/open "
         "直接结束本轮，避免对手加注后继续跟注；两者都不开放才退回盲跟保底\n"

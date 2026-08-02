@@ -45,6 +45,9 @@ const DEFAULTS = {
   zjh_call_range_cap: 85,
   zjh_raise_range_floor: 75,
   zjh_bluff_rate: 8,
+  zjh_terminal_depth: 2,
+  zjh_blind_max_calls: 3,
+  zjh_profile_enabled: true,
   zjh_notify_join: true,
   zjh_notify_hand: true,
   zjh_notify_fold_confirm: false,
@@ -309,8 +312,13 @@ async function renewNow() {
           <section class="card">
             <div class="card-h">决策策略</div>
             <span class="help">
-              完全按期望收益（EV）决策，不再按牌型勾选：胜率 ×（底池 + 跟注成本）− 跟注成本 ≥ 0 即跟注，否则弃牌。
+              已看牌完全按期望收益（EV）决策：胜率 ×（底池 + 跟注成本）− 跟注成本 ≥ 0 即跟注，否则弃牌。
               胜率随剩余对手数衰减；已看牌且继续下注的对手按其行动时底池赔率反推牌力门槛，再做条件胜率。
+            </span>
+            <span class="help" style="margin-top:8px">
+              蒙牌用「终局 EV 决策树」：递归推演未来数轮对手的跟注/加注/弃牌，条件胜率随对手加注贝叶斯衰减，
+              求到达摊牌/弃牌时的终局期望，再和看牌、弃牌比较。避免单步 EV 把「跟这手就摊牌」当事实——
+              实际门户单挑对手可持续加注把底池滚大，蒙牌闭眼跟到强制摊牌常常巨亏。
             </span>
           </section>
 
@@ -375,6 +383,30 @@ async function renewNow() {
               <input v-model.number="cfg.zjh_bluff_rate" type="range" min="0" max="30" step="1" />
               <span class="help">每个已看牌对手有该比例概率是纯空气牌（诈唬），抬高我方胜率。0% = 关闭。</span>
             </div>
+          </section>
+
+          <section class="card">
+            <div class="card-h">蒙牌决策（终局 EV 决策树）</div>
+            <span class="help">
+              蒙牌不再只看当前一步的期望收益，而是推演未来几轮：对手每轮跟/加/弃（概率来自对手画像），
+              我方蒙牌胜率随对手连续加注衰减（门槛贝叶斯上调），求到达摊牌/弃牌的终局期望。
+              连续盲跟过多会被强制看牌止损，避免像单步 EV 那样闭眼跟到强制摊牌巨亏。
+            </span>
+            <div class="fld">
+              <span class="lbl">决策树深度：{{ cfg.zjh_terminal_depth }} 轮</span>
+              <input v-model.number="cfg.zjh_terminal_depth" type="range" min="1" max="3" step="1" />
+              <span class="help">推演未来 N 轮对手动作再算终局 EV。1 = 退回旧单步 EV 行为。</span>
+            </div>
+            <div class="fld">
+              <span class="lbl">连续盲跟上限：{{ cfg.zjh_blind_max_calls }} 轮</span>
+              <input v-model.number="cfg.zjh_blind_max_calls" type="range" min="0" max="10" step="1" />
+              <span class="help">蒙牌连续盲跟达该轮数后强制看牌止损。0 = 不限，纯按终局 EV。</span>
+            </div>
+            <label class="row switch">
+              <input v-model="cfg.zjh_profile_enabled" type="checkbox" />
+              <span>启用对手画像</span>
+            </label>
+            <span class="help">按玩家 ID 跨局统计每个对手在各状态下的跟/加/弃频率，供决策树预测动作。未知对手用全局先验。</span>
           </section>
 
           <section class="card">

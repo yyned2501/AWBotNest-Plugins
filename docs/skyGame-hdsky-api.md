@@ -63,13 +63,17 @@
 - 多人蒙牌（非单挑）按 EV 决策「蒙还是看」，优先级低于单挑分支（`_blind_peek_or_call()`）：蒙牌手牌未知，按平均单挑胜率 0.5 估计，蒙牌跟注成本取 `callBet/2`（半价）计算增量 EV；EV ≥ 0 继续蒙牌半价盲跟，EV < 0 才看牌买信息（看牌免费，牌大再上、牌小交给看牌后 EV 弃牌）。看牌响应后的实际手牌决策仍走 `_act_on_hand()`。
 - 蒙牌跟注成本为已看牌的一半（实测同一 `callBet=3000` 下，蒙牌 `+1500 跟注`、已看牌 `+3000 跟注`）；`peek`（看牌）动作本身不扣费（实测看牌前后 `player.bet` 无增量、`lastAction` 无下注文本），其代价仅是失去后续跟注的半价优惠（看牌后变为 `seen`，每次跟注按全价 `callBet`）。这是“蒙牌 EV 决策”和“单挑蒙牌不看牌直接开”的共同依据。
 - 参与的对局结束（`roundId` 变化）时，推送最终结果通知：手牌、牌型、存活状态。
+- **开牌动作仅在单挑出现（实测）**：`open`/`showdown` 只在存活玩家=2（单挑）时出现在 `actions`；多人局 actions 只有 `peek`/`fold`/`call`/`raise`。指南「场上>3人不比牌」被门户天然满足，无需插件限人数。
+- **强制摊牌（实测）**：单挑约 6-8 轮后 `phase` 变为 `"showdown"`，`actions` 只剩 `fold`/`raise`/`showdown`（不再有 `call`/`open`），必须摊牌结束。单挑期间对手可每轮 `raise`，`callBet` 递增（实测 3000→24000），pot 可滚到 20-29 万。
+- **`showdown` 成本 = 当前 `callBet`（单倍）**：实测结算时我方 delta 等于累计投入全额亏损，无双倍比牌费。
+- **结算数据源 `game.lastResult`**：`GET /api/portal/zhajinhua` 每轮响应的 `game.lastResult` 含上一局结算：`roundId`、`winner`、`pot`、`winnerReturn`、`rake`（约 0.5%）、`selfDelta`、`players[]`（含 `displayName`、`bet`、`delta`、`result`（获胜/比牌落败/已弃牌）、`handType`、`isWinner`）。`players` 无 `id`，需用牌局 GET 的 `displayName→id` 映射关联（对手画像结算回填依据）。
+- `player.bet` 为**累计投入**（实测：3000 底注 + 1500 跟注 = 4500；单挑每轮随 `callBet` 递增）。
 - 遛马动作用于冷却拒绝时返回外层 `ok: true`、`result.code == "cooldown"`、`result.remainMs`（剩余毫秒）、`result.message`；冷却约 45 分钟，且期间 `state.canWalk` 仍为 `true`，不能用来判断是否可遛。插件记下 `remainMs` 换算的到期时间退避，未到不再尝试；`cooldown` 不计入失败计数，连续真失败 3 次后跳过本轮。（`horse.py` 的 `_care_once()`）
 - 养马实测字段：`stats.walkCountToday/walkMax`（每日遛马上限）、`stats.feedCountToday/feedMax`、`profile.satiety`（饱腹度）、`horse.balance`（银元）、`profile.state.{isDead,canWalk,canFeed}`。
 
 ## 待现场验证
 
 - `showdown` 实测只需 `{ "action": "showdown" }`（多次提交均 `ok: true`，无目标/确认字段）；`open` 同为开牌动作但尚未在实测中单独提交验证。
-- 对手发起应战后 `game.phase` 的实际取值；当前插件不会用它阻断行动。
-- `player.bet` 是总投入还是本轮增量尚未最终确认（当前仅用相邻轮询的增量识别下注行为）；但蒙牌/看牌费用规则已实测确认：蒙牌跟注为 `callBet/2`、看牌后跟注为 `callBet`、`peek` 动作本身不扣费。
+- 对手发起应战后 `game.phase` 的更多取值；当前插件不会用它阻断行动（仅单挑强制摊牌阶段观察到 `"showdown"`）。
 
 发生应战失败时，记录并保留（脱敏后）`roundId`、`phase`、`actions`、`self` 关键状态与 POST 错误，用于补全本节。

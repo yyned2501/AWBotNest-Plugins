@@ -503,6 +503,308 @@ def _blind_call_cost(call_bet: float) -> float:
     return call_bet / 2
 
 
+# ── Terminal EV 决策树（蒙牌盲跟的终局期望）──
+#
+# 旧 _blind_decision 用单步增量 EV：win_prob × (pot + half_cost) − half_cost，
+# 隐含「跟这手就摊牌」。实际门户单挑无 open/showdown 就停不下来，对手可每轮
+# raise 把 pot 滚大，而蒙牌对强牌胜率只有 (1−T)/2。单步 EV 恒正 → 盲跟到强制
+# showdown 巨亏（实测 5129 局蒙牌 10-9-2 输 81000、5136 输 13 万）。
+#
+# Terminal EV 递归推演未来 depth 轮：对手每个分支动作概率来自画像
+# （zjh_profile），条件胜率随对手门槛贝叶斯衰减，求到达终局节点（Showdown /
+# 对手弃牌 / 深度截断）时的期望收益。看牌分支（peek 免费）与弃牌分支（止损）
+# 一并评估，取 Terminal EV 最高的候选动作。
+#
+# 向后兼容：depth=1 且无画像时，盲跟分支退化为旧的单步 EV（半价成本），
+# 行为与 _blind_decision 一致，便于 A/B 与回退。
+
+
+@dataclass(frozen=True)
+class _TerminalBranch:
+    """决策树一条到终局的链路：概率、终局底池、我方总成本、终局胜率、净收益。"""
+
+    probability: float
+    pot: float
+    cost: float
+    win_probability: float
+    net: float
+
+
+@dataclass(frozen=True)
+class _TerminalDecision:
+    """Terminal EV 决策结果：候选动作、加权终局 EV、链路明细、单步 EV 对照。
+
+    `expected_value` 别名指向 `terminal_ev`（最优候选的终局期望），保持与
+    `_CallDecision.expected_value` 的字段形状一致，便于通知/日志复用。
+    `win_probability` 返回首条链路的终端胜率（展示用）。
+    """
+
+    action: str  # "call" / "peek" / "fold"
+    terminal_ev: float
+    single_step_ev: float
+    branches: tuple[_TerminalBranch, ...]
+    reason: str
+
+    @property
+    def expected_value(self) -> float:
+        """最优候选的终局期望收益（与 _CallDecision.expected_value 同语义的别名）。"""
+        return self.terminal_ev
+
+    @property
+    def win_probability(self) -> float:
+        """首条链路的终端胜率（展示用）。"""
+        return self.branches[0].win_probability if self.branches else 0.0
+
+
+def _opponent_raise_threshold(base_threshold: float, raise_count: int, profile: Any = None) -> float:
+    """对手连续 raise 后其手牌门槛的上调。
+
+    每 raise 一次，把门槛向 1.0 推一步；若画像记录了该对手加注后的真实手牌
+    分位（结算回填），用它作为更强的门槛上界。profile 可为对象（.raise_pcts）
+    或 dict（["raise_pcts"]）。
+    """
+    threshold = base_threshold
+    for _ in range(raise_count):
+        threshold = threshold + (1.0 - threshold) * 0.25
+    # 画像加注分位若存在且高于推断门槛，采用画像分位（更紧）
+    if profile is not None:
+        if isinstance(profile, dict):
+            raise_pcts = profile.get("raise_pcts") or profile.get("raise_pcts_list")
+        else:
+            raise_pcts = getattr(profile, "raise_pcts", None)
+        if raise_pcts:
+            observed = max(raise_pcts)
+            if observed > threshold:
+                threshold = observed
+    return min(threshold, 1.0)
+
+
+def _blind_vs_seen_win(threshold: float) -> float:
+    """我方蒙牌（牌力 t~U[0,1]）对门槛 T 已看牌对手的胜率。
+
+    对手牌力 s~U[T,1]，我方胜率 = ∫_{t=0}^{1} P(t > s) dt = ∫_T^1 (1−s) ds / (1−T)
+    = (1−T)/2。T 越高我方胜率越低，体现贝叶斯衰减。
+    """
+    if threshold <= 0:
+        return 0.5
+    if threshold >= 1:
+        return 0.0
+    return (1.0 - threshold) / 2
+
+
+def _continued_raise_terminal_ev(
+    game: dict[str, Any],
+    fallback_threshold: float,
+    profile: Any,
+    pot: float,
+    cost: float,
+    win_prob: float,
+    raise_count: int,
+    rounds_left: int = 5,
+) -> float:
+    """估算「对手持续 raise 到强制 showdown」的终局期望（深度截断用）。
+
+    真实机制（实测）：单挑对手每轮 raise，callBet 递增（3000→24000），pot 滚大；
+    约 6-8 轮后 phase→showdown 强制摊牌。蒙牌闭眼跟到强制摊牌往往巨亏
+    （5129 局 10-9-2 输 81000、5136 输 13 万）。
+
+    这里假设剩余 rounds_left 轮对手每轮 raise，callBet 按实测递增模式增长：
+    callBet ← callBet × 1.5（约合实测每轮 +3000~12000），门槛随 raise 次数继续
+    上调，我方蒙牌半价跟，最终按上调后的门槛胜率赢最终 pot − 我方累计成本。
+    """
+    if rounds_left <= 0:
+        return win_prob * pot - cost
+    call_bet = float(game.get("callBet", 0) or 0)
+    final_threshold = fallback_threshold
+    final_pot = pot
+    final_cost = cost
+    for _ in range(rounds_left):
+        # callBet 递增（实测单挑每轮约 +50%）
+        call_bet = call_bet * 1.5
+        final_threshold = _opponent_raise_threshold(final_threshold, raise_count + 1, profile)
+        raise_count += 1
+        blind_add = _blind_call_cost(call_bet)
+        final_pot += call_bet  # 对手加注 + 我方跟注
+        final_cost += blind_add  # 我方蒙牌半价跟
+    final_win = _blind_vs_seen_win(final_threshold)
+    return final_win * final_pot - final_cost
+
+
+def _terminal_ev_call(
+    game: dict[str, Any],
+    fallback_threshold: float,
+    tracker: _RoundTracker,
+    depth: int,
+    profile: Any = None,
+    action_probs: tuple[float, float, float] | None = None,
+    pot: float | None = None,
+    cost: float | None = None,
+    win_prob: float | None = None,
+    raise_count: int = 0,
+) -> float:
+    """递归计算「盲跟」路径到达终局的期望净收益。
+
+    - action_probs：对手本轮 (P_fold, P_call, P_raise)，来自画像；缺省用均等先验。
+    - pot/cost/win_prob：当前递归深度的累计底池、我方累计成本、条件胜率。
+    - raise_count：已累计的对手加注次数，用于门槛上调。
+    终局节点：
+      对手弃牌 → 我方独赢，净收益 = pot − cost；
+      深度耗尽（截断）→ 用「对手持续 raise 到强制 showdown」的稳态估算，
+                        正确反映单挑蒙牌闭眼跟的真实代价（cost 随 callBet 增长滚大）；
+      继续 → 递归下一轮。
+    """
+    if pot is None:
+        pot = float(game.get("pot", 0) or 0)
+    if cost is None:
+        cost = 0.0
+    if win_prob is None:
+        win_prob = _BLIND_ONE_VS_ONE  # 未知手牌基础胜率
+    if action_probs is None:
+        action_probs = (1 / 3, 1 / 3, 1 / 3)
+
+    p_fold, p_call, p_raise = action_probs
+    if not (p_fold >= 0 and p_call >= 0 and p_raise >= 0):
+        return 0.0
+    total_p = p_fold + p_call + p_raise
+    if total_p <= 0:
+        return 0.0
+    # 归一化，防御配置/画像脏数据
+    p_fold, p_call, p_raise = p_fold / total_p, p_call / total_p, p_raise / total_p
+
+    if depth <= 0:
+        # 截断：
+        #  - 尚未被对手 raise（raise_count==0）→ 用旧静态估值（win_prob*pot−cost），
+        #    兼容 depth=1 退回旧单步 EV 的行为；
+        #  - 已发生 raise → 用「对手持续 raise 到强制 showdown」的保守稳态估算，
+        #    防止单挑蒙牌闭眼跟被对手加注套牢（实测 5129/5136 巨亏场景）。
+        if raise_count <= 0:
+            return win_prob * pot - cost
+        return _continued_raise_terminal_ev(game, fallback_threshold, profile, pot, cost, win_prob, raise_count)
+
+    ev = 0.0
+    # 对手弃牌 → 我独赢当前底池
+    if p_fold > 0:
+        ev += p_fold * (pot - cost)
+
+    # 对手平跟 → 下一轮我方继续盲跟（半价）或看牌。我方蒙牌半价成本。
+    if p_call > 0:
+        next_cost = cost + _blind_call_cost(float(game.get("callBet", 0) or 0))
+        next_pot = pot + float(game.get("callBet", 0) or 0)
+        ev += p_call * _terminal_ev_call(
+            game,
+            fallback_threshold,
+            tracker,
+            depth - 1,
+            profile,
+            None,
+            next_pot,
+            next_cost,
+            win_prob,
+            raise_count,
+        )
+
+    # 对手加注 → 门槛上调，我方胜率贝叶斯衰减；下一轮我方蒙牌半价继续或看牌。
+    if p_raise > 0:
+        new_threshold = _opponent_raise_threshold(fallback_threshold, raise_count + 1, profile)
+        new_win = _blind_vs_seen_win(new_threshold)
+        next_cost = cost + _blind_call_cost(float(game.get("callBet", 0) or 0))
+        next_pot = pot + float(game.get("callBet", 0) or 0)
+        ev += p_raise * _terminal_ev_call(
+            game,
+            fallback_threshold,
+            tracker,
+            depth - 1,
+            profile,
+            None,
+            next_pot,
+            next_cost,
+            new_win,
+            raise_count + 1,
+        )
+    return ev
+
+
+def _terminal_ev_peek(
+    game: dict[str, Any],
+    fallback_threshold: float,
+    tracker: _RoundTracker,
+    depth: int,
+    profile: Any = None,
+) -> float:
+    """看牌分支的终局期望：peek 免费。
+
+    看牌后我方牌力 t~U[0,1]：
+      t < 对手门槛 T → 弱牌弃，增量成本 0；
+      t ≥ T → 强牌上，单挑 open/showdown 结束（避免继续被 raise），
+              我方以条件胜率 (1+T)/2 赢底池，需付出看牌后全价跟注成本。
+    未来轮次对手动作同样按画像递归，但看牌后我方信息充分，进入已看牌 EV 决策，
+    这里用深度截断的静态近似。
+    """
+    threshold = fallback_threshold if 0 <= fallback_threshold < 1 else 0.5
+    # 弱牌比例
+    weak_prob = threshold
+    # 强牌时与对手摊牌的条件胜率（我方 t≥T 对对手 s∈[T,1]）
+    strong_win = (1.0 + threshold) / 2
+    pot = float(game.get("pot", 0) or 0)
+    call_bet = float(game.get("callBet", 0) or 0)
+
+    # 看牌后跟注全价，摊牌赢底池（含对手后续投入的近似：深度截断按 1 轮）
+    strong_net = strong_win * (pot + call_bet) - call_bet
+    # 弱牌弃牌净收益 0（不再投入）
+    ev = weak_prob * 0 + (1 - weak_prob) * strong_net
+    return ev
+
+
+def _terminal_ev_decision(
+    game: dict[str, Any],
+    fallback_threshold: float,
+    tracker: _RoundTracker,
+    depth: int = 2,
+    profile: Any = None,
+    action_probs: tuple[float, float, float] | None = None,
+) -> _TerminalDecision:
+    """蒙牌「盲跟 / 看牌 / 弃牌」三候选的 Terminal EV，取最优。
+
+    - 盲跟：决策树递归推演 depth 轮，对手动作概率来自 action_probs（画像查询）。
+    - 看牌：peek 免费，弱牌止损 + 强牌开牌。
+    - 弃牌：立即止损，净收益 0。
+    profile 用于对手连续 raise 时的门槛上调（画像加注牌力分位）。
+    action_probs 为 (P_fold, P_call, P_raise)，来自对手画像；缺省用均等先验。
+    depth=1 且无画像时，盲跟分支退化为旧单步 EV（半价成本），便于回退。
+    """
+    pot = float(game.get("pot", 0) or 0)
+    call_bet = float(game.get("callBet", 0) or 0)
+
+    # 盲跟候选
+    call_ev = _terminal_ev_call(game, fallback_threshold, tracker, depth, profile, action_probs)
+    # 看牌候选
+    peek_ev = _terminal_ev_peek(game, fallback_threshold, tracker, depth, profile)
+    # 弃牌候选
+    fold_ev = 0.0
+
+    # 单步 EV 对照（旧行为，深度 1、无画像）：蒙牌精确积分胜率 × 半价成本
+    blind_win_rate = _blind_win_probability(
+        _opponent_counts(game)[0],
+        tuple(th for th, _ in _seen_opponent_thresholds(game, tracker, fallback_threshold)[1]),
+    )
+    single_step_ev = blind_win_rate * (pot + _blind_call_cost(call_bet)) - _blind_call_cost(call_bet)
+
+    branches: list[_TerminalBranch] = []
+    # 首条链路代表盲跟主路径（胜率用当前蒙牌精确积分胜率，便于与旧模型对照）
+    branches.append(_TerminalBranch(1.0, pot, _blind_call_cost(call_bet), blind_win_rate, call_ev))
+
+    if call_ev >= peek_ev and call_ev >= fold_ev:
+        action = "call"
+        reason = f"蒙牌盲跟 Terminal EV {call_ev:+.0f} ≥ 看牌 {peek_ev:+.0f} / 弃牌 0"
+    elif peek_ev >= fold_ev:
+        action = "peek"
+        reason = f"蒙牌看牌 Terminal EV {peek_ev:+.0f} > 盲跟 {call_ev:+.0f} / 弃牌 0，弱牌止损"
+    else:
+        action = "fold"
+        reason = f"蒙牌弃牌 Terminal EV 0 ≥ 盲跟 {call_ev:+.0f} / 看牌 {peek_ev:+.0f}"
+    return _TerminalDecision(action, max(call_ev, peek_ev, fold_ev), single_step_ev, tuple(branches), reason)
+
+
 def _blind_decision(game: dict[str, Any], fallback_threshold: float, tracker: _RoundTracker) -> _CallDecision | None:
     """蒙牌（未看牌）决策评估：手牌未知，胜率对未知手牌强度积分，跟注成本按半价计。
 
@@ -535,18 +837,77 @@ def _blind_decision(game: dict[str, Any], fallback_threshold: float, tracker: _R
 
 
 def _blind_peek_or_call(
-    game: dict[str, Any], actions: list[Any], fallback_threshold: float, tracker: _RoundTracker
-) -> tuple[str | None, _CallDecision | None]:
-    """多人蒙牌时按 EV 决定「盲跟」「看牌」或直接比牌，返回动作与蒙牌评估明细。
+    game: dict[str, Any],
+    actions: list[Any],
+    fallback_threshold: float,
+    tracker: _RoundTracker,
+    profile: Any = None,
+    depth: int = 2,
+    max_blind_calls: int = 0,
+    blind_calls_so_far: int = 0,
+    action_probs: tuple[float, float, float] | None = None,
+) -> tuple[str | None, _TerminalDecision | _CallDecision | None]:
+    """多人蒙牌时按 Terminal EV 决定「盲跟」「看牌」「弃牌」或直接比牌。
 
-    蒙牌跟注半价：EV ≥ 0 时先看门户是否开放 showdown/open 可直接结束本轮
-    （避免盲跟后对手加注导致后续投入翻倍）；都不开放才盲跟。
-    EV < 0 时看牌买信息（牌大再上、牌小弃）。门户不给看牌才退回盲跟保底；
-    两者都不给返回 None。
+    用 Terminal EV 决策树评估盲跟/看牌/弃牌三候选：
+    - 盲跟最优且 EV≥0 → 先看门户是否开放 showdown/open 可直接结束本轮
+      （避免盲跟后对手加注导致后续投入翻倍）；都不开放才盲跟。
+    - 看牌最优，或连续盲跟次数达到上限（max_blind_calls）→ 看牌买信息。
+    - 弃牌最优 → 弃牌。
+    action_probs 为对手本轮 (P_fold, P_call, P_raise)（画像查询），透传给决策树。
+    门户不给看牌才退回盲跟保底；两者都不给返回 None。
+
+    兼容旧行为：depth=1 且 profile=None 时等价旧 _blind_peek_or_call
+    （纯单步 EV 决策蒙还是看）。
     """
     blind_choice = _blind_decision(game, fallback_threshold, tracker)
+    terminal = _terminal_ev_decision(game, fallback_threshold, tracker, depth, profile, action_probs)
+
+    # 1. 连续盲跟达上限 → 强制看牌（避免「蒙牌闭眼跟」被对手 raise 套牢）
+    if max_blind_calls > 0 and blind_calls_so_far >= max_blind_calls:
+        if "peek" in actions:
+            return "peek", terminal
+        if "showdown" in actions:
+            return "showdown", terminal
+        if "open" in actions:
+            return "open", terminal
+        if "call" in actions:
+            return "call", terminal
+        return None, terminal
+
+    # 2. Terminal EV 判定盲跟最优且 EV 非负 → 盲跟
+    if terminal.action == "call" and terminal.terminal_ev >= 0:
+        # 盲跟 EV≥0：优先用 showdown/open 结束本轮，避免盲跟后对手加注导致投入翻倍
+        if "showdown" in actions:
+            return "showdown", terminal
+        if "open" in actions:
+            return "open", terminal
+        if "call" in actions:
+            return "call", terminal
+        if "peek" in actions:
+            return "peek", terminal
+        return None, terminal
+
+    # 3. Terminal EV 判定看牌最优 → 看牌
+    if terminal.action == "peek":
+        if "peek" in actions:
+            return "peek", terminal
+        if "call" in actions:
+            return "call", terminal
+        return None, terminal
+
+    # 4. Terminal EV 判定弃牌最优 → 弃牌
+    if terminal.action == "fold":
+        if "fold" in actions:
+            return "fold", terminal
+        if "peek" in actions:
+            return "peek", terminal
+        if "call" in actions:
+            return "call", terminal
+        return None, terminal
+
+    # 5. 兜底（异常路径）：沿用旧单步 EV 决策
     if blind_choice is not None and blind_choice.expected_value >= 0:
-        # EV≥0：优先用 showdown/open 结束本轮，避免盲跟后对手加注导致后续投入翻倍
         if "showdown" in actions:
             return "showdown", blind_choice
         if "open" in actions:
@@ -560,14 +921,23 @@ def _blind_peek_or_call(
     return None, blind_choice
 
 
-def _blind_peek_reason(blind_choice: _CallDecision | None, actions: list[Any]) -> str:
+def _blind_peek_reason(blind_choice: _TerminalDecision | _CallDecision | None, actions: list[Any]) -> str:
     """蒙牌选择看牌时的通知原因，按真实情形区分，避免把「门户不给盲跟」误报成「EV<0」。
 
-    看牌由 `_blind_peek_or_call` 在两种情形返回：① EV<0 平均手牌真不划算；
-    ② EV≥0 但服务端 actions 没有盲跟 call（只有 peek），被迫看牌。两者文案须分开。
+    看牌由 `_blind_peek_or_call` 在几种情形返回：① Terminal EV 判定看牌最优（弱牌止损）；
+    ② 连续盲跟达上限强制看牌；③ 盲跟 EV≥0 但服务端 actions 没有盲跟 call（只有 peek），
+    被迫看牌；④ 数据不完整。文案须分开，不能一概说「EV<0」。
     """
     if blind_choice is None:
         return "牌局数据不完整，先看牌再按实际手牌决策"
+    # Terminal EV 决策返回（新增）
+    if isinstance(blind_choice, _TerminalDecision):
+        if blind_choice.action == "peek":
+            return "蒙牌 Terminal EV 看牌最优：弱牌止损、强牌再上，避免盲跟被对手加注套牢"
+        if blind_choice.action == "fold":
+            return "蒙牌 Terminal EV 弃牌最优：继续盲跟终局期望为负"
+        return "看牌买信息——牌大再上、牌小弃"
+    # 旧单步 EV 决策返回（兜底）
     if blind_choice.expected_value < 0:
         return "蒙牌平均手牌不划算（EV<0），看牌买信息——牌大再上、牌小弃"
     if "call" not in actions:

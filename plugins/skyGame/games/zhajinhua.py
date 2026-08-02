@@ -41,6 +41,7 @@ from .zjh_model import (
     _blind_decision,
     _blind_peek_or_call,
     _blind_peek_reason,
+    _blind_vs_seen_win,
     _blind_win_probability,
     _call_decision,
     _Choice,
@@ -51,6 +52,7 @@ from .zjh_model import (
     _hand_threshold_for_actual_win_probability,
     _is_raise_action,
     _opponent_hand_threshold,
+    _opponent_raise_threshold,
     _opponent_threshold,
     _OpponentSnapshot,
     _PendingFold,
@@ -63,6 +65,10 @@ from .zjh_model import (
     _seen_opponent_ranges,
     _SeenRange,
     _snapshot_for_actor,
+    _terminal_ev_call,
+    _terminal_ev_decision,
+    _TerminalBranch,
+    _TerminalDecision,
     _update_round_tracker,
 )
 from .zjh_notify import (
@@ -73,7 +79,8 @@ from .zjh_notify import (
     _log_decision,
     _notify_game_result,
 )
-from .zjh_state import _in_hand, _opponent_counts
+from .zjh_profile import feed_last_result, get_store, reset_store
+from .zjh_state import _in_hand, _is_self, _opponent_counts, _player_key, _players
 
 __all__ = [
     "_FOLD_CONFIRM_MAX_RETRIES",
@@ -84,6 +91,8 @@ __all__ = [
     "_RoundTracker",
     "_SeenRange",
     "_Choice",
+    "_TerminalBranch",
+    "_TerminalDecision",
     "_acquire_hand_after_peek",
     "_act_on_hand",
     "_action_notification",
@@ -93,6 +102,7 @@ __all__ = [
     "_blind_notification",
     "_blind_peek_or_call",
     "_blind_peek_reason",
+    "_blind_vs_seen_win",
     "_blind_win_probability",
     "_call_decision",
     "_choose",
@@ -109,6 +119,7 @@ __all__ = [
     "_notify_game_result",
     "_opponent_counts",
     "_opponent_hand_threshold",
+    "_opponent_raise_threshold",
     "_opponent_threshold",
     "_parse_hand",
     "_range_factor",
@@ -117,7 +128,13 @@ __all__ = [
     "_seen_opponent_ranges",
     "_self_hand",
     "_snapshot_for_actor",
+    "_terminal_ev_call",
+    "_terminal_ev_decision",
+    "_train_opponent_action",
     "_update_round_tracker",
+    "feed_last_result",
+    "get_store",
+    "reset_store",
     "start",
     "stop",
 ]
@@ -250,6 +267,51 @@ async def _act_on_hand(
     return False
 
 
+def _train_opponent_action(
+    store: object,
+    game: dict[str, Any],
+    opponent_uid: str,
+    my_seen: bool,
+    is_heads_up: bool,
+) -> None:
+    """从牌局公开状态解析对手本轮动作并训练画像。
+
+    lastAction 文本区分「报名 / +X 跟注 / +X 追加」：
+      - 含「追加」或「raise」→ raise（加注）
+      - 含「跟注」或「call」→ call
+      - 含「弃」或「fold」→ fold
+      - 仅「报名」→ 底注，不计入动作分桶（非决策动作）
+    仅统计尚未出局、非自身的存活对手。
+    """
+    for index, player in enumerate(_players(game)):
+        if _is_self(player):
+            continue
+        if _player_key(player, index) != opponent_uid:
+            continue
+        if not (player.get("alive") or player.get("active", False)):
+            continue
+        last_action = str(player.get("lastAction", "") or "")
+        action: str | None = None
+        if "追加" in last_action or "raise" in last_action.lower():
+            action = "raise"
+        elif "跟注" in last_action or "call" in last_action.lower():
+            action = "call"
+        elif "弃" in last_action or "fold" in last_action.lower():
+            action = "fold"
+        if action is None:
+            continue  # 报名等非决策动作不计入
+        op_seen = bool(player.get("seen", False))
+        store.record_action(
+            opponent_uid,
+            action,
+            my_seen,
+            op_seen,
+            is_heads_up,
+            display_name=str(player.get("displayName", "") or ""),
+        )
+        return
+
+
 async def _poll_loop(ctx: object) -> None:
     """轮询牌局状态并执行操作。"""
     cfg = ctx.config
@@ -262,6 +324,12 @@ async def _poll_loop(ctx: object) -> None:
     round_joined = False
     last_round_hand = ""
     last_round_hand_type = ""
+    # 对手画像：进程内缓存 + 延迟写 kv（get_store 首次调用加载已有画像）
+    profile_store = get_store(ctx.kv)
+    # 连续盲跟计数：同一 roundId 内累计，达上限强制看牌
+    blind_calls_so_far = 0
+    # 本局 displayName→id 映射（结算回填画像用）
+    uid_by_display: dict[str, str] = {}
 
     async with HdskyClient(log=ctx.log) as client:
         client.set_renewer(hdsky_auth.renewer_for(ctx))  # 401 时自动续期并重试
@@ -302,8 +370,20 @@ async def _poll_loop(ctx: object) -> None:
                     fold_retry = 0
                     tracker = _RoundTracker()
                     round_joined = False
+                    blind_calls_so_far = 0
                     last_round_hand = ""
                     last_round_hand_type = ""
+                    uid_by_display = {}
+
+                # 每轮更新 displayName→id 映射；新一局结算回填对手真实手牌分位到画像
+                for index, player in enumerate(_players(g)):
+                    pid = _player_key(player, index)
+                    display = player.get("displayName")
+                    if pid and display:
+                        uid_by_display[display] = pid
+                feed_last_result(profile_store, game_data, uid_by_display)
+                if cfg.get("zjh_profile_enabled", True):
+                    profile_store.flush()
                 s = g.get("self", {})
                 # 弃牌/出局后本局不再有任何决策，停止跟踪对手快照与门槛推导。
                 # 否则对手互相缠斗时门槛会递归虚高（单挑反推的不动点在 1.0，
@@ -361,25 +441,69 @@ async def _poll_loop(ctx: object) -> None:
                             action_override,
                         )
                     else:
-                        # 蒙牌：无论单挑还是多人，都按 EV 决定「蒙牌半价盲跟」还是「看牌买信息」。
-                        # EV≥0 时盲跟本身划算；EV<0 时看牌获取信息，随后按真实手牌正常决策。
-                        blind_action, blind_choice = _blind_peek_or_call(g, actions, seen_threshold, tracker)
+                        # 蒙牌：用 Terminal EV 决策树决定「盲跟 / 看牌 / 弃牌」。
+                        # 连续盲跟达上限强制看牌；对手动作概率来自画像。
+                        alive_count = sum(
+                            1
+                            for index, player in enumerate(_players(g))
+                            if index != next((i for i, p in enumerate(_players(g)) if _is_self(p)), -1)
+                            and (player.get("alive") or player.get("active", False))
+                        )
+                        # 取第一个存活对手 uid 作为画像键（单挑即为唯一对手，多人取首个）
+                        opponent_uid: str | None = None
+                        for index, player in enumerate(_players(g)):
+                            if _is_self(player):
+                                continue
+                            if player.get("alive") or player.get("active", False):
+                                opponent_uid = _player_key(player, index)
+                                break
+                        is_hu = alive_count <= 1
+                        my_seen = bool(s.get("seen", False))
+                        # 画像动作概率（我方蒙牌、对手状态、单挑/多人）
+                        action_probs: tuple[float, float, float] | None = None
+                        if opponent_uid and cfg.get("zjh_profile_enabled", True):
+                            op_seen = False
+                            for index, player in enumerate(_players(g)):
+                                if not _is_self(player) and _player_key(player, index) == opponent_uid:
+                                    op_seen = bool(player.get("seen", False))
+                                    break
+                            action_probs = profile_store.action_probabilities(opponent_uid, my_seen, op_seen, is_hu)
+                        blind_action, blind_choice = _blind_peek_or_call(
+                            g,
+                            actions,
+                            seen_threshold,
+                            tracker,
+                            profile=profile_store if cfg.get("zjh_profile_enabled", True) else None,
+                            depth=int(cfg.get("zjh_terminal_depth", 2) or 2),
+                            max_blind_calls=int(cfg.get("zjh_blind_max_calls", 0) or 0),
+                            blind_calls_so_far=blind_calls_so_far,
+                            action_probs=action_probs,
+                        )
+                        # 训练画像：对手本轮动作（从 lastAction 解析）
+                        if opponent_uid and cfg.get("zjh_profile_enabled", True):
+                            _train_opponent_action(profile_store, g, opponent_uid, my_seen, is_hu)
                         if blind_choice is not None:
+                            if isinstance(blind_choice, _TerminalDecision):
+                                ev_val = blind_choice.terminal_ev
+                            else:
+                                ev_val = blind_choice.expected_value
                             _action_label = {
                                 "call": "盲跟",
                                 "peek": "看牌",
                                 "showdown": "应战",
                                 "open": "主动开牌",
+                                "fold": "弃牌",
                             }.get(blind_action or "", "无可执行动作")
                             ctx.log.info(
-                                "蒙牌决策[%s]: 平均胜率=%.4f 蒙=%d 看=%d 底池=%.0f 半价成本=%.0f EV=%+.2f",
+                                "蒙牌决策[%s]: 终局EV=%+.2f 单步EV对照=%+.2f 底池=%.0f 半价成本=%.0f 对手动作概率=%s",
                                 _action_label,
-                                blind_choice.win_probability,
-                                blind_choice.blind_opponents,
-                                blind_choice.seen_opponents,
+                                ev_val,
+                                blind_choice.single_step_ev if isinstance(blind_choice, _TerminalDecision) else ev_val,
                                 g.get("pot", 0),
                                 _blind_call_cost(float(g.get("callBet", 0))),
-                                blind_choice.expected_value,
+                                f"{action_probs[0]:.2f}/{action_probs[1]:.2f}/{action_probs[2]:.2f}"
+                                if action_probs
+                                else "先验",
                             )
                         if blind_action in ("showdown", "open"):
                             await client.post("/api/portal/zhajinhua/action", {"action": blind_action})
@@ -392,12 +516,13 @@ async def _poll_loop(ctx: object) -> None:
                                         blind_choice,
                                         float(g.get("pot", 0) or 0),
                                         float(g.get("callBet", 0) or 0),
-                                        "蒙牌EV≥0，直接开牌结束本轮避免对手加注后投入翻倍",
+                                        "蒙牌终局EV≥0，直接开牌结束本轮避免对手加注后投入翻倍",
                                     )
                                 )
                         elif blind_action == "call":
                             await client.post("/api/portal/zhajinhua/action", {"action": "call"})
                             turns_taken += 1
+                            blind_calls_so_far += 1
                             if cfg.get("zjh_notify_hand", True):
                                 await ctx.notify(
                                     _blind_notification(
@@ -406,7 +531,7 @@ async def _poll_loop(ctx: object) -> None:
                                         blind_choice,
                                         float(g.get("pot", 0) or 0),
                                         float(g.get("callBet", 0) or 0),
-                                        "蒙牌半价盲跟本身就划算（EV≥0），不看牌避免翻倍投入",
+                                        "蒙牌终局EV盲跟最优（EV≥0），不看牌避免翻倍投入",
                                     )
                                 )
                         elif blind_action == "peek":
