@@ -20,6 +20,7 @@ from plugins.skyGame.games.zhajinhua import (
     _hand_threshold_for_actual_win_probability,
     _heads_up_blind_action,
     _heads_up_opponent_seen,
+    _heads_up_stop_loss_action,
     _in_hand,
     _is_heads_up,
     _normalize_hand_type,
@@ -774,6 +775,19 @@ def test_heads_up_blind_action_returns_none_without_any_executable_action() -> N
     assert _heads_up_blind_action(game, ["peek", "fold"]) is None
 
 
+def test_heads_up_stop_loss_prefers_compare_over_call() -> None:
+    # 正向（实测门户动作集 fold,call,raise,open）：EV 为负时优先比牌止损，绝不返回 call
+    assert _heads_up_stop_loss_action(["fold", "call", "raise", "open"]) == "open"
+    assert _heads_up_stop_loss_action(["fold", "call", "raise", "showdown"]) == "showdown"
+    assert _heads_up_stop_loss_action(["fold", "call", "raise", "open", "showdown"]) == "showdown"
+
+
+def test_heads_up_stop_loss_folds_when_no_compare_available() -> None:
+    # 异常路径：门户不给比牌动作时弃牌止损，即便 call 可用也不跟注
+    assert _heads_up_stop_loss_action(["fold", "call", "raise"]) == "fold"
+    assert _heads_up_stop_loss_action(["fold"]) == "fold"
+
+
 @pytest.mark.asyncio
 async def test_act_on_hand_heads_up_blind_opponent_calls_without_ev_check() -> None:
     """单挑对手未看牌 → 直接跟注，不检查 EV 正负。"""
@@ -807,8 +821,43 @@ async def test_act_on_hand_heads_up_blind_opponent_calls_without_ev_check() -> N
 
 
 @pytest.mark.asyncio
-async def test_act_on_hand_heads_up_seen_opponent_negative_ev_does_not_fold() -> None:
-    """单挑对手已看牌 → EV 为负也不弃牌，直接跟注。"""
+async def test_act_on_hand_heads_up_seen_opponent_negative_ev_opens_to_stop_loss() -> None:
+    """回归：单挑对手已看牌、EV 为负且门户允许 open → 比牌止损，绝不连跟。
+
+    旧逻辑「EV为负也不弃牌」曾强制跟注，导致终胜率 0% 仍连跟多轮、单局巨亏。
+    """
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": True},
+        {"id": "opp", "alive": True, "seen": True},
+        pot=100,
+        call_bet=2000,
+    )
+    game.update(
+        {
+            "roundId": 123,
+            "actions": ["fold", "call", "raise", "open"],
+            "self": {"alive": True, "isTurn": True},
+        }
+    )
+    client = _FakeClient()
+    pending_fold = await _act_on_hand(
+        _FakeContext(),
+        client,
+        {"zjh_notify_hand": False},
+        game,
+        "2♠ 3♥ 5♦",
+        "散牌",
+        0.5,
+        _RoundTracker(),
+    )
+    assert pending_fold is False
+    # EV 为负 → 比牌止损，而不是继续跟注
+    assert client.requests == [("/api/portal/zhajinhua/action", {"action": "open"})]
+
+
+@pytest.mark.asyncio
+async def test_act_on_hand_heads_up_seen_opponent_negative_ev_folds_when_no_compare() -> None:
+    """单挑对手已看牌、EV 为负但门户不给比牌 → 弃牌止损，仍不跟注。"""
     game = _game(
         {"id": "self", "alive": True, "isSelf": True, "seen": True},
         {"id": "opp", "alive": True, "seen": True},
@@ -833,9 +882,9 @@ async def test_act_on_hand_heads_up_seen_opponent_negative_ev_does_not_fold() ->
         0.5,
         _RoundTracker(),
     )
+    # 无比牌动作 → 走弃牌流程（_FakeClient 无 foldConfirm，直接完成）
     assert pending_fold is False
-    # EV 为负也不弃牌，改为跟注
-    assert client.requests == [("/api/portal/zhajinhua/action", {"action": "call"})]
+    assert client.requests == [("/api/portal/zhajinhua/action", {"action": "fold"})]
 
 
 @pytest.mark.asyncio

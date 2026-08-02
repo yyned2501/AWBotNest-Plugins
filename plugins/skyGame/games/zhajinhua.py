@@ -7,6 +7,7 @@
 #   - 轮到我了 → 第一轮蒙牌（盲跟），第二轮看牌
 #   - 单挑且我方仍蒙牌 → 不看牌直接开牌（showdown/open），开不了才盲跟
 #   - 看牌后完全按增量期望收益（EV）决策：EV ≥ 0 跟注，否则弃牌
+#   - 单挑且对手已看牌、EV 为负 → 比牌止损（showdown/open）或弃牌，绝不连跟
 #   - 胜率按对手看牌状态分开计算：蒙牌对手用 p^n，已看牌且继续下注的对手
 #     按其行动时底池赔率反推牌力门槛再做条件胜率
 #   - 支持双击弃牌确认
@@ -262,6 +263,17 @@ def _heads_up_blind_action(game: dict[str, Any], actions: list[Any]) -> str | No
     if open_action is not None:
         return open_action
     return "call" if "call" in actions else None
+
+
+def _heads_up_stop_loss_action(actions: list[Any]) -> str:
+    """单挑被碾压（EV 为负）时的止损动作：优先比牌（showdown/open），否则弃牌。
+
+    绝不继续跟注——EV 为负时跟注是纯亏损，对手每加一次就跟亏一次（曾出现终胜率
+    0% 仍连跟七轮、单局填进近九万的情况）。比牌一次性了结并保留翻盘可能，门户
+    不给比牌（actions 无 showdown/open）就弃牌止损。
+    """
+    stop = next((action for action in ("showdown", "open") if action in actions), None)
+    return stop if stop is not None else "fold"
 
 
 def _actual_win_probability(hand_threshold: float, blind_opponents: int, seen_thresholds: tuple[float, ...]) -> float:
@@ -779,8 +791,22 @@ async def _act_on_hand(
         action, reason = "call", "单挑对手未看牌，直接跟注"
         ctx.log.info("单挑覆盖: 对手未看牌，直接跟注（EV=%s）", f"{decision.expected_value:.2f}" if decision else "N/A")
     elif is_heads_up and opponent_seen and not choice.call:
-        action, reason = "call", "单挑对手已看牌，EV为负也不弃牌"
-        ctx.log.info("单挑覆盖: 对手已看牌，EV=%s 仍跟注", f"{decision.expected_value:.2f}" if decision else "N/A")
+        # 单挑对手已看牌且 EV 为负：绝不连跟（多跟多亏），比牌止损或弃牌止损。
+        stop_action = _heads_up_stop_loss_action(actions if isinstance(actions, list) else [])
+        if stop_action == "fold":
+            ctx.log.info(
+                "单挑止损: 对手已看牌 EV=%s 终胜率=%s，门户无比牌动作 → 弃牌",
+                f"{decision.expected_value:.2f}" if decision else "N/A",
+                f"{decision.win_probability:.1%}" if decision else "N/A",
+            )
+            return await _request_fold(ctx, client, cfg, game, hand, hand_type, choice, tracker)
+        action, reason = stop_action, "单挑对手已看牌、EV为负，比牌止损"
+        ctx.log.info(
+            "单挑止损: 对手已看牌 EV=%s 终胜率=%s → %s 比牌止损",
+            f"{decision.expected_value:.2f}" if decision else "N/A",
+            f"{decision.win_probability:.1%}" if decision else "N/A",
+            stop_action,
+        )
     elif not choice.call:
         return await _request_fold(ctx, client, cfg, game, hand, hand_type, choice, tracker)
     else:
