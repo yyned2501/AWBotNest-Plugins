@@ -211,11 +211,13 @@ async def _act_on_hand(
     hand_type: str,
     fallback_threshold: float,
     tracker: _RoundTracker,
+    profile: object | None = None,
 ) -> bool:
     """对已看牌手牌做 EV 决策，并执行服务器允许的动作。
 
     无「服务端强制应战」规则：开/加/跟/弃/应战全部由 EV 驱动（_choose + _choose_action）。
     强制摊牌阶段（actions 无 call）EV 支持继续时，_choose_action 会选 showdown/raise。
+    profile：对手画像（ProfileStore），非空时已看牌胜率接入实测收缩混合 + 逐对手诈唬率。
     """
     rid = game.get("roundId")
     hand_value = _extract_hand_value(hand_type, hand)
@@ -227,6 +229,7 @@ async def _act_on_hand(
         tracker,
         _RangeModel.from_config(cfg),
         float(cfg.get("zjh_fold_ev_tolerance", 0) or 0),
+        profile,
     )
     _log_decision(ctx, hand, hand_type, hand_value, game, choice, tracker)
 
@@ -272,6 +275,7 @@ def _train_opponent_actions(
     last_seen: dict[str, tuple[str, float]],
     my_seen: bool,
     is_heads_up: bool,
+    round_action: dict[str, str] | None = None,
 ) -> None:
     """每轮训练画像：遍历所有存活对手，检测动作变化并去重记录。
 
@@ -281,6 +285,8 @@ def _train_opponent_actions(
       避免轮询重复计数把跟注/加注频率撑高。
     last_seen 由调用方在 `_poll_loop` 维护（跨局重置），键为对手 uid，
     值为 (lastAction, bet) 签名。
+    round_action：本轮各对手最激进动作 {uid: "raise"|"call"}（raise 覆盖 call），
+    供结算回填按实际动作分桶；None 时不维护。
     """
     for index, player in enumerate(_players(game)):
         if _is_self(player):
@@ -304,6 +310,10 @@ def _train_opponent_actions(
             action = "fold"
         if action is None:
             continue  # 报名等非决策动作不计入（但已更新签名，避免反复尝试）
+        if round_action is not None and action in ("raise", "call"):
+            # 最激进动作优先：加注覆盖平跟（结算回填据此区分加注/平跟手牌分位）
+            if action == "raise" or round_action.get(uid) != "raise":
+                round_action[uid] = action
         op_seen = bool(player.get("seen", False))
         store.record_action(
             uid,
@@ -335,6 +345,11 @@ async def _poll_loop(ctx: object) -> None:
     uid_by_display: dict[str, str] = {}
     # 对手动作去重签名：uid → (lastAction, bet)，跨局重置
     last_opponent_seen: dict[str, tuple[str, float]] = {}
+    # 本轮各对手最激进动作 uid → "raise"|"call"（结算回填按实际动作分桶用）
+    round_opponent_action: dict[str, str] = {}
+    # 刚结束那局（lastResult 待回填）的对手动作快照：lastResult 滞后一局，
+    # roundId 切换时把当前轮动作移入此变量，供随后到达的 lastResult 回填取用
+    settled_round_action: dict[str, str] = {}
     # 已回填的结算局 roundId（同一局 lastResult 每轮重复出现，只回填一次）
     last_fed_result_rid: Any = None
 
@@ -383,6 +398,9 @@ async def _poll_loop(ctx: object) -> None:
                     uid_by_display = {}
                     last_opponent_seen = {}
                     last_fed_result_rid = None
+                    # 上一局动作移入 settled，供随后到达的 lastResult 回填；本轮重新累计
+                    settled_round_action = round_opponent_action
+                    round_opponent_action = {}
 
                 # 每轮更新 displayName→id 映射；新一局结算回填对手真实手牌分位到画像
                 for index, player in enumerate(_players(g)):
@@ -393,7 +411,7 @@ async def _poll_loop(ctx: object) -> None:
                 last_result = game_data.get("game", {}).get("lastResult")
                 last_result_rid = last_result.get("roundId") if isinstance(last_result, dict) else None
                 if last_result_rid and last_result_rid != last_fed_result_rid:
-                    feed_last_result(profile_store, game_data, uid_by_display)
+                    feed_last_result(profile_store, game_data, uid_by_display, settled_round_action)
                     last_fed_result_rid = last_result_rid
                 if cfg.get("zjh_profile_enabled", True):
                     profile_store.flush()
@@ -412,6 +430,7 @@ async def _poll_loop(ctx: object) -> None:
                         last_opponent_seen,
                         bool(s.get("seen", False)),
                         is_hu,
+                        round_opponent_action,
                     )
                 # 弃牌/出局后本局不再有任何决策，停止跟踪对手快照与门槛推导。
                 # 否则对手互相缠斗时门槛会递归虚高（单挑反推的不动点在 1.0，
@@ -465,6 +484,7 @@ async def _poll_loop(ctx: object) -> None:
                             hand_type,
                             seen_threshold,
                             tracker,
+                            profile_store if cfg.get("zjh_profile_enabled", True) else None,
                         )
                     else:
                         # 蒙牌：用 Terminal EV 决策树决定「盲跟 / 看牌 / 弃牌」。
@@ -504,6 +524,7 @@ async def _poll_loop(ctx: object) -> None:
                             max_blind_calls=int(cfg.get("zjh_blind_max_calls", 0) or 0),
                             blind_calls_so_far=blind_calls_so_far,
                             action_probs=action_probs,
+                            opponent_uid=opponent_uid,
                         )
                         if blind_choice is not None:
                             if isinstance(blind_choice, _TerminalDecision):
@@ -594,6 +615,7 @@ async def _poll_loop(ctx: object) -> None:
                                         hand_type,
                                         seen_threshold,
                                         tracker,
+                                        profile_store if cfg.get("zjh_profile_enabled", True) else None,
                                     )
                         else:
                             ctx.log.warning(

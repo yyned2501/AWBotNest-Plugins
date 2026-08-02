@@ -91,11 +91,18 @@ class _Choice:
 
 @dataclass(frozen=True)
 class _SeenRange:
-    """一个已看牌对手被建模的牌力区间 [lower, upper] 及门槛是否实测反推。"""
+    """一个已看牌对手被建模的牌力区间 [lower, upper] 及门槛是否实测反推。
+
+    profile/uid/action 可选：提供时用画像实测分位做胜率收缩混合与逐对手诈唬率，
+    缺失则逐值回退纯范围模型（向后兼容、便于 A/B）。
+    """
 
     lower: float
     upper: float
     observed: bool
+    profile: Any = None
+    uid: str | None = None
+    action: str = "call"
 
 
 @dataclass(frozen=True)
@@ -410,22 +417,40 @@ def _range_factor(hand_threshold: float, lower: float, upper: float) -> float:
 
 
 def _seen_factor(hand_threshold: float, seen_range: _SeenRange, bluff: float) -> float:
-    """对单个已看牌对手的胜率：范围胜率 blended 反诈唬基线。
+    """对单个已看牌对手的胜率：范围胜率 blended 反诈唬，再与画像实测胜率收缩混合。
 
-    以概率 bluff 视对手为纯空气牌（随机弱牌，我方胜率≈单挑胜率 t），
-    其余概率按 uniform[lower, upper] 范围计算。bluff=0 时即纯范围胜率。
+    1. 逐对手诈唬率：画像有该对手数据时用 `profile.bluff_rate(uid, bluff)`（其弱牌
+       继续占比向全局基线收缩），否则回退全局基线 bluff。
+    2. model_win = (1-bluff_opp)*范围胜率 + bluff_opp*单挑胜率 t（空气牌近似）。
+    3. 画像有该对手该动作实测分位时，用 `empirical_win_factor`（我击败其实测手牌的
+       比例，按样本数向 model_win 收缩）替代；无画像/无样本逐值返回 model_win。
     """
     range_win = _range_factor(hand_threshold, seen_range.lower, seen_range.upper)
-    return (1 - bluff) * range_win + bluff * hand_threshold
+    profile = seen_range.profile
+    uid = seen_range.uid
+    if profile is not None and uid:
+        bluff_opp = profile.bluff_rate(uid, bluff)
+    else:
+        bluff_opp = bluff
+    model_win = (1 - bluff_opp) * range_win + bluff_opp * hand_threshold
+    if profile is not None and uid:
+        return profile.empirical_win_factor(uid, seen_range.action, hand_threshold, model_win)
+    return model_win
 
 
 def _seen_opponent_ranges(
-    game: dict[str, Any], tracker: _RoundTracker, fallback_threshold: float, range_model: _RangeModel
+    game: dict[str, Any],
+    tracker: _RoundTracker,
+    fallback_threshold: float,
+    range_model: _RangeModel,
+    profile: Any = None,
 ) -> tuple[int, list[_SeenRange]]:
     """统计蒙牌对手数，并按动作类型为每个已看牌对手构造牌力区间。
 
     加注对手：[max(推断门槛, raise_floor), 1.0]；平跟/仅看牌：[推断门槛, call_cap]。
     门槛实测反推优先，缺失才用回退分位；observed 标记来源。
+    profile 非空时，把画像引用、对手 uid 与动作类型填入 _SeenRange，供
+    _seen_factor 做实测胜率收缩混合与逐对手诈唬率。
     """
     blind, _ = _opponent_counts(game)
     ranges: list[_SeenRange] = []
@@ -437,10 +462,11 @@ def _seen_opponent_ranges(
         lower = threshold if threshold is not None else fallback_threshold
         continue_snapshot = tracker.snapshots.get(key)
         is_raise = bool(continue_snapshot.is_raise) if continue_snapshot is not None else False
+        action = "raise" if is_raise else "call"
         if is_raise:
-            ranges.append(_SeenRange(max(lower, range_model.raise_floor), 1.0, observed))
+            ranges.append(_SeenRange(max(lower, range_model.raise_floor), 1.0, observed, profile, key, action))
         else:
-            ranges.append(_SeenRange(lower, range_model.call_cap, observed))
+            ranges.append(_SeenRange(lower, range_model.call_cap, observed, profile, key, action))
     return blind, ranges
 
 
@@ -463,11 +489,13 @@ def _call_decision(
     fallback_threshold: float,
     tracker: _RoundTracker,
     range_model: _RangeModel | None = None,
+    profile: Any = None,
 ) -> _CallDecision | None:
     """按对手看牌状态及其最近正 EV 行为计算本次跟注的增量 EV。
 
     range_model 为空时用中性模型（平跟上限 1.0、加注下限 0.0、诈唬率 0），
     此时胜率逐值等于旧的 `_actual_win_probability`，便于回退与 A/B。
+    profile 非空时接入对手画像：实测胜率收缩混合 + 逐对手诈唬率。
     """
     if hand_value is None or not 0 <= fallback_threshold < 1:
         return None
@@ -484,7 +512,7 @@ def _call_decision(
         return None
 
     model = range_model if range_model is not None else _NEUTRAL_RANGE_MODEL
-    blind, ranges = _seen_opponent_ranges(game, tracker, fallback_threshold, model)
+    blind, ranges = _seen_opponent_ranges(game, tracker, fallback_threshold, model, profile)
     seen = len(ranges)
 
     win_probability = _ranged_win_probability(one_vs_one, blind, ranges, model.bluff)
@@ -556,27 +584,25 @@ class _TerminalDecision:
         return self.branches[0].win_probability if self.branches else 0.0
 
 
-def _opponent_raise_threshold(base_threshold: float, raise_count: int, profile: Any = None) -> float:
+def _opponent_raise_threshold(
+    base_threshold: float, raise_count: int, profile: Any = None, opponent_uid: str | None = None
+) -> float:
     """对手连续 raise 后其手牌门槛的上调。
 
-    每 raise 一次，把门槛向 1.0 推一步；若画像记录了该对手加注后的真实手牌
-    分位（结算回填），用它作为更强的门槛上界。profile 可为对象（.raise_pcts）
-    或 dict（["raise_pcts"]）。
+    每 raise 一次，把门槛向 1.0 推一步（通用推断）。若画像记录了该对手加注后的
+    真实手牌分位（结算回填），用其实测下四分位（最弱加注牌）向通用推断收缩作为
+    门槛：诈唬型对手（弱牌加注多）门槛被拉低 → 我方胜率更高。profile 需为
+    ProfileStore（提供 raise_threshold_floor），配合 opponent_uid 定位对手。
     """
     threshold = base_threshold
     for _ in range(raise_count):
         threshold = threshold + (1.0 - threshold) * 0.25
-    # 画像加注分位若存在且高于推断门槛，采用画像分位（更紧）
-    if profile is not None:
-        if isinstance(profile, dict):
-            raise_pcts = profile.get("raise_pcts") or profile.get("raise_pcts_list")
-        else:
-            raise_pcts = getattr(profile, "raise_pcts", None)
-        if raise_pcts:
-            observed = max(raise_pcts)
-            if observed > threshold:
-                threshold = observed
-    return min(threshold, 1.0)
+    # 画像加注分位下界（duck-typed）：有数据则收缩混合，无数据回退通用推断
+    if profile is not None and opponent_uid:
+        floor = profile.raise_threshold_floor(opponent_uid, threshold)
+        if floor is not None:
+            threshold = floor
+    return min(max(threshold, 0.0), 1.0)
 
 
 def _blind_vs_seen_win(threshold: float) -> float:
@@ -605,6 +631,7 @@ def _terminal_ev_call(
     raise_count: int = 0,
     current_call_bet: float | None = None,
     opponent_seen: bool = True,
+    opponent_uid: str | None = None,
 ) -> float:
     """递归计算「盲跟」路径到达终局的期望净收益。
 
@@ -615,6 +642,8 @@ def _terminal_ev_call(
       平跟时不变；真实反映「对手持续加注把成本滚大」对蒙牌盲跟的代价。
     - opponent_seen：对手是否已看牌。只有看牌后的加注才是强牌信号（上调门槛、胜率
       贝叶斯衰减）；蒙牌加注可能是诈唬/空气牌，不上调门槛、胜率不额外衰减。
+    - opponent_uid：对手画像键。看牌加注上调门槛时用它从画像取实测加注分位下界
+      （诈唬型对手门槛更低），缺失则用通用推断。
     终局节点：
       对手弃牌 → 我方独赢，净收益 = pot − cost；
       深度耗尽（截断）→ 按对手动作概率对未来一轮加权（对称期望模型）；
@@ -677,13 +706,14 @@ def _terminal_ev_call(
             raise_count,
             current_call_bet,
             opponent_seen,
+            opponent_uid,
         )
 
     # 对手加注 → callBet 递增。看牌后加注是强牌信号：门槛上调、胜率贝叶斯衰减；
     # 蒙牌加注视为诈唬/空气：不上调门槛，胜率维持（只承担 callBet 滚大的代价）。
     if p_raise > 0:
         if opponent_seen:
-            new_threshold = _opponent_raise_threshold(fallback_threshold, raise_count + 1, profile)
+            new_threshold = _opponent_raise_threshold(fallback_threshold, raise_count + 1, profile, opponent_uid)
             new_win = _blind_vs_seen_win(new_threshold)
         else:
             new_win = win_prob
@@ -703,6 +733,7 @@ def _terminal_ev_call(
             raise_count + 1,
             raised_bet,
             opponent_seen,
+            opponent_uid,
         )
     return ev
 
@@ -765,6 +796,7 @@ def _terminal_ev_decision(
     depth: int = 2,
     profile: Any = None,
     action_probs: tuple[float, float, float] | None = None,
+    opponent_uid: str | None = None,
 ) -> _TerminalDecision:
     """蒙牌「盲跟 / 看牌 / 弃牌」三候选的 Terminal EV，取最优。
 
@@ -801,6 +833,7 @@ def _terminal_ev_decision(
         0,
         None,
         opponent_seen,
+        opponent_uid,
     )
     # 看牌候选
     peek_ev = _terminal_ev_peek(game, fallback_threshold, tracker, depth, profile, action_probs)
@@ -867,6 +900,7 @@ def _blind_peek_or_call(
     max_blind_calls: int = 0,
     blind_calls_so_far: int = 0,
     action_probs: tuple[float, float, float] | None = None,
+    opponent_uid: str | None = None,
 ) -> tuple[str | None, _TerminalDecision | _CallDecision | None]:
     """多人蒙牌时按 Terminal EV 决定「盲跟」「看牌」「弃牌」或直接比牌。
 
@@ -882,7 +916,7 @@ def _blind_peek_or_call(
     （纯单步 EV 决策蒙还是看）。
     """
     blind_choice = _blind_decision(game, fallback_threshold, tracker)
-    terminal = _terminal_ev_decision(game, fallback_threshold, tracker, depth, profile, action_probs)
+    terminal = _terminal_ev_decision(game, fallback_threshold, tracker, depth, profile, action_probs, opponent_uid)
 
     # 1. 连续盲跟达上限 → 强制看牌（避免「蒙牌闭眼跟」被对手 raise 套牢）
     if max_blind_calls > 0 and blind_calls_so_far >= max_blind_calls:
@@ -974,14 +1008,16 @@ def _choose(
     tracker: _RoundTracker,
     range_model: _RangeModel | None = None,
     fold_ev_tolerance_pct: float = 0.0,
+    profile: Any = None,
 ) -> _Choice:
     """纯 EV 决策：跟注当且仅当数据有效且增量期望收益不低于弃牌容差。
 
     fold_ev_tolerance_pct：弃牌容差（callBet 的百分比）。EV 只是略负（≥ −容差）时
     不弃牌——边际负 EV 在胜率估算噪声内，且弃牌白白让出已投入底池权益。默认 0
     保持旧行为；配置 zjh_fold_ev_tolerance 打开（推荐 5，即 −5%×callBet 内不弃）。
+    profile：对手画像（ProfileStore），非空时已看牌胜率接入实测收缩混合 + 逐对手诈唬率。
     """
-    decision = _call_decision(hand_type, hand_value, game, fallback_threshold, tracker, range_model)
+    decision = _call_decision(hand_type, hand_value, game, fallback_threshold, tracker, range_model, profile)
     if decision is None:
         return _Choice(False, "牌局数据不完整，保守弃牌", None)
     call_bet = float(game.get("callBet", 0) or 0)

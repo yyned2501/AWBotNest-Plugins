@@ -56,9 +56,12 @@ from plugins.skyGame.games.zhajinhua import (
     _update_round_tracker,
 )
 from plugins.skyGame.games.zjh_profile import (
+    PRIOR_STRENGTH,
     ProfileStore,
     _bucket,
     _hand_pctile_from_result,
+    _percentile,
+    feed_last_result,
 )
 
 
@@ -1520,17 +1523,27 @@ def test_blind_vs_seen_win_bayes_discount() -> None:
 
 
 def test_opponent_raise_threshold_escalates() -> None:
-    """对手每 raise 一次，门槛向 1.0 上调，且不越界。"""
+    """对手每 raise 一次门槛向 1.0 上调且不越界；画像接管后按实测下四分位收缩。"""
     base = 0.5
     t1 = _opponent_raise_threshold(base, 1)
     t2 = _opponent_raise_threshold(base, 2)
     assert t1 > base
     assert t2 > t1
     assert t2 <= 1.0
-    # 画像加注分位若更高，作为门槛上界
-    t_with_profile = _opponent_raise_threshold(base, 1, {"raise_pcts": [0.95]})
-    assert t_with_profile >= 0.95
-    assert t_with_profile <= 1.0
+    # 无 uid / 画像无数据 → 回退通用推断（与不传 profile 逐值一致）
+    store = ProfileStore()
+    assert _opponent_raise_threshold(base, 1, store, "unknown") == pytest.approx(t1)
+    # 诈唬型对手（弱牌加注多，下四分位低）→ 门槛被拉低（< 通用推断）
+    for _ in range(6):
+        store.record_hand_pctile("account:bluffy", "raise", 0.2)
+    t_bluffy = _opponent_raise_threshold(base, 1, store, "account:bluffy")
+    assert t_bluffy < t1
+    # 紧手对手（加注都是强牌，下四分位高）→ 门槛被抬高（> 通用推断）
+    for _ in range(6):
+        store.record_hand_pctile("account:tight", "raise", 0.95)
+    t_tight = _opponent_raise_threshold(base, 1, store, "account:tight")
+    assert t_tight > t1
+    assert t_tight <= 1.0
 
 
 def test_terminal_ev_call_opponent_fold_wins_pot() -> None:
@@ -1752,6 +1765,164 @@ def test_profile_store_raise_pctile_backfill() -> None:
     assert dump["account:1"].get("raise_pcts") == [0.9, 0.85]
 
 
+def test_percentile_helper_interpolates() -> None:
+    """线性插值分位数：单元素原样返回，q=0/1 取端点，中间线性插值。"""
+    assert _percentile([0.9], 0.25) == pytest.approx(0.9)
+    assert _percentile([0.2, 0.8], 0.0) == pytest.approx(0.2)
+    assert _percentile([0.2, 0.8], 1.0) == pytest.approx(0.8)
+    # rank=0.25×3=0.75 → 0.2×0.25 + 0.4×0.75
+    assert _percentile([0.2, 0.4, 0.6, 0.8], 0.25) == pytest.approx(0.35)
+
+
+def test_hand_percentiles_returns_recorded_and_empty() -> None:
+    """hand_percentiles：无记录返回空列表，按动作分桶返回对应分位。"""
+    store = ProfileStore()
+    assert store.hand_percentiles("nobody", "raise") == []
+    store.record_hand_pctile("a", "raise", 0.3)
+    store.record_hand_pctile("a", "call", 0.7)
+    assert store.hand_percentiles("a", "raise") == [0.3]
+    assert store.hand_percentiles("a", "call") == [0.7]
+
+
+def test_empirical_win_factor_shrinkage() -> None:
+    """实测胜率收缩：无样本回退基线，少样本收缩，多样本趋近实测。"""
+    store = ProfileStore()
+    # 无样本 → 回退 model_baseline
+    assert store.empirical_win_factor("nobody", "raise", 0.7, 0.42) == pytest.approx(0.42)
+    # 对手加注全弱牌（0.3），我方 0.7 全胜 → wins=1.0；n=1 向 baseline 收缩
+    store.record_hand_pctile("a", "raise", 0.3)
+    w1 = store.empirical_win_factor("a", "raise", 0.7, 0.42)
+    weight = 1 / (1 + PRIOR_STRENGTH)
+    assert w1 == pytest.approx(weight * 1.0 + (1 - weight) * 0.42)
+    assert w1 > 0.42
+    # 多样本（n=20 全弱）趋近实测 1.0
+    for _ in range(20):
+        store.record_hand_pctile("b", "raise", 0.3)
+    assert store.empirical_win_factor("b", "raise", 0.7, 0.42) > 0.9
+    # 我方牌力低于所有实测手牌 → wins=0，胜率被压低（异常路径）
+    for _ in range(20):
+        store.record_hand_pctile("c", "raise", 0.9)
+    assert store.empirical_win_factor("c", "raise", 0.5, 0.42) < 0.1
+
+
+def test_bluff_rate_fallback_and_weak_heavy() -> None:
+    """逐对手诈唬率：样本不足回退基线，弱牌多则高、强牌多则低。"""
+    store = ProfileStore()
+    store.record_hand_pctile("a", "raise", 0.1)
+    store.record_hand_pctile("a", "call", 0.2)  # 合计 2 < PRIOR_STRENGTH
+    assert store.bluff_rate("a", 0.08) == pytest.approx(0.08)
+    for _ in range(10):
+        store.record_hand_pctile("b", "raise", 0.1)  # 全弱
+    assert store.bluff_rate("b", 0.08) > 0.08
+    for _ in range(10):
+        store.record_hand_pctile("c", "raise", 0.9)  # 全强
+    assert store.bluff_rate("c", 0.5) < 0.5
+
+
+def test_raise_threshold_floor_none_and_shrink() -> None:
+    """加注门槛下界：无样本返回 None，有样本为下四分位向 base 收缩。"""
+    store = ProfileStore()
+    assert store.raise_threshold_floor("nobody", 0.6) is None
+    for _ in range(6):
+        store.record_hand_pctile("a", "raise", 0.2)
+    floor = store.raise_threshold_floor("a", 0.6)
+    weight = 6 / (6 + PRIOR_STRENGTH)
+    assert floor == pytest.approx(weight * 0.2 + (1 - weight) * 0.6)
+    assert floor < 0.6
+
+
+def test_seen_factor_profile_blend_weak_opponent_raises_win() -> None:
+    """_seen_factor 画像混合：范围下界高于我方牌力时纯范围胜率为 0，
+    画像记录对手加注多弱牌后胜率被抬起；无画像逐值回退纯范围模型。"""
+    hand_threshold = 0.7
+    base_range = _SeenRange(0.75, 1.0, True)
+    plain = _seen_factor(hand_threshold, base_range, 0.0)
+    assert plain == pytest.approx(0.0)  # t ≤ 下界，范围胜率 0、bluff 0
+    store = ProfileStore()
+    for _ in range(10):
+        store.record_hand_pctile("bluffy", "raise", 0.3)
+    blended_range = _SeenRange(0.75, 1.0, True, profile=store, uid="bluffy", action="raise")
+    blended = _seen_factor(hand_threshold, blended_range, 0.0)
+    assert blended > plain
+    assert blended > 0.5
+    # profile=None 时（默认）与纯范围模型逐值一致，不触发画像分支
+    assert _seen_factor(hand_threshold, _SeenRange(0.5, 0.85, True), 0.0) == pytest.approx(
+        _range_factor(hand_threshold, 0.5, 0.85)
+    )
+
+
+def test_call_decision_profile_integration_raises_win_for_weak_opponent() -> None:
+    """集成：紧手加注对手（范围下界 0.99）纯范围胜率≈0，画像显示其实测加注多弱牌后
+    _call_decision 胜率被显著抬起。"""
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True},
+        {"id": "opp", "alive": True, "seen": True},
+        pot=1000,
+        call_bet=100,
+    )
+    tracker = _RoundTracker(snapshots={"opp": _OpponentSnapshot(pot=100, call_bet=100, opponents=1, is_raise=True)})
+    model = _RangeModel(call_cap=1.0, raise_floor=0.99, bluff=0.0)
+    base = _call_decision("对子", (14, 13), game, 0.1, tracker, model)
+    store = ProfileStore()
+    for _ in range(10):
+        store.record_hand_pctile("opp", "raise", 0.2)  # 弱牌加注（诈唬型）
+    with_profile = _call_decision("对子", (14, 13), game, 0.1, tracker, model, store)
+    assert base is not None and with_profile is not None
+    assert base.win_probability == pytest.approx(0.0)  # 我方牌力 < 0.99 下界
+    assert with_profile.win_probability > 0.5
+    assert with_profile.win_probability > base.win_probability
+
+
+def test_feed_last_result_round_action_bucketing() -> None:
+    """结算回填分桶：提供 round_action 时按实际动作只记对应桶，缺失则保守记两者。
+
+    真实 lastResult 玩家只给 handType 不给牌面，走牌型级分位回退路径。
+    """
+    game = {
+        "lastResult": {
+            "roundId": "r1",
+            "players": [
+                {"displayName": "Damon", "result": "赢", "handType": "顺子"},
+            ],
+        }
+    }
+    # 本局加注 → 只进 raise_pcts
+    store = ProfileStore()
+    feed_last_result(store, game, {"Damon": "account:1"}, {"account:1": "raise"})
+    dump = store.debug_dump()
+    assert dump["account:1"].get("raise_pcts")
+    assert not dump["account:1"].get("call_pcts")
+    # 未提供 round_action → 保守回填两者（旧行为）
+    store2 = ProfileStore()
+    feed_last_result(store2, game, {"Damon": "account:1"})
+    dump2 = store2.debug_dump()
+    assert dump2["account:1"].get("raise_pcts")
+    assert dump2["account:1"].get("call_pcts")
+
+
+def test_win_prob_1v1_type_band_midpoint() -> None:
+    """牌型级代表分位：取分位带中点；牌型越强分位越高；未知牌型返回 None。"""
+    scatter = zjh_prob.win_prob_1v1_type("散牌")
+    straight = zjh_prob.win_prob_1v1_type("顺子")
+    trips = zjh_prob.win_prob_1v1_type("豹子")
+    assert scatter is not None and straight is not None and trips is not None
+    assert scatter < straight < trips  # 牌型强度单调
+    assert 0.0 < scatter < 1.0
+    assert zjh_prob.win_prob_1v1_type("不存在的牌型") is None
+
+
+def test_hand_pctile_from_result_type_only_fallback() -> None:
+    """无牌面只有牌型时回退牌型级分位（结算 lastResult 的真实情形）。"""
+    # 有牌面 → 精确分位
+    exact = _hand_pctile_from_result("Q♥ J♠ 10♥", "顺子")
+    # 无牌面 → 牌型带中点
+    type_only = _hand_pctile_from_result("", "顺子")
+    assert exact is not None and type_only is not None
+    assert type_only == pytest.approx(zjh_prob.win_prob_1v1_type("顺子"))
+    # 既无牌面又无有效牌型 → None
+    assert _hand_pctile_from_result("", "") is None
+
+
 def test_hand_pctile_from_result_parses() -> None:
     """结算手牌文本转一对一胜率分位。"""
     # 顺子 Q-J-10 → 较高分位
@@ -1760,8 +1931,11 @@ def test_hand_pctile_from_result_parses() -> None:
     # 散牌 10-9-2 → 较低分位
     p2 = _hand_pctile_from_result("10♦ 9♣ 2♥", "散牌")
     assert p2 is not None and p2 < 0.5
-    # 无法解析 → None
-    assert _hand_pctile_from_result("", "散牌") is None
+    # 无牌面但有牌型 → 回退牌型级分位（非 None）
+    p3 = _hand_pctile_from_result("", "散牌")
+    assert p3 is not None and p3 == pytest.approx(zjh_prob.win_prob_1v1_type("散牌"))
+    # 既无牌面又无有效牌型 → None
+    assert _hand_pctile_from_result("", "") is None
 
 
 def test_bucket_keys() -> None:

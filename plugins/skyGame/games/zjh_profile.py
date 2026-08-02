@@ -11,10 +11,11 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from .zjh_hand import _extract_hand_value, _normalize_hand_type
-from .zjh_prob import win_prob_1v1
+from .zjh_prob import win_prob_1v1, win_prob_1v1_type
 from .zjh_state import _player_key, _players
 
 # kv 键前缀
@@ -40,6 +41,12 @@ _UPDATED = "updated_ms"
 # 空动作计数
 _EMPTY_ACTIONS = {"fold": 0, "call": 0, "raise": 0}
 
+# 贝叶斯收缩伪样本数：样本不足时按此权重折回先验/基线（动作概率、实测胜率、诈唬率共用）
+PRIOR_STRENGTH = 3.0
+
+# 弱牌分位阈值：实测手牌分位低于此值计为一次「诈唬/弱牌继续」
+_WEAK_PCTILE = 0.5
+
 
 def _bucket(my_seen: bool, op_seen: bool, is_heads_up: bool) -> str:
     """构造状态分桶键：如 "b_b_hu"（我蒙、对手蒙、单挑）。"""
@@ -47,6 +54,18 @@ def _bucket(my_seen: bool, op_seen: bool, is_heads_up: bool) -> str:
     op_side = _OP_SEEN if op_seen else _OP_BLIND
     heads = _HU if is_heads_up else _MULTI
     return f"{my_side}_{op_side}_{heads}"
+
+
+def _percentile(values: list[float], q: float) -> float:
+    """线性插值分位数（q∈[0,1]）；values 非空。q=0.25 即下四分位。"""
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return ordered[0]
+    rank = q * (len(ordered) - 1)
+    low = int(math.floor(rank))
+    high = min(low + 1, len(ordered) - 1)
+    frac = rank - low
+    return ordered[low] * (1 - frac) + ordered[high] * frac
 
 
 class ProfileStore:
@@ -116,7 +135,6 @@ class ProfileStore:
         样本数低于 prior_strength 时，按 prior_strength 的伪样本权重折回全局先验。
         """
         uid = self._normalize_uid(uid)
-        prior_strength = 3.0  # 伪样本数；未来可配置化
         global_prior = self._global_prior(my_seen, op_seen, is_heads_up)
 
         profile = self._cache.get(uid)
@@ -129,7 +147,7 @@ class ProfileStore:
 
         n = sum(actions.values())
         # 样本足够则直接用经验频率；不足则向全局先验收缩
-        if n >= prior_strength:
+        if n >= PRIOR_STRENGTH:
             total = max(n, 1)
             return (
                 actions.get("fold", 0) / total,
@@ -139,11 +157,11 @@ class ProfileStore:
 
         # 经验频率与全局先验按样本数加权（贝叶斯收缩）
         g_f, g_c, g_r = global_prior
-        total = n + prior_strength
+        total = n + PRIOR_STRENGTH
         return (
-            (actions.get("fold", 0) + prior_strength * g_f) / total,
-            (actions.get("call", 0) + prior_strength * g_c) / total,
-            (actions.get("raise", 0) + prior_strength * g_r) / total,
+            (actions.get("fold", 0) + PRIOR_STRENGTH * g_f) / total,
+            (actions.get("call", 0) + PRIOR_STRENGTH * g_c) / total,
+            (actions.get("raise", 0) + PRIOR_STRENGTH * g_r) / total,
         )
 
     def _global_prior(self, my_seen: bool, op_seen: bool, is_heads_up: bool) -> tuple[float, float, float]:
@@ -162,6 +180,57 @@ class ProfileStore:
         if total <= 0:
             return (1 / 3, 1 / 3, 1 / 3)
         return (agg["fold"] / total, agg["call"] / total, agg["raise"] / total)
+
+    # ── 查询：对手实测手牌分位 / 诈唬率 ──
+
+    def hand_percentiles(self, uid: str, action: str) -> list[float]:
+        """返回该对手加注/平跟后结算回填的真实手牌分位列表（可能为空）。"""
+        uid = self._normalize_uid(uid)
+        profile = self._cache.get(uid)
+        if profile is None:
+            return []
+        key = _RAISE_PCTS if action == "raise" else _CALL_PCTS
+        values = profile.get(key)
+        return list(values) if isinstance(values, list) else []
+
+    def empirical_win_factor(self, uid: str, action: str, my_threshold: float, model_baseline: float) -> float:
+        """实测胜率收缩混合：我方牌力击败对手该动作实测手牌的比例。
+
+        wins = mean(p < my_threshold for p in pcts)，按 n/(n+PRIOR_STRENGTH) 与
+        model_baseline（现有范围模型胜率）收缩；无样本返回 model_baseline。
+        """
+        pcts = self.hand_percentiles(uid, action)
+        if not pcts:
+            return model_baseline
+        wins = sum(1.0 for p in pcts if p < my_threshold) / len(pcts)
+        weight = len(pcts) / (len(pcts) + PRIOR_STRENGTH)
+        return weight * wins + (1 - weight) * model_baseline
+
+    def bluff_rate(self, uid: str, baseline: float) -> float:
+        """逐对手诈唬率：其实测继续手牌中弱牌（分位 < _WEAK_PCTILE）占比。
+
+        样本数低于 PRIOR_STRENGTH 回退全局基线 baseline；否则向 baseline 收缩。
+        """
+        pcts = self.hand_percentiles(uid, "raise") + self.hand_percentiles(uid, "call")
+        if len(pcts) < PRIOR_STRENGTH:
+            return baseline
+        weak = sum(1.0 for p in pcts if p < _WEAK_PCTILE) / len(pcts)
+        weight = len(pcts) / (len(pcts) + PRIOR_STRENGTH)
+        return weight * weak + (1 - weight) * baseline
+
+    def raise_threshold_floor(self, uid: str, base_threshold: float) -> float | None:
+        """对手加注手牌范围下界：实测加注分位的下四分位（最弱实测加注牌）。
+
+        爱拿弱牌加注（诈唬型）的对手下四分位低 → 门槛低 → 我方蒙牌胜率高；
+        紧手加注者下四分位高 → 门槛高。按样本数向通用推断 base_threshold 收缩；
+        无样本返回 None（调用方回退通用推断）。
+        """
+        pcts = self.hand_percentiles(uid, "raise")
+        if not pcts:
+            return None
+        floor = _percentile(pcts, 0.25)
+        weight = len(pcts) / (len(pcts) + PRIOR_STRENGTH)
+        return weight * floor + (1 - weight) * base_threshold
 
     # ── 持久化 ──
 
@@ -203,19 +272,32 @@ def _display_name_by_id(game: dict[str, Any], uid: str) -> str | None:
 
 
 def _hand_pctile_from_result(hand: str, hand_type: str) -> float | None:
-    """把结算手牌文本转为一对一胜率分位；无法解析返回 None。"""
+    """把结算手牌转为一对一胜率分位。
+
+    有具体牌面（hand）时按精确点数查表；结算 lastResult 只给 handType 不给牌面时
+    回退牌型分位带中点（win_prob_1v1_type）。两者都解析不出返回 None。
+    """
     normalized = _normalize_hand_type(hand_type)
     value = _extract_hand_value(normalized, hand)
-    if value is None:
-        return None
-    return win_prob_1v1(normalized, value)
+    if value is not None:
+        return win_prob_1v1(normalized, value)
+    return win_prob_1v1_type(normalized)
 
 
-def feed_last_result(store: ProfileStore, game: dict[str, Any], uid_by_display: dict[str, str]) -> None:
+def feed_last_result(
+    store: ProfileStore,
+    game: dict[str, Any],
+    uid_by_display: dict[str, str],
+    round_action: dict[str, str] | None = None,
+) -> None:
     """从牌局结算 game.lastResult 回填对手真实手牌分位。
 
     lastResult.players 无 id，需用调用方提供的 displayName→id 映射关联。
     仅对非弃牌动作回填（已弃牌者没有加注/平跟的终局手牌意义）。
+
+    round_action：本轮各对手最激进动作 {uid: "raise"|"call"}，由轮询跟踪得到。
+    提供时按对手实际动作只回填对应桶（区分「加注的牌」与「平跟的牌」）；
+    为 None 时保持旧行为保守回填到两者。
     """
     last = game.get("lastResult") or (game.get("game") or {}).get("lastResult")
     if not isinstance(last, dict):
@@ -234,11 +316,16 @@ def feed_last_result(store: ProfileStore, game: dict[str, Any], uid_by_display: 
         uid = uid_by_display.get(display)
         if not uid:
             continue
-        hand = p.get("handType") or p.get("hand") or ""
-        pctile = _hand_pctile_from_result(hand, _normalize_hand_type(hand))
+        hand_text = p.get("hand") or ""
+        hand_type = p.get("handType") or ""
+        pctile = _hand_pctile_from_result(hand_text, hand_type)
         if pctile is None:
             continue
-        # 无法从结算区分对手是加注还是平跟，保守回填到两者；供统计时自行取用
+        if round_action is not None:
+            # 按对手本轮实际动作分桶；未知动作保守归入平跟
+            store.record_hand_pctile(uid, round_action.get(uid, "call"), pctile)
+            continue
+        # 无动作跟踪时保守回填到两者；供统计时自行取用
         store.record_hand_pctile(uid, "raise", pctile)
         store.record_hand_pctile(uid, "call", pctile)
 

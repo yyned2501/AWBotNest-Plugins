@@ -788,6 +788,31 @@ def win_prob_1v1(hand_type: str, hand_value: Any) -> float:
     return _weaker_count(hand_type, hand_value) / _TOTAL
 
 
+# 牌型 → 查表（与 _weaker_count 内联表一致，供牌型级分位复用）
+_TYPE_TABLES: dict[str, dict[Any, int]] = {
+    "豹子": _豹子,
+    "同花顺": _同花顺,
+    "金花": _金花,
+    "顺子": _顺子,
+    "对子": _对子,
+    "散牌": _散牌,
+}
+
+
+def win_prob_1v1_type(hand_type: str) -> float | None:
+    """仅有牌型、无具体点数时的代表性一对一胜率：取该牌型分位带中点。
+
+    结算 lastResult 只给 handType 不给牌面，无法定位型内具体点数，用牌型分位带
+    （最弱组合 ~ 最强组合 weaker_count）的中点近似对手手牌强度——散牌带偏低、
+    金花/顺子/豹子带偏高，足以支撑对手画像的强弱/诈唬分析。未知牌型返回 None。
+    """
+    table = _TYPE_TABLES.get(hand_type)
+    if not table:
+        return None
+    counts = list(table.values())
+    return (min(counts) + max(counts)) / 2 / _TOTAL
+
+
 def win_prob_n(hand_type: str, hand_value: Any, opponents: int) -> float:
     """按独立对手近似计算对多个未看牌对手的胜率。"""
     weaker = _weaker_count(hand_type, hand_value)
