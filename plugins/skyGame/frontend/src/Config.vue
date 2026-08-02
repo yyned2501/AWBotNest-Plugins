@@ -42,6 +42,9 @@ const DEFAULTS = {
   zjh_open_max_win_rate: 50,
   zjh_raise_enabled: false,
   zjh_raise_min_win_rate: 75,
+  zjh_call_range_cap: 85,
+  zjh_raise_range_floor: 75,
+  zjh_bluff_rate: 8,
   zjh_notify_join: true,
   zjh_notify_hand: true,
   zjh_notify_fold_confirm: false,
@@ -347,6 +350,30 @@ async function renewNow() {
               <span class="help">
                 系统优先按对手看牌后实际下注时的底池和成本反推门槛；轮询漏掉该动作时才使用此回退值。
               </span>
+            </div>
+          </section>
+
+          <section class="card">
+            <div class="card-h">范围上限与反诈唬（放松跟注）</div>
+            <span class="help">
+              看牌后评估胜率时，对手手牌不再默认可能是直到最强的任意牌：平跟/仅看牌对手按[推断门槛, 牌力上限]、
+              加注对手按[牌力下限, 100%]估计；反诈唬基线把每个已看牌对手有固定比例视为纯空气牌。整体更敢跟、少弃牌。
+              牌力上限设 100% 且反诈唬设 0% 即精确回到旧行为。
+            </span>
+            <div class="fld">
+              <span class="lbl">平跟对手牌力上限：{{ cfg.zjh_call_range_cap }}%</span>
+              <input v-model.number="cfg.zjh_call_range_cap" type="range" min="50" max="100" step="5" />
+              <span class="help">只平跟/看牌不追加的对手，牌力按[推断门槛, 此上限]估计。100% = 旧行为。</span>
+            </div>
+            <div class="fld">
+              <span class="lbl">加注对手牌力下限：{{ cfg.zjh_raise_range_floor }}%</span>
+              <input v-model.number="cfg.zjh_raise_range_floor" type="range" min="50" max="100" step="5" />
+              <span class="help">追加过的对手按[max(推断门槛, 此下限), 100%]估计；低于推断门槛时以推断门槛为准。</span>
+            </div>
+            <div class="fld">
+              <span class="lbl">反诈唬基线：{{ cfg.zjh_bluff_rate }}%</span>
+              <input v-model.number="cfg.zjh_bluff_rate" type="range" min="0" max="30" step="1" />
+              <span class="help">每个已看牌对手有该比例概率是纯空气牌（诈唬），抬高我方胜率。0% = 关闭。</span>
             </div>
           </section>
 
