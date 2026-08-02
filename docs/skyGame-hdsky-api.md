@@ -60,7 +60,8 @@
 - 单挑对手未看牌 → 直接跟注不自主看牌（`_act_on_hand()` 的 `_is_heads_up()` 分支）。
 - 单挑且对手已看牌、EV 为负 → 比牌止损（`showdown`/`open`，门户允许即用）或弃牌止损（无比牌动作时），绝不继续跟注；旧逻辑「EV为负也不弃牌」曾导致终胜率 0% 仍连跟多轮、单局巨亏（`_heads_up_stop_loss_action()`）。
 - 单挑且我方仍蒙牌 → 不看牌直接开牌：门户开放 `showdown`/`open` 任一即提交（实测只在对手已看牌时给出），两者都不开放（对手同样蒙牌）才退回盲跟；看牌会让后续投入翻倍，单挑无多人信息可换，直接比大小（`_poll_loop()` 看牌前分支的 `_heads_up_blind_action()`）。
-- 蒙牌跟注成本为已看牌的一半（实测同一 `callBet=3000` 下，蒙牌 `+1500 跟注`、已看牌 `+3000 跟注`），这是“单挑蒙牌不看牌直接开”的依据：看牌后每次跟注翻倍。
+- 多人蒙牌（非单挑）按 EV 决策「蒙还是看」，优先级低于单挑分支（`_blind_peek_or_call()`）：蒙牌手牌未知，按平均单挑胜率 0.5 估计，蒙牌跟注成本取 `callBet/2`（半价）计算增量 EV；EV ≥ 0 继续蒙牌半价盲跟，EV < 0 才看牌买信息（看牌免费，牌大再上、牌小交给看牌后 EV 弃牌）。看牌响应后的实际手牌决策仍走 `_act_on_hand()`。
+- 蒙牌跟注成本为已看牌的一半（实测同一 `callBet=3000` 下，蒙牌 `+1500 跟注`、已看牌 `+3000 跟注`）；`peek`（看牌）动作本身不扣费（实测看牌前后 `player.bet` 无增量、`lastAction` 无下注文本），其代价仅是失去后续跟注的半价优惠（看牌后变为 `seen`，每次跟注按全价 `callBet`）。这是“蒙牌 EV 决策”和“单挑蒙牌不看牌直接开”的共同依据。
 - 参与的对局结束（`roundId` 变化）时，推送最终结果通知：手牌、牌型、存活状态。
 - 遛马动作用于冷却拒绝时返回外层 `ok: true`、`result.code == "cooldown"`、`result.remainMs`（剩余毫秒）、`result.message`；冷却约 45 分钟，且期间 `state.canWalk` 仍为 `true`，不能用来判断是否可遛。插件记下 `remainMs` 换算的到期时间退避，未到不再尝试；`cooldown` 不计入失败计数，连续真失败 3 次后跳过本轮。（`horse.py` 的 `_care_once()`）
 - 养马实测字段：`stats.walkCountToday/walkMax`（每日遛马上限）、`stats.feedCountToday/feedMax`、`profile.satiety`（饱腹度）、`horse.balance`（银元）、`profile.state.{isDead,canWalk,canFeed}`。
@@ -69,6 +70,6 @@
 
 - `showdown` 实测只需 `{ "action": "showdown" }`（多次提交均 `ok: true`，无目标/确认字段）；`open` 同为开牌动作但尚未在实测中单独提交验证。
 - 对手发起应战后 `game.phase` 的实际取值；当前插件不会用它阻断行动。
-- `player.bet` 是总投入还是本轮增量，以及门户在蒙牌与看牌阶段的精确费用规则。
+- `player.bet` 是总投入还是本轮增量尚未最终确认（当前仅用相邻轮询的增量识别下注行为）；但蒙牌/看牌费用规则已实测确认：蒙牌跟注为 `callBet/2`、看牌后跟注为 `callBet`、`peek` 动作本身不扣费。
 
 发生应战失败时，记录并保留（脱敏后）`roundId`、`phase`、`actions`、`self` 关键状态与 POST 错误，用于补全本节。

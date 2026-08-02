@@ -10,6 +10,9 @@ from plugins.skyGame.games.zhajinhua import (
     _acquire_hand_after_peek,
     _act_on_hand,
     _actual_win_probability,
+    _blind_call_cost,
+    _blind_decision,
+    _blind_peek_or_call,
     _call_decision,
     _choose,
     _choose_action,
@@ -551,6 +554,135 @@ def test_call_decision_rejects_invalid_financial_data() -> None:
     assert _call_decision("豹子", 14, game, 0.5, tracker) is None
     assert _call_decision("豹子", 14, {"pot": 100, "callBet": -1}, 0.5, tracker) is None
     assert _call_decision("豹子", None, {"pot": 100, "callBet": 1}, 0.5, tracker) is None
+
+
+def test_blind_call_cost_is_half_of_seen() -> None:
+    # 正向（实测同一 callBet=3000 下蒙牌 +1500、已看牌 +3000）：蒙牌跟注成本为已看牌一半。
+    assert _blind_call_cost(3000) == 1500
+    assert _blind_call_cost(100) == 50
+    assert _blind_call_cost(0) == 0
+
+
+def test_blind_decision_all_blind_uses_average_hand_and_positive_ev() -> None:
+    # 正向：全蒙牌对手，手牌未知按平均单挑胜率 0.5 估；胜率 = 0.5^蒙牌数，大底池下 EV 为正。
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": False},
+        {"id": "one", "alive": True, "seen": False},
+        {"id": "two", "alive": True, "seen": False},
+        pot=10000,
+        call_bet=100,
+    )
+    decision = _blind_decision(game, 0.5, _RoundTracker())
+
+    assert decision is not None
+    assert decision.one_vs_one == 0.5
+    assert decision.blind_opponents == 2
+    assert decision.seen_opponents == 0
+    assert decision.win_probability == pytest.approx(0.25)
+    # 半价成本 50：EV = 0.25 × (10000 + 50) − 50
+    assert decision.expected_value == pytest.approx(0.25 * (10000 + 50) - 50)
+    assert decision.expected_value > 0
+
+
+def test_blind_decision_uses_half_cost_which_flips_ev_positive() -> None:
+    # 回归核心：半价概念必须真正进入 EV。此局面按半价 EV=+25（划算，继续蒙跟），
+    # 若误用全价成本则 EV=−25——两种结果符号相反，断言半价结果以锁定该概念。
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": False},
+        {"id": "opp", "alive": True, "seen": False},
+        pot=150,
+        call_bet=200,
+    )
+    decision = _blind_decision(game, 0.5, _RoundTracker())
+
+    assert decision is not None
+    # 半价成本 100：EV = 0.5 × (150 + 100) − 100 = +25
+    assert decision.expected_value == pytest.approx(25)
+    assert decision.expected_value > 0
+
+
+def test_blind_decision_negative_ev_against_strong_seen_bettor() -> None:
+    # 异常路径：对手已看牌且下注很大（回退门槛 0.9），平均手牌几乎必败 → EV 为负，
+    # 这正是触发「看牌买信息」而非继续盲跟的情形。
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": False},
+        {"id": "seen", "alive": True, "seen": True},
+        pot=100,
+        call_bet=2000,
+    )
+    decision = _blind_decision(game, 0.9, _RoundTracker())
+
+    assert decision is not None
+    assert decision.seen_opponents == 1
+    assert decision.seen_thresholds == ((0.9, False),)
+    assert decision.win_probability == 0.0
+    assert decision.expected_value < 0
+
+
+def test_blind_decision_rejects_invalid_financial_data() -> None:
+    tracker = _RoundTracker()
+    assert _blind_decision({"pot": 0, "callBet": 100, "players": []}, 0.5, tracker) is None
+    assert _blind_decision({"pot": 100, "callBet": -1, "players": []}, 0.5, tracker) is None
+    assert _blind_decision({"pot": 100, "callBet": 100}, -0.1, tracker) is None
+    assert _blind_decision({"pot": 100, "callBet": 100}, 1.0, tracker) is None
+
+
+def test_blind_peek_or_call_blind_calls_on_positive_ev() -> None:
+    # 正向：EV≥0 时蒙牌半价盲跟本身就划算，继续盲跟（不看牌，避免翻倍投入）。
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": False},
+        {"id": "one", "alive": True, "seen": False},
+        {"id": "two", "alive": True, "seen": False},
+        pot=10000,
+        call_bet=100,
+    )
+    action, choice = _blind_peek_or_call(game, ["call", "peek", "fold", "raise"], 0.5, _RoundTracker())
+
+    assert action == "call"
+    assert choice is not None
+    assert choice.expected_value > 0
+
+
+def test_blind_peek_or_call_peeks_on_negative_ev() -> None:
+    # 正向：EV<0 时平均手牌不划算，看牌买信息（牌大再上、牌小弃）。
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": False},
+        {"id": "seen", "alive": True, "seen": True},
+        pot=100,
+        call_bet=2000,
+    )
+    action, choice = _blind_peek_or_call(game, ["call", "peek", "fold", "raise"], 0.9, _RoundTracker())
+
+    assert action == "peek"
+    assert choice is not None
+    assert choice.expected_value < 0
+
+
+def test_blind_peek_or_call_falls_back_to_call_without_peek_action() -> None:
+    # 异常路径：EV<0 但门户不给看牌（actions 无 peek）时退回盲跟保底。
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": False},
+        {"id": "seen", "alive": True, "seen": True},
+        pot=100,
+        call_bet=2000,
+    )
+    action, choice = _blind_peek_or_call(game, ["call", "fold"], 0.9, _RoundTracker())
+
+    assert action == "call"
+    assert choice is not None
+    assert choice.expected_value < 0
+
+
+def test_blind_peek_or_call_returns_none_without_executable_action() -> None:
+    # 异常路径：既不能跟注也不能看牌时返回 None，交回轮询告警，不强行下注。
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": False},
+        {"id": "seen", "alive": True, "seen": True},
+        pot=100,
+        call_bet=2000,
+    )
+    action, _ = _blind_peek_or_call(game, ["fold"], 0.9, _RoundTracker())
+    assert action is None
 
 
 def test_in_hand_reflects_self_alive() -> None:

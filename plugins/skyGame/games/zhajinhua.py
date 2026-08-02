@@ -4,8 +4,9 @@
 # 认证与传输由 HdskyClient 封装，本模块只写「接口 + 参数」：
 #   - 每 zjh_poll_interval 秒轮询牌局状态
 #   - 未加入且可加入 → 加入
-#   - 轮到我了 → 第一轮蒙牌（盲跟），第二轮看牌
-#   - 单挑且我方仍蒙牌 → 不看牌直接开牌（showdown/open），开不了才盲跟
+#   - 单挑且我方仍蒙牌（优先级最高）→ 不看牌直接开牌（showdown/open），开不了才盲跟
+#   - 多人蒙牌按 EV 决策「蒙还是看」：蒙牌跟注成本为已看牌一半，EV ≥ 0 继续盲跟
+#     （半价划算，别去看牌翻倍）；EV < 0 看牌买信息，牌大再上、牌小弃
 #   - 看牌后完全按增量期望收益（EV）决策：EV ≥ 0 跟注，否则弃牌
 #   - 单挑且对手已看牌、EV 为负 → 比牌止损（showdown/open）或弃牌，绝不连跟
 #   - 胜率按对手看牌状态分开计算：蒙牌对手用 p^n，已看牌且继续下注的对手
@@ -499,6 +500,22 @@ def _update_round_tracker(game: dict[str, Any], tracker: _RoundTracker, log: Any
     tracker.call_bet = float(call_bet)
 
 
+def _seen_opponent_thresholds(
+    game: dict[str, Any], tracker: _RoundTracker, fallback_threshold: float
+) -> tuple[int, list[tuple[float, bool]]]:
+    """统计蒙牌对手数，并收集已看牌对手门槛（实测反推优先，缺失才用回退分位）。"""
+    blind, _ = _opponent_counts(game)
+    seen_thresholds: list[tuple[float, bool]] = []
+    for key, player in _opponent_entries(game):
+        if not player.get("seen", False):
+            continue
+        threshold = _combined_opponent_threshold(tracker.peek_snapshots.get(key), tracker.snapshots.get(key))
+        observed = threshold is not None
+        threshold = threshold if threshold is not None else fallback_threshold
+        seen_thresholds.append((threshold, observed))
+    return blind, seen_thresholds
+
+
 def _call_decision(
     hand_type: str,
     hand_value: int | tuple[int, ...] | None,
@@ -521,20 +538,69 @@ def _call_decision(
     if one_vs_one <= 0:
         return None
 
-    blind, seen = _opponent_counts(game)
-    seen_thresholds: list[tuple[float, bool]] = []
-    for key, player in _opponent_entries(game):
-        if not player.get("seen", False):
-            continue
-        threshold = _combined_opponent_threshold(tracker.peek_snapshots.get(key), tracker.snapshots.get(key))
-        observed = threshold is not None
-        threshold = threshold if threshold is not None else fallback_threshold
-        seen_thresholds.append((threshold, observed))
+    blind, seen_thresholds = _seen_opponent_thresholds(game, tracker, fallback_threshold)
+    seen = len(seen_thresholds)
 
     win_probability = _actual_win_probability(one_vs_one, blind, tuple(threshold for threshold, _ in seen_thresholds))
 
     expected_value = win_probability * (pot + call_bet) - call_bet
     return _CallDecision(one_vs_one, blind, seen, tuple(seen_thresholds), win_probability, expected_value)
+
+
+# 蒙牌未知手牌按「平均单挑胜率」估计：随机两手牌对称，任一手压过对手的概率为 0.5。
+_BLIND_ONE_VS_ONE = 0.5
+
+
+def _blind_call_cost(call_bet: float) -> float:
+    """蒙牌跟注成本为已看牌的一半（实测同一 callBet=3000 下蒙牌 +1500、已看牌 +3000）。"""
+    return call_bet / 2
+
+
+def _blind_decision(game: dict[str, Any], fallback_threshold: float, tracker: _RoundTracker) -> _CallDecision | None:
+    """蒙牌（未看牌）决策评估：手牌未知按平均单挑胜率 0.5 估，跟注成本按半价计。
+
+    用于「蒙还是看」的 EV 决策——EV ≥ 0 时蒙牌半价跟注本身就划算，继续盲跟；
+    EV < 0 时平均手牌已不划算，看牌买信息（牌大再上、牌小弃）。与看牌决策同构，
+    差别仅在单挑胜率取平均值、成本取半价。
+    """
+    if not 0 <= fallback_threshold < 1:
+        return None
+
+    pot = game.get("pot")
+    call_bet = game.get("callBet")
+    if not isinstance(pot, (int, float)) or not isinstance(call_bet, (int, float)):
+        return None
+    if pot <= 0 or call_bet <= 0:
+        return None
+
+    blind, seen_thresholds = _seen_opponent_thresholds(game, tracker, fallback_threshold)
+    seen = len(seen_thresholds)
+
+    blind_cost = _blind_call_cost(float(call_bet))
+    win_probability = _actual_win_probability(
+        _BLIND_ONE_VS_ONE, blind, tuple(threshold for threshold, _ in seen_thresholds)
+    )
+    expected_value = win_probability * (pot + blind_cost) - blind_cost
+    return _CallDecision(_BLIND_ONE_VS_ONE, blind, seen, tuple(seen_thresholds), win_probability, expected_value)
+
+
+def _blind_peek_or_call(
+    game: dict[str, Any], actions: list[Any], fallback_threshold: float, tracker: _RoundTracker
+) -> tuple[str | None, _CallDecision | None]:
+    """多人蒙牌时按 EV 决定「盲跟」还是「看牌」，返回动作与蒙牌评估明细。
+
+    蒙牌跟注半价：EV ≥ 0 时盲跟本身就划算，继续盲跟；EV < 0 时平均手牌已不划算，
+    看牌买信息（牌大再上、牌小弃）。门户不给看牌才退回盲跟保底；两者都不给返回 None。
+    单挑局面不走这里——优先级更高的 `_heads_up_blind_action` 已先行处理。
+    """
+    blind_choice = _blind_decision(game, fallback_threshold, tracker)
+    if blind_choice is not None and blind_choice.expected_value >= 0 and "call" in actions:
+        return "call", blind_choice
+    if "peek" in actions:
+        return "peek", blind_choice
+    if "call" in actions:
+        return "call", blind_choice
+    return None, blind_choice
 
 
 def _choose(
@@ -964,14 +1030,9 @@ async def _poll_loop(ctx: object) -> None:
                             tracker,
                             action_override,
                         )
-                    elif turns_taken == 0 and "call" in actions:
-                        # 第一轮蒙牌（盲跟）
-                        ctx.log.info("第一轮蒙牌，盲跟")
-                        await client.post("/api/portal/zhajinhua/action", {"action": "call"})
-                        turns_taken += 1
                     elif (heads_up_action := _heads_up_blind_action(g, actions)) is not None:
-                        # 单挑且我方蒙牌：不看牌（看牌会翻倍投入），直接开牌比大小。
-                        # 门户开放 showdown/open 即用之；对手同样蒙牌开不了才退回盲跟。
+                        # 单挑且我方蒙牌（优先级高于多人 EV 决策）：不看牌（看牌会翻倍投入），
+                        # 直接开牌比大小。门户开放 showdown/open 即用之；对手同样蒙牌开不了才退回盲跟。
                         ctx.log.info(
                             "单挑蒙牌，跳过看牌直接%s（对手%s）",
                             heads_up_action,
@@ -979,44 +1040,63 @@ async def _poll_loop(ctx: object) -> None:
                         )
                         await client.post("/api/portal/zhajinhua/action", {"action": heads_up_action})
                         turns_taken += 1
-                    elif "peek" in actions:
-                        # 第二轮看牌
-                        ctx.log.info("轮到我了！看牌...")
-                        _record_self_threshold(g, tracker, "peek", ctx.log)
-                        r = await client.post("/api/portal/zhajinhua/action", {"action": "peek"})
-                        if r.get("ok"):
-                            peek_game = r.get("game")
-                            if isinstance(peek_game, dict):
-                                g = peek_game
-                            # 看牌响应里手牌可能还没就绪：重拉状态补齐，别因读不到手牌就弃牌
-                            g, hand, hand_type = await _acquire_hand_after_peek(client, g)
-                            if not hand:
-                                # 仍读不到手牌：本轮不决策（绝不弃牌），等下次轮询补齐手牌再走正常决策
-                                ctx.log.warning("看牌后仍读不到手牌，本轮不决策，等下次轮询补齐")
-                            else:
-                                ctx.log.info("手牌: %s (%s)", hand, hand_type)
-                                peek_actions = g.get("actions", [])
-                                action_override = _action_override(peek_actions)
-                                fold_pending = await _act_on_hand(
-                                    ctx,
-                                    client,
-                                    cfg,
-                                    g,
-                                    hand,
-                                    hand_type,
-                                    seen_threshold,
-                                    tracker,
-                                    action_override,
-                                )
                     else:
-                        ctx.log.warning(
-                            "轮到我方但没有可执行的预期动作: 牌桌=%s phase=%r actions=%s hand=%s turns=%d",
-                            rid,
-                            phase,
-                            actions,
-                            bool(hand),
-                            turns_taken,
-                        )
+                        # 多人蒙牌：用 EV 决定「蒙牌半价盲跟」还是「看牌买信息」（优先级低于单挑）。
+                        # 蒙牌跟注成本只有已看牌一半：EV≥0 盲跟本身划算；EV<0 平均手牌不划算，
+                        # 看牌买信息——牌大再上、牌小交给看牌后 EV 弃。
+                        blind_action, blind_choice = _blind_peek_or_call(g, actions, seen_threshold, tracker)
+                        if blind_choice is not None:
+                            ctx.log.info(
+                                "蒙牌决策[%s]: 平均胜率=%.4f 蒙=%d 看=%d 底池=%.0f 半价成本=%.0f EV=%+.2f",
+                                {"call": "盲跟", "peek": "看牌"}.get(blind_action or "", "无可执行动作"),
+                                blind_choice.win_probability,
+                                blind_choice.blind_opponents,
+                                blind_choice.seen_opponents,
+                                g.get("pot", 0),
+                                _blind_call_cost(float(g.get("callBet", 0))),
+                                blind_choice.expected_value,
+                            )
+                        if blind_action == "call":
+                            await client.post("/api/portal/zhajinhua/action", {"action": "call"})
+                            turns_taken += 1
+                        elif blind_action == "peek":
+                            if blind_choice is None:
+                                ctx.log.info("牌局数据不完整，看牌后按实际手牌决策")
+                            _record_self_threshold(g, tracker, "peek", ctx.log)
+                            r = await client.post("/api/portal/zhajinhua/action", {"action": "peek"})
+                            if r.get("ok"):
+                                peek_game = r.get("game")
+                                if isinstance(peek_game, dict):
+                                    g = peek_game
+                                # 看牌响应里手牌可能还没就绪：重拉状态补齐，别因读不到手牌就弃牌
+                                g, hand, hand_type = await _acquire_hand_after_peek(client, g)
+                                if not hand:
+                                    # 仍读不到手牌：本轮不决策（绝不弃牌），等下次轮询补齐手牌再走正常决策
+                                    ctx.log.warning("看牌后仍读不到手牌，本轮不决策，等下次轮询补齐")
+                                else:
+                                    ctx.log.info("手牌: %s (%s)", hand, hand_type)
+                                    peek_actions = g.get("actions", [])
+                                    action_override = _action_override(peek_actions)
+                                    fold_pending = await _act_on_hand(
+                                        ctx,
+                                        client,
+                                        cfg,
+                                        g,
+                                        hand,
+                                        hand_type,
+                                        seen_threshold,
+                                        tracker,
+                                        action_override,
+                                    )
+                        else:
+                            ctx.log.warning(
+                                "轮到我方但没有可执行的预期动作: 牌桌=%s phase=%r actions=%s hand=%s turns=%d",
+                                rid,
+                                phase,
+                                actions,
+                                bool(hand),
+                                turns_taken,
+                            )
 
                 # 新牌局 CSRF 作废（轮次状态已在本轮开头完成重置）
                 if phase == "waiting" and rid and not joined:
