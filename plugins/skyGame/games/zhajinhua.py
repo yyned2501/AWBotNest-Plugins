@@ -40,6 +40,7 @@ from .zjh_model import (
     _blind_call_cost,
     _blind_decision,
     _blind_peek_or_call,
+    _blind_peek_reason,
     _blind_win_probability,
     _call_decision,
     _Choice,
@@ -91,6 +92,7 @@ __all__ = [
     "_blind_decision",
     "_blind_notification",
     "_blind_peek_or_call",
+    "_blind_peek_reason",
     "_blind_win_probability",
     "_call_decision",
     "_choose",
@@ -391,11 +393,7 @@ async def _poll_loop(ctx: object) -> None:
                             if blind_choice is None:
                                 ctx.log.info("牌局数据不完整，看牌后按实际手牌决策")
                             if cfg.get("zjh_notify_hand", True):
-                                peek_reason = (
-                                    "牌局数据不完整，先看牌再按实际手牌决策"
-                                    if blind_choice is None
-                                    else "蒙牌平均手牌不划算（EV<0），看牌买信息——牌大再上、牌小弃"
-                                )
+                                peek_reason = _blind_peek_reason(blind_choice, actions)
                                 await ctx.notify(
                                     _blind_notification(
                                         "peek",

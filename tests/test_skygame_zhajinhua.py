@@ -16,6 +16,7 @@ from plugins.skyGame.games.zhajinhua import (
     _blind_decision,
     _blind_notification,
     _blind_peek_or_call,
+    _blind_peek_reason,
     _blind_win_probability,
     _call_decision,
     _Choice,
@@ -1291,3 +1292,47 @@ def test_choose_flips_to_call_when_range_model_loosens_ev() -> None:
     )
     assert neutral_choice.call is False
     assert loosened_choice.call is True
+
+
+# ── 蒙牌看牌原因文案（回归：EV≥0 但门户不给盲跟时不能误报 EV<0） ────────────────
+
+
+def test_blind_peek_reason_positive_ev_but_call_unavailable() -> None:
+    # 回归（用户牌桌 #5137）：EV=+12643 却收到「EV<0 不划算」的看牌原因。实为门户本轮
+    # 只开放 peek、没给盲跟 call，被迫看牌——原因必须说明「门户未开放盲跟」而非「不划算」。
+    positive = _blind_decision(
+        _game(
+            {"id": "self", "alive": True, "isSelf": True, "seen": False},
+            {"id": "opp", "alive": True, "seen": False},
+            pot=43500,
+            call_bet=9000,
+        ),
+        0.5,
+        _RoundTracker(),
+    )
+    assert positive is not None and positive.expected_value > 0
+
+    reason = _blind_peek_reason(positive, ["peek"])
+    assert "EV≥0" in reason
+    assert "EV<0" not in reason
+    # 防御分支（正 EV 且有 call，实际不会走到看牌）也不得谎称 EV<0
+    assert "EV<0" not in _blind_peek_reason(positive, ["peek", "call"])
+
+
+def test_blind_peek_reason_negative_ev_truly_unprofitable() -> None:
+    negative = _blind_decision(
+        _game(
+            {"id": "self", "alive": True, "isSelf": True, "seen": False},
+            {"id": "opp", "alive": True, "seen": False},
+            pot=100,
+            call_bet=2000,
+        ),
+        0.5,
+        _RoundTracker(),
+    )
+    assert negative is not None and negative.expected_value < 0
+    assert "EV<0" in _blind_peek_reason(negative, ["peek"])
+
+
+def test_blind_peek_reason_incomplete_data() -> None:
+    assert "数据不完整" in _blind_peek_reason(None, ["peek"])

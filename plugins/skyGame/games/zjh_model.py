@@ -552,6 +552,21 @@ def _blind_peek_or_call(
     return None, blind_choice
 
 
+def _blind_peek_reason(blind_choice: _CallDecision | None, actions: list[Any]) -> str:
+    """蒙牌选择看牌时的通知原因，按真实情形区分，避免把「门户不给盲跟」误报成「EV<0」。
+
+    看牌由 `_blind_peek_or_call` 在两种情形返回：① EV<0 平均手牌真不划算；
+    ② EV≥0 但服务端 actions 没有盲跟 call（只有 peek），被迫看牌。两者文案须分开。
+    """
+    if blind_choice is None:
+        return "牌局数据不完整，先看牌再按实际手牌决策"
+    if blind_choice.expected_value < 0:
+        return "蒙牌平均手牌不划算（EV<0），看牌买信息——牌大再上、牌小弃"
+    if "call" not in actions:
+        return "蒙牌盲跟本身划算（EV≥0）但门户本轮未开放盲跟动作，只能先看牌、按实际手牌再决策"
+    return "看牌买信息——牌大再上、牌小弃"
+
+
 def _choose(
     hand_type: str,
     hand_value: int | tuple[int, ...] | None,
