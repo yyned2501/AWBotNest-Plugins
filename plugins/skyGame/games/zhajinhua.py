@@ -130,7 +130,7 @@ __all__ = [
     "_snapshot_for_actor",
     "_terminal_ev_call",
     "_terminal_ev_decision",
-    "_train_opponent_action",
+    "_train_opponent_actions",
     "_update_round_tracker",
     "feed_last_result",
     "get_store",
@@ -267,49 +267,53 @@ async def _act_on_hand(
     return False
 
 
-def _train_opponent_action(
+def _train_opponent_actions(
     store: object,
     game: dict[str, Any],
-    opponent_uid: str,
+    last_seen: dict[str, tuple[str, float]],
     my_seen: bool,
     is_heads_up: bool,
 ) -> None:
-    """从牌局公开状态解析对手本轮动作并训练画像。
+    """每轮训练画像：遍历所有存活对手，检测动作变化并去重记录。
 
-    lastAction 文本区分「报名 / +X 跟注 / +X 追加」：
-      - 含「追加」或「raise」→ raise（加注）
-      - 含「跟注」或「call」→ call
-      - 含「弃」或「fold」→ fold
-      - 仅「报名」→ 底注，不计入动作分桶（非决策动作）
-    仅统计尚未出局、非自身的存活对手。
+    与旧 `_train_opponent_action`（只在蒙牌分支、只记首个对手、不去重）相比：
+    - 覆盖所有时机（bot 看牌后、对手行动中、多人局全部对手）；
+    - 用 last_seen 签名（lastAction + bet）去重：同一动作只在变化时记一次，
+      避免轮询重复计数把跟注/加注频率撑高。
+    last_seen 由调用方在 `_poll_loop` 维护（跨局重置），键为对手 uid，
+    值为 (lastAction, bet) 签名。
     """
     for index, player in enumerate(_players(game)):
         if _is_self(player):
             continue
-        if _player_key(player, index) != opponent_uid:
-            continue
         if not (player.get("alive") or player.get("active", False)):
             continue
-        last_action = str(player.get("lastAction", "") or "")
+        uid = _player_key(player, index)
+        current_action = str(player.get("lastAction", "") or "")
+        current_bet = player.get("bet")
+        current_bet_f = float(current_bet) if isinstance(current_bet, (int, float)) else 0.0
+        signature = (current_action, current_bet_f)
+        if last_seen.get(uid) == signature:
+            continue  # 动作未变，不重复记录
+        last_seen[uid] = signature
         action: str | None = None
-        if "追加" in last_action or "raise" in last_action.lower():
+        if "追加" in current_action or "raise" in current_action.lower():
             action = "raise"
-        elif "跟注" in last_action or "call" in last_action.lower():
+        elif "跟注" in current_action or "call" in current_action.lower():
             action = "call"
-        elif "弃" in last_action or "fold" in last_action.lower():
+        elif "弃" in current_action or "fold" in current_action.lower():
             action = "fold"
         if action is None:
-            continue  # 报名等非决策动作不计入
+            continue  # 报名等非决策动作不计入（但已更新签名，避免反复尝试）
         op_seen = bool(player.get("seen", False))
         store.record_action(
-            opponent_uid,
+            uid,
             action,
             my_seen,
             op_seen,
             is_heads_up,
             display_name=str(player.get("displayName", "") or ""),
         )
-        return
 
 
 async def _poll_loop(ctx: object) -> None:
@@ -330,6 +334,10 @@ async def _poll_loop(ctx: object) -> None:
     blind_calls_so_far = 0
     # 本局 displayName→id 映射（结算回填画像用）
     uid_by_display: dict[str, str] = {}
+    # 对手动作去重签名：uid → (lastAction, bet)，跨局重置
+    last_opponent_seen: dict[str, tuple[str, float]] = {}
+    # 已回填的结算局 roundId（同一局 lastResult 每轮重复出现，只回填一次）
+    last_fed_result_rid: Any = None
 
     async with HdskyClient(log=ctx.log) as client:
         client.set_renewer(hdsky_auth.renewer_for(ctx))  # 401 时自动续期并重试
@@ -374,6 +382,8 @@ async def _poll_loop(ctx: object) -> None:
                     last_round_hand = ""
                     last_round_hand_type = ""
                     uid_by_display = {}
+                    last_opponent_seen = {}
+                    last_fed_result_rid = None
 
                 # 每轮更新 displayName→id 映射；新一局结算回填对手真实手牌分位到画像
                 for index, player in enumerate(_players(g)):
@@ -381,10 +391,29 @@ async def _poll_loop(ctx: object) -> None:
                     display = player.get("displayName")
                     if pid and display:
                         uid_by_display[display] = pid
-                feed_last_result(profile_store, game_data, uid_by_display)
+                last_result = game_data.get("game", {}).get("lastResult")
+                last_result_rid = last_result.get("roundId") if isinstance(last_result, dict) else None
+                if last_result_rid and last_result_rid != last_fed_result_rid:
+                    feed_last_result(profile_store, game_data, uid_by_display)
+                    last_fed_result_rid = last_result_rid
                 if cfg.get("zjh_profile_enabled", True):
                     profile_store.flush()
                 s = g.get("self", {})
+                # 每轮公共训练画像：遍历所有存活对手，检测动作变化去重记录
+                if cfg.get("zjh_profile_enabled", True):
+                    alive_opponents = [
+                        _player_key(player, index)
+                        for index, player in enumerate(_players(g))
+                        if not _is_self(player) and (player.get("alive") or player.get("active", False))
+                    ]
+                    is_hu = len(alive_opponents) <= 1
+                    _train_opponent_actions(
+                        profile_store,
+                        g,
+                        last_opponent_seen,
+                        bool(s.get("seen", False)),
+                        is_hu,
+                    )
                 # 弃牌/出局后本局不再有任何决策，停止跟踪对手快照与门槛推导。
                 # 否则对手互相缠斗时门槛会递归虚高（单挑反推的不动点在 1.0，
                 # 轮流下注单调收敛到 1.0），纯属无用计算还把日志刷花。
@@ -479,9 +508,6 @@ async def _poll_loop(ctx: object) -> None:
                             blind_calls_so_far=blind_calls_so_far,
                             action_probs=action_probs,
                         )
-                        # 训练画像：对手本轮动作（从 lastAction 解析）
-                        if opponent_uid and cfg.get("zjh_profile_enabled", True):
-                            _train_opponent_action(profile_store, g, opponent_uid, my_seen, is_hu)
                         if blind_choice is not None:
                             if isinstance(blind_choice, _TerminalDecision):
                                 ev_val = blind_choice.terminal_ev

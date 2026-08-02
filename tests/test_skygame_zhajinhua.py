@@ -52,6 +52,7 @@ from plugins.skyGame.games.zhajinhua import (
     _terminal_ev_call,
     _terminal_ev_decision,
     _TerminalBranch,
+    _train_opponent_actions,
     _update_round_tracker,
 )
 from plugins.skyGame.games.zjh_profile import (
@@ -1730,3 +1731,94 @@ def test_blind_peek_or_call_respects_profile_action_probs() -> None:
     assert action == "call"
     assert choice is not None
     assert choice.terminal_ev > 0
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 对手画像训练覆盖与去重（v1.14.0 修复：原只在蒙牌分支/只记首个/不去重）
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_train_opponent_actions_records_all_alive_opponents() -> None:
+    """遍历所有存活对手，而非仅首个：两个对手都入画像。"""
+    store = ProfileStore()
+    last_seen: dict[str, tuple[str, float]] = {}
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": False},
+        {"id": "p1", "alive": True, "seen": False, "lastAction": "+1500 跟注", "bet": 4500},
+        {"id": "p2", "alive": True, "seen": False, "lastAction": "+3000 追加", "bet": 6000},
+    )
+    _train_opponent_actions(store, game, last_seen, my_seen=False, is_heads_up=False)
+    dump = store.debug_dump()
+    assert "p1" in dump
+    assert "p2" in dump
+    # p1 跟注、p2 加注
+    p1_f, p1_c, p1_r = store.action_probabilities("p1", False, False, False)
+    assert p1_c > 0
+    p2_f, p2_c, p2_r = store.action_probabilities("p2", False, False, False)
+    assert p2_r > 0
+
+
+def test_train_opponent_actions_dedupes_same_action() -> None:
+    """同一动作跨多轮轮询只记一次：last_seen 签名去重。"""
+    store = ProfileStore()
+    last_seen: dict[str, tuple[str, float]] = {}
+    base = {
+        "id": "self",
+        "alive": True,
+        "isSelf": True,
+        "seen": False,
+    }
+    opp = {"id": "p1", "alive": True, "seen": False, "lastAction": "+1500 跟注", "bet": 4500}
+    # 第一轮：记录
+    _train_opponent_actions(store, _game(base, dict(opp)), last_seen, False, True)
+    n_after_first = store.debug_dump()["p1"]["total_hands"]
+    # 第二轮：同一动作不变 → 不重复记录
+    _train_opponent_actions(store, _game(base, dict(opp)), last_seen, False, True)
+    _train_opponent_actions(store, _game(base, dict(opp)), last_seen, False, True)
+    assert store.debug_dump()["p1"]["total_hands"] == n_after_first
+    # 动作变化（追加）→ 记录新动作
+    opp2 = dict(opp, lastAction="+3000 追加", bet=6000)
+    _train_opponent_actions(store, _game(base, opp2), last_seen, False, True)
+    assert store.debug_dump()["p1"]["total_hands"] == n_after_first + 1
+
+
+def test_train_opponent_actions_ignores_registration_action() -> None:
+    """报名（底注）不计入动作分桶，但签名更新避免反复尝试。"""
+    store = ProfileStore()
+    last_seen: dict[str, tuple[str, float]] = {}
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": False},
+        {"id": "p1", "alive": True, "seen": False, "lastAction": "报名", "bet": 3000},
+    )
+    _train_opponent_actions(store, game, last_seen, False, True)
+    # 无任何动作被记录（total_hands 保持 0）
+    dump = store.debug_dump()
+    assert "p1" not in dump or dump["p1"].get("total_hands", 0) == 0
+
+
+def test_train_opponent_actions_covers_blind_peeked_and_opponent_turn() -> None:
+    """训练不再依赖「轮到 bot + 蒙牌」：任何轮询快照都记录，含 bot 看牌后。"""
+    store = ProfileStore()
+    last_seen: dict[str, tuple[str, float]] = {}
+    # bot 已看牌（my_seen=True）、多人局：仍记录对手动作
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": True},
+        {"id": "p1", "alive": True, "seen": True, "lastAction": "+3000 追加", "bet": 9000},
+    )
+    _train_opponent_actions(store, game, last_seen, my_seen=True, is_heads_up=False)
+    dump = store.debug_dump()
+    assert "p1" in dump
+    # 分桶为 s_s_multi（我看、对手看、多人）
+    assert "s_s_multi" in dump["p1"]
+
+
+def test_train_opponent_actions_skips_folded_opponents() -> None:
+    """已弃牌/出局对手不训练。"""
+    store = ProfileStore()
+    last_seen: dict[str, tuple[str, float]] = {}
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": False},
+        {"id": "folded", "alive": False, "seen": False, "lastAction": "弃牌", "bet": 3000},
+    )
+    _train_opponent_actions(store, game, last_seen, False, True)
+    assert "folded" not in store.debug_dump()
