@@ -238,6 +238,9 @@ async def _act_on_hand(
 
     if not choice.call:
         return await _request_fold(ctx, client, cfg, game, hand, hand_type, choice, tracker)
+    # 本局首次已看牌决策（tracker 每局重建）：大牌慢打不加注，避免第一次看牌就加注吓退对手
+    first_peek = not tracker.seen_acted
+    tracker.seen_acted = True
     action, reason = _choose_action(
         choice,
         actions if isinstance(actions, list) else [],
@@ -246,6 +249,7 @@ async def _act_on_hand(
         bool(cfg.get("zjh_raise_enabled", False)),
         float(cfg.get("zjh_raise_min_win_rate", 75)) / 100,
         float(cfg.get("zjh_raise_frequency", 100)) / 100,
+        first_peek and bool(cfg.get("zjh_first_peek_no_raise", True)),
     )
 
     if action in {"call", "raise", "open", "showdown"}:

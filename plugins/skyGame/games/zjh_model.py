@@ -64,6 +64,8 @@ class _RoundTracker:
     snapshots: dict[str, _OpponentSnapshot] = field(default_factory=dict)
     self_thresholds: dict[str, float] = field(default_factory=dict)
     pending_fold: _PendingFold | None = None
+    # 本局我方是否已做过「已看牌」决策：首次看牌慢打不加注用（每局随 tracker 重建而重置）
+    seen_acted: bool = False
 
 
 @dataclass(frozen=True)
@@ -1046,6 +1048,7 @@ def _choose_action(
     raise_enabled: bool,
     raise_threshold: float,
     raise_frequency: float = 1.0,
+    first_peek_no_raise: bool = False,
     rng: Callable[[], float] = random.random,
 ) -> tuple[str, str]:
     """按最终实际胜率选择跟注、主动开牌、追加或应战摊牌，动作必须获服务端允许。
@@ -1056,6 +1059,11 @@ def _choose_action(
     raise_frequency：胜率达标时的加注概率（0~1，默认 1.0 即达标必加）。大牌不必加、
     以概率 raise_frequency 加注、其余时候慢打平跟，做混合策略伪装——避免「bot 加注=怪兽」
     被对手摸透后弃牌，导致大牌只赢小底池。rng 供测试注入确定性随机源。
+
+    first_peek_no_raise：本局首次看牌决策（tracker.seen_acted 为 False 时由 _act_on_hand
+    传入 True）即使胜率达标也不加注，平跟慢打留人——第一次看牌就加注会把对手吓跑，
+    后续轮次（seen_acted 为 True）再按 raise_frequency 加注。无 call 授权（强制摊牌）时
+    不拦截，落入 showdown 继续。
     """
     decision = choice.decision
     if not choice.call or decision is None:
@@ -1064,6 +1072,11 @@ def _choose_action(
     if open_enabled and "open" in actions and win_probability < open_threshold:
         return "open", f"最终实际胜率{win_probability:.1%}低于主动开牌阈值{open_threshold:.1%}"
     if raise_enabled and "raise" in actions and win_probability >= raise_threshold:
+        if first_peek_no_raise and "call" in actions:
+            # 本局第一次看牌：大牌慢打平跟留人，不加注（加注会吓退对手，只赢小底池）
+            return "call", (
+                f"第一次看牌慢打：胜率{win_probability:.1%}虽达追加阈值{raise_threshold:.1%}，首次看牌不加注留人"
+            )
         if raise_frequency >= 1.0 or rng() < raise_frequency:
             return (
                 "raise",

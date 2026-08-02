@@ -196,6 +196,65 @@ async def test_showdown_phase_raises_when_high_win_rate_and_raise_enabled() -> N
     assert client.requests == [("/api/portal/zhajinhua/action", {"action": "raise"})]
 
 
+@pytest.mark.asyncio
+async def test_act_on_hand_first_peek_slow_plays_then_later_rounds_raise() -> None:
+    """集成：本局首次看牌决策大牌慢打平跟（留人），同一 tracker 后续决策恢复加注。"""
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": True},
+        {"id": "opponent", "alive": True, "seen": True},
+        pot=20000,
+        call_bet=2000,
+    )
+    game.update(
+        {
+            "roundId": 123,
+            "actions": ["fold", "raise", "call"],
+            "self": {"alive": True, "isTurn": True},
+        }
+    )
+    cfg = {"zjh_notify_hand": False, "zjh_raise_enabled": True, "zjh_raise_min_win_rate": 75}
+    tracker = _RoundTracker()
+    assert tracker.seen_acted is False
+
+    client = _FakeClient()
+    await _act_on_hand(_FakeContext(), client, cfg, game, "A♠ A♥ A♦", "豹子", 0.5, tracker)
+    # 第一次看牌：豹子达标也不加注，平跟慢打留人
+    assert client.requests == [("/api/portal/zhajinhua/action", {"action": "call"})]
+    assert tracker.seen_acted is True
+
+    client2 = _FakeClient()
+    await _act_on_hand(_FakeContext(), client2, cfg, game, "A♠ A♥ A♦", "豹子", 0.5, tracker)
+    # 后续决策（seen_acted=True）：达标照常加注
+    assert client2.requests == [("/api/portal/zhajinhua/action", {"action": "raise"})]
+
+
+@pytest.mark.asyncio
+async def test_act_on_hand_first_peek_raises_when_config_disabled() -> None:
+    """异常路径：zjh_first_peek_no_raise=False 关闭慢打 → 第一次看牌达标即加注（旧行为）。"""
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": True},
+        {"id": "opponent", "alive": True, "seen": True},
+        pot=20000,
+        call_bet=2000,
+    )
+    game.update(
+        {
+            "roundId": 123,
+            "actions": ["fold", "raise", "call"],
+            "self": {"alive": True, "isTurn": True},
+        }
+    )
+    cfg = {
+        "zjh_notify_hand": False,
+        "zjh_raise_enabled": True,
+        "zjh_raise_min_win_rate": 75,
+        "zjh_first_peek_no_raise": False,
+    }
+    client = _FakeClient()
+    await _act_on_hand(_FakeContext(), client, cfg, game, "A♠ A♥ A♦", "豹子", 0.5, _RoundTracker())
+    assert client.requests == [("/api/portal/zhajinhua/action", {"action": "raise"})]
+
+
 def test_probability_table_has_continuous_hand_type_ranges() -> None:
     tables = gen_zjh_prob._build_tables()
     ranges = (
@@ -630,6 +689,43 @@ def test_choose_action_raise_frequency_extremes() -> None:
     assert _choose_action(choice, ["raise", "call"], False, 0.5, True, 0.75, 1.0, rng=lambda: 0.999)[0] == "raise"
     # 频率 0：rng=0 也不加（0<0 为 False）→ 慢打 call
     assert _choose_action(choice, ["raise", "call"], False, 0.5, True, 0.75, 0.0, rng=lambda: 0.0)[0] == "call"
+
+
+def test_choose_action_first_peek_no_raise_slow_plays_big_hand() -> None:
+    """第一次看牌不加注：本局首次看牌决策即使胜率达标也只平跟慢打，且原因点明慢打。"""
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True},
+        {"id": "blind", "alive": True, "seen": False},
+        pot=1000,
+        call_bet=100,
+    )
+    choice = _choose("顺子", 11, game, 0.5, _RoundTracker())
+    assert choice.decision is not None and choice.decision.win_probability > 0.75
+
+    # first_peek_no_raise=True（首次看牌）：达标也不加注 → call，原因含慢打说明
+    action, reason = _choose_action(choice, ["raise", "call"], False, 0.5, True, 0.75, 1.0, first_peek_no_raise=True)
+    assert action == "call"
+    assert "第一次看牌慢打" in reason
+    # first_peek_no_raise=False（后续轮次）：同样达标 → 加注
+    assert (
+        _choose_action(choice, ["raise", "call"], False, 0.5, True, 0.75, 1.0, first_peek_no_raise=False)[0] == "raise"
+    )
+
+
+def test_choose_action_first_peek_no_raise_skipped_when_no_call_authorized() -> None:
+    """边界：强制摊牌阶段无 call 授权时，首次看牌抑制不生效——不能把「继续」也拦了。"""
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True},
+        {"id": "blind", "alive": True, "seen": False},
+        pot=1000,
+        call_bet=100,
+    )
+    choice = _choose("顺子", 11, game, 0.5, _RoundTracker())
+    # actions 无 call：first_peek_no_raise=True 也照常按频率加注（频率 1.0 → raise）
+    assert (
+        _choose_action(choice, ["fold", "raise", "showdown"], False, 0.5, True, 0.75, 1.0, first_peek_no_raise=True)[0]
+        == "raise"
+    )
 
 
 def test_choose_action_falls_back_to_call_when_server_disallows_attack() -> None:

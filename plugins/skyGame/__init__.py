@@ -1,5 +1,5 @@
 # =============================================================================
-# AWBotNest 插件：天空游戏 (skyGame) v1.14.4
+# AWBotNest 插件：天空游戏 (skyGame) v1.14.5
 #
 # 天空系列游戏的统一入口：Vue 配置界面左侧按游戏分组，各游戏逻辑拆到
 # games/ 子模块，互不干扰。当前收录：
@@ -29,7 +29,7 @@ from .games import hdsky_auth
 __plugin__ = {
     "name": "天空游戏",
     "id": "skyGame",
-    "version": "1.14.4",
+    "version": "1.14.5",
     "author": "Yy",
     "description": "天空系列游戏统一入口：炸金花自动参与、养马自动养护，左侧按游戏分组配置。",
     "scope": "user",
@@ -298,6 +298,16 @@ __plugin__ = {
             "show_if": {"zjh_raise_enabled": True},
             "order": 28,
         },
+        "zjh_first_peek_no_raise": {
+            "type": "boolean",
+            "default": True,
+            "label": "第一次看牌不加注（慢打留人）",
+            "section": "炸金花",
+            "help": "本局首次看牌决策即使胜率达追加阈值也平跟慢打、不加注——第一次看牌就加注会吓退对手。"
+            "后续轮次加注由「达标加注频率」控制。",
+            "show_if": {"zjh_raise_enabled": True},
+            "order": 28,
+        },
         "zjh_call_range_cap": {
             "type": "slider",
             "default": 85,
@@ -413,6 +423,10 @@ __plugin__ = {
         },
     },
     "changelog": (
+        "v1.14.5 更新：\n"
+        "- 第一次看牌不加注（慢打留人）：新增 zjh_first_peek_no_raise（默认开）。本局首次看牌决策"
+        "即使胜率达到追加阈值也平跟慢打、不加注——第一次看牌就加注会把对手吓跑、只剩自己赢空气。"
+        "后续轮次（已看牌后的再次决策）才按「达标加注频率」随机加注。强制摊牌阶段（无 call 授权）不受限\n"
         "v1.14.4 更新：\n"
         "- 大牌加注伪装：新增 zjh_raise_frequency（达标加注频率，默认 65%）。胜率达标时不再必加注，"
         "而是按此概率加注、其余时候慢打平跟，做混合策略伪装——避免「bot 加注=怪兽」被对手摸透后弃牌、"
