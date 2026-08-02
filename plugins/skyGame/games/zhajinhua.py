@@ -4,11 +4,10 @@
 # 认证与传输由 HdskyClient 封装，本模块只写「接口 + 参数」：
 #   - 每 zjh_poll_interval 秒轮询牌局状态
 #   - 未加入且可加入 → 加入
-#   - 单挑且我方仍蒙牌（优先级最高）→ 不看牌直接开牌（showdown/open），开不了才盲跟
-#   - 多人蒙牌按 EV 决策「蒙还是看」：蒙牌跟注成本为已看牌一半，EV ≥ 0 继续盲跟
-#     （半价划算，别去看牌翻倍）；EV < 0 看牌买信息，牌大再上、牌小弃
-#   - 看牌后完全按增量期望收益（EV）决策：EV ≥ 0 跟注，否则弃牌
-#   - 单挑且对手已看牌、EV 为负 → 比牌止损（showdown/open）或弃牌，绝不连跟
+#   - 蒙牌按 EV 决策「蒙还是看」：蒙牌跟注成本为已看牌一半，EV ≥ 0 继续盲跟；
+#     EV < 0 看牌买信息，牌大再上、牌小弃（不区分单挑/多人）
+#   - 看牌后完全按增量期望收益（EV）决策：EV ≥ 0 跟注，否则弃牌（不区分单挑/多人）
+#   - 服务端 actions 出现 showdown 时优先应战；这是门户动作授权，不是策略绕行
 #   - 胜率按对手看牌状态分开计算：已看牌（手牌确定）对蒙牌对手用 t^B；蒙牌（手牌未知）
 #     不能把平均胜率 0.5 当固定手牌，需对未知手牌强度积分（三人全蒙为 1/3 而非 0.5²）；
 #     已看牌且继续下注的对手按其行动时底池赔率反推牌力门槛再做条件胜率
@@ -239,46 +238,6 @@ def _opponent_counts(game: dict[str, Any]) -> tuple[int, int]:
         return 1, 0
     seen = sum(1 for _, player in opponents if player.get("seen", False))
     return len(opponents) - seen, seen
-
-
-def _is_heads_up(game: dict[str, Any]) -> bool:
-    """是否只剩一家对手（单挑局面）。"""
-    blind, seen = _opponent_counts(game)
-    return blind + seen == 1
-
-
-def _heads_up_opponent_seen(game: dict[str, Any]) -> bool:
-    """单挑中，对手是否已看牌。"""
-    for _, player in _opponent_entries(game):
-        return bool(player.get("seen", False))
-    return False
-
-
-def _heads_up_blind_action(game: dict[str, Any], actions: list[Any]) -> str | None:
-    """单挑且我方仍蒙牌时应执行的动作：优先直接开牌，否则盲跟，绝不看牌。
-
-    蒙牌后看牌会让后续投入翻倍，而单挑已无多人信息可换，直接比大小即可。
-    服务端开放 showdown（应战开牌）或 open（主动开牌）任一即用之；两者都不开放
-    （对手同样蒙牌时门户只给 peek/fold/call/raise）才退回盲跟，保持蒙牌等下一轮。
-    非单挑局面返回 None，交回常规看牌决策。
-    """
-    if not _is_heads_up(game):
-        return None
-    open_action = next((action for action in ("showdown", "open") if action in actions), None)
-    if open_action is not None:
-        return open_action
-    return "call" if "call" in actions else None
-
-
-def _heads_up_stop_loss_action(actions: list[Any]) -> str:
-    """单挑被碾压（EV 为负）时的止损动作：优先比牌（showdown/open），否则弃牌。
-
-    绝不继续跟注——EV 为负时跟注是纯亏损，对手每加一次就跟亏一次（曾出现终胜率
-    0% 仍连跟七轮、单局填进近九万的情况）。比牌一次性了结并保留翻盘可能，门户
-    不给比牌（actions 无 showdown/open）就弃牌止损。
-    """
-    stop = next((action for action in ("showdown", "open") if action in actions), None)
-    return stop if stop is not None else "fold"
 
 
 def _actual_win_probability(hand_threshold: float, blind_opponents: int, seen_thresholds: tuple[float, ...]) -> float:
@@ -623,7 +582,6 @@ def _blind_peek_or_call(
 
     蒙牌跟注半价：EV ≥ 0 时盲跟本身就划算，继续盲跟；EV < 0 时平均手牌已不划算，
     看牌买信息（牌大再上、牌小弃）。门户不给看牌才退回盲跟保底；两者都不给返回 None。
-    单挑局面不走这里——优先级更高的 `_heads_up_blind_action` 已先行处理。
     """
     blind_choice = _blind_decision(game, fallback_threshold, tracker)
     if blind_choice is not None and blind_choice.expected_value >= 0 and "call" in actions:
@@ -802,32 +760,6 @@ def _blind_notification(
     return "\n".join(lines)
 
 
-def _heads_up_blind_notification(
-    action: str,
-    rid: Any,
-    opponent_seen: bool,
-    decision: _CallDecision | None,
-    pot: float,
-    call_bet: float,
-) -> str:
-    """生成单挑蒙牌决策通知：应战/主动开牌（直接比大小）或盲跟（对手也蒙牌开不了）。"""
-    labels = {"showdown": "应战开牌", "open": "主动开牌", "call": "盲跟"}
-    lines = [
-        f"🃏 炸金花 · 单挑蒙牌 · {labels.get(action, action)}",
-        f"牌桌 #{rid} · 未看牌 · 对手{'已看牌' if opponent_seen else '未看牌'}",
-    ]
-    if decision is not None:
-        lines.append(f"底池 {pot:.0f} · 半价成本 {_blind_call_cost(call_bet):.0f}")
-        lines.append(f"平均单挑 {decision.one_vs_one:.1%} · 对手 {_opponent_brief(decision)}")
-        lines.append(f"蒙牌胜率 {decision.win_probability:.1%} · 期望收益 {decision.expected_value:+.0f}")
-    if action in {"showdown", "open"}:
-        reason = "单挑已无多人信息可换，不看牌直接比大小"
-    else:
-        reason = "对手也蒙牌、门户不给开牌，盲跟保住半价优惠"
-    lines.append(f"原因：{reason}")
-    return "\n".join(lines)
-
-
 def _game_result_notification(game_data: dict[str, Any], hand: str, hand_type: str) -> str:
     """生成牌局结束通知：本局结果、我方手牌、对手排行与摊牌手牌。"""
     game = game_data.get("game", {})
@@ -957,32 +889,8 @@ async def _act_on_hand(
     decision = choice.decision
     actions = game.get("actions", [])
 
-    # 单挑特殊逻辑：对手未看牌→直接跟注；对手已看牌→EV为负也不弃牌
-    is_heads_up = _is_heads_up(game)
-    opponent_seen = _heads_up_opponent_seen(game) if is_heads_up else False
-
     if action_override and action_override in actions:
         action, reason = action_override, "对手发起比牌，服务端要求应战开牌"
-    elif is_heads_up and not opponent_seen:
-        action, reason = "call", "单挑对手未看牌，直接跟注"
-        ctx.log.info("单挑覆盖: 对手未看牌，直接跟注（EV=%s）", f"{decision.expected_value:.2f}" if decision else "N/A")
-    elif is_heads_up and opponent_seen and not choice.call:
-        # 单挑对手已看牌且 EV 为负：绝不连跟（多跟多亏），比牌止损或弃牌止损。
-        stop_action = _heads_up_stop_loss_action(actions if isinstance(actions, list) else [])
-        if stop_action == "fold":
-            ctx.log.info(
-                "单挑止损: 对手已看牌 EV=%s 终胜率=%s，门户无比牌动作 → 弃牌",
-                f"{decision.expected_value:.2f}" if decision else "N/A",
-                f"{decision.win_probability:.1%}" if decision else "N/A",
-            )
-            return await _request_fold(ctx, client, cfg, game, hand, hand_type, choice, tracker)
-        action, reason = stop_action, "单挑对手已看牌、EV为负，比牌止损"
-        ctx.log.info(
-            "单挑止损: 对手已看牌 EV=%s 终胜率=%s → %s 比牌止损",
-            f"{decision.expected_value:.2f}" if decision else "N/A",
-            f"{decision.win_probability:.1%}" if decision else "N/A",
-            stop_action,
-        )
     elif not choice.call:
         return await _request_fold(ctx, client, cfg, game, hand, hand_type, choice, tracker)
     else:
@@ -1136,33 +1044,9 @@ async def _poll_loop(ctx: object) -> None:
                             tracker,
                             action_override,
                         )
-                    elif (heads_up_action := _heads_up_blind_action(g, actions)) is not None:
-                        # 单挑且我方蒙牌（优先级高于多人 EV 决策）：不看牌（看牌会翻倍投入），
-                        # 直接开牌比大小。门户开放 showdown/open 即用之；对手同样蒙牌开不了才退回盲跟。
-                        heads_up_opponent_seen = _heads_up_opponent_seen(g)
-                        heads_up_blind_choice = _blind_decision(g, seen_threshold, tracker)
-                        ctx.log.info(
-                            "单挑蒙牌，跳过看牌直接%s（对手%s）",
-                            heads_up_action,
-                            "已看牌" if heads_up_opponent_seen else "未看牌",
-                        )
-                        await client.post("/api/portal/zhajinhua/action", {"action": heads_up_action})
-                        turns_taken += 1
-                        if cfg.get("zjh_notify_hand", True):
-                            await ctx.notify(
-                                _heads_up_blind_notification(
-                                    heads_up_action,
-                                    rid,
-                                    heads_up_opponent_seen,
-                                    heads_up_blind_choice,
-                                    float(g.get("pot", 0) or 0),
-                                    float(g.get("callBet", 0) or 0),
-                                )
-                            )
                     else:
-                        # 多人蒙牌：用 EV 决定「蒙牌半价盲跟」还是「看牌买信息」（优先级低于单挑）。
-                        # 蒙牌跟注成本只有已看牌一半：EV≥0 盲跟本身划算；EV<0 平均手牌不划算，
-                        # 看牌买信息——牌大再上、牌小交给看牌后 EV 弃。
+                        # 蒙牌：无论单挑还是多人，都按 EV 决定「蒙牌半价盲跟」还是「看牌买信息」。
+                        # EV≥0 时盲跟本身划算；EV<0 时看牌获取信息，随后按真实手牌正常决策。
                         blind_action, blind_choice = _blind_peek_or_call(g, actions, seen_threshold, tracker)
                         if blind_choice is not None:
                             ctx.log.info(

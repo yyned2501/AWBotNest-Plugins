@@ -26,12 +26,7 @@ from plugins.skyGame.games.zhajinhua import (
     _extract_hand_value,
     _game_result_notification,
     _hand_threshold_for_actual_win_probability,
-    _heads_up_blind_action,
-    _heads_up_blind_notification,
-    _heads_up_opponent_seen,
-    _heads_up_stop_loss_action,
     _in_hand,
-    _is_heads_up,
     _normalize_hand_type,
     _notify_game_result,
     _opponent_counts,
@@ -690,6 +685,37 @@ def test_blind_peek_or_call_peeks_on_negative_ev() -> None:
     assert choice.expected_value < 0
 
 
+def test_blind_peek_or_call_heads_up_uses_same_ev_path() -> None:
+    # 回归：单挑蒙牌不再直接 open/showdown/call；EV 负且可看牌时同样选择 peek。
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": False},
+        {"id": "seen", "alive": True, "seen": True},
+        pot=100,
+        call_bet=2000,
+    )
+    action, choice = _blind_peek_or_call(game, ["peek", "fold", "showdown"], 0.9, _RoundTracker())
+
+    assert action == "peek"
+    assert choice is not None
+    assert choice.expected_value < 0
+
+
+def test_blind_peek_or_call_heads_up_keeps_positive_ev_blind_call() -> None:
+    # 单挑双方蒙牌、底池足够大时，仍按普通半价 EV 正常盲跟。
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": False},
+        {"id": "blind", "alive": True, "seen": False},
+        pot=10000,
+        call_bet=100,
+    )
+    action, choice = _blind_peek_or_call(game, ["call", "peek", "open"], 0.5, _RoundTracker())
+
+    assert action == "call"
+    assert choice is not None
+    assert choice.win_probability == pytest.approx(0.5)
+    assert choice.expected_value > 0
+
+
 def test_blind_peek_or_call_falls_back_to_call_without_peek_action() -> None:
     # 异常路径：EV<0 但门户不给看牌（actions 无 peek）时退回盲跟保底。
     game = _game(
@@ -838,158 +864,9 @@ async def test_acquire_hand_after_peek_returns_empty_when_never_ready() -> None:
     assert client.gets == 3
 
 
-def test_is_heads_up_detects_single_opponent() -> None:
-    # 单挑：只有一个对手存活
-    heads_up = _game(
-        {"id": "self", "alive": True, "isSelf": True, "seen": True},
-        {"id": "opp", "alive": True, "seen": False},
-    )
-    assert _is_heads_up(heads_up) is True
-
-
-def test_is_heads_up_false_with_multiple_opponents() -> None:
-    # 非单挑：多个对手存活
-    multi = _game(
-        {"id": "self", "alive": True, "isSelf": True, "seen": True},
-        {"id": "opp1", "alive": True, "seen": False},
-        {"id": "opp2", "alive": True, "seen": False},
-    )
-    assert _is_heads_up(multi) is False
-
-
-def test_is_heads_up_false_with_no_opponents() -> None:
-    # 无对手（只剩自己）：不是单挑
-    alone = _game(
-        {"id": "self", "alive": True, "isSelf": True, "seen": True},
-    )
-    assert _is_heads_up(alone) is False
-
-
-def test_heads_up_opponent_seen_true_when_opponent_has_peeked() -> None:
-    game = _game(
-        {"id": "self", "alive": True, "isSelf": True, "seen": True},
-        {"id": "opp", "alive": True, "seen": True},
-    )
-    assert _heads_up_opponent_seen(game) is True
-
-
-def test_heads_up_opponent_seen_false_when_opponent_blind() -> None:
-    game = _game(
-        {"id": "self", "alive": True, "isSelf": True, "seen": True},
-        {"id": "opp", "alive": True, "seen": False},
-    )
-    assert _heads_up_opponent_seen(game) is False
-
-
-def test_heads_up_opponent_seen_false_when_no_opponent() -> None:
-    assert _heads_up_opponent_seen({}) is False
-
-
-def _blind_heads_up_game(opp_seen: bool) -> dict[str, object]:
-    """构造我方蒙牌的单挑局面（self.seen=False + 一个对手）。"""
-    return _game(
-        {"id": "self", "alive": True, "isSelf": True, "seen": False},
-        {"id": "opp", "alive": True, "seen": opp_seen},
-    )
-
-
-def test_heads_up_blind_action_prefers_showdown_over_peek() -> None:
-    # 正向（实测门户动作集 peek,fold,raise,showdown）：有 showdown 就直接开，绝不看牌
-    game = _blind_heads_up_game(opp_seen=True)
-    assert _heads_up_blind_action(game, ["peek", "fold", "raise", "showdown"]) == "showdown"
-
-
-def test_heads_up_blind_action_uses_open_when_no_showdown() -> None:
-    # 正向（实测门户动作集 peek,fold,call,raise,open）：无 showdown 时用 open 开牌
-    game = _blind_heads_up_game(opp_seen=True)
-    assert _heads_up_blind_action(game, ["peek", "fold", "call", "raise", "open"]) == "open"
-
-
-def test_heads_up_blind_action_prefers_showdown_when_both_available() -> None:
-    # 正向：两者都给时优先 showdown（应战开牌）
-    game = _blind_heads_up_game(opp_seen=True)
-    assert _heads_up_blind_action(game, ["peek", "fold", "call", "raise", "open", "showdown"]) == "showdown"
-
-
-def test_heads_up_blind_action_calls_when_opponent_also_blind() -> None:
-    # 异常路径（实测对手也蒙牌时门户只给 peek,fold,call,raise，开不了牌）：退回盲跟，绝不看牌
-    game = _blind_heads_up_game(opp_seen=False)
-    assert _heads_up_blind_action(game, ["peek", "fold", "call", "raise"]) == "call"
-
-
-def test_heads_up_blind_action_never_returns_peek() -> None:
-    # 回归核心：即便只有 peek/call 可选，也不能返回 peek（看牌会翻倍投入）
-    game = _blind_heads_up_game(opp_seen=False)
-    assert _heads_up_blind_action(game, ["peek", "call"]) == "call"
-
-
-def test_heads_up_blind_action_returns_none_when_not_heads_up() -> None:
-    # 异常路径：多对手局面不触发，交回常规看牌决策
-    multi = _game(
-        {"id": "self", "alive": True, "isSelf": True, "seen": False},
-        {"id": "opp1", "alive": True, "seen": True},
-        {"id": "opp2", "alive": True, "seen": False},
-    )
-    assert _heads_up_blind_action(multi, ["peek", "fold", "call", "raise", "open"]) is None
-
-
-def test_heads_up_blind_action_returns_none_without_any_executable_action() -> None:
-    # 异常路径：单挑但既不能开牌也不能跟注（仅 peek/fold）时返回 None，不强行看牌
-    game = _blind_heads_up_game(opp_seen=False)
-    assert _heads_up_blind_action(game, ["peek", "fold"]) is None
-
-
-def test_heads_up_stop_loss_prefers_compare_over_call() -> None:
-    # 正向（实测门户动作集 fold,call,raise,open）：EV 为负时优先比牌止损，绝不返回 call
-    assert _heads_up_stop_loss_action(["fold", "call", "raise", "open"]) == "open"
-    assert _heads_up_stop_loss_action(["fold", "call", "raise", "showdown"]) == "showdown"
-    assert _heads_up_stop_loss_action(["fold", "call", "raise", "open", "showdown"]) == "showdown"
-
-
-def test_heads_up_stop_loss_folds_when_no_compare_available() -> None:
-    # 异常路径：门户不给比牌动作时弃牌止损，即便 call 可用也不跟注
-    assert _heads_up_stop_loss_action(["fold", "call", "raise"]) == "fold"
-    assert _heads_up_stop_loss_action(["fold"]) == "fold"
-
-
 @pytest.mark.asyncio
-async def test_act_on_hand_heads_up_blind_opponent_calls_without_ev_check() -> None:
-    """单挑对手未看牌 → 直接跟注，不检查 EV 正负。"""
-    game = _game(
-        {"id": "self", "alive": True, "isSelf": True, "seen": True},
-        {"id": "opp", "alive": True, "seen": False},
-        pot=100,
-        call_bet=2000,
-    )
-    game.update(
-        {
-            "roundId": 123,
-            "actions": ["fold", "call"],
-            "self": {"alive": True, "isTurn": True},
-        }
-    )
-    client = _FakeClient()
-    pending_fold = await _act_on_hand(
-        _FakeContext(),
-        client,
-        {"zjh_notify_hand": False},
-        game,
-        "2♠ 3♥ 5♦",
-        "散牌",
-        0.5,
-        _RoundTracker(),
-    )
-    assert pending_fold is False
-    # EV 为负也应跟注（对手未看牌），不弃牌
-    assert client.requests == [("/api/portal/zhajinhua/action", {"action": "call"})]
-
-
-@pytest.mark.asyncio
-async def test_act_on_hand_heads_up_seen_opponent_negative_ev_opens_to_stop_loss() -> None:
-    """回归：单挑对手已看牌、EV 为负且门户允许 open → 比牌止损，绝不连跟。
-
-    旧逻辑「EV为负也不弃牌」曾强制跟注，导致终胜率 0% 仍连跟多轮、单局巨亏。
-    """
+async def test_act_on_hand_heads_up_negative_ev_uses_normal_fold() -> None:
+    """单挑已看牌、EV 为负也走普通弃牌，不再强制跟注或主动比牌。"""
     game = _game(
         {"id": "self", "alive": True, "isSelf": True, "seen": True},
         {"id": "opp", "alive": True, "seen": True},
@@ -1004,6 +881,7 @@ async def test_act_on_hand_heads_up_seen_opponent_negative_ev_opens_to_stop_loss
         }
     )
     client = _FakeClient()
+
     pending_fold = await _act_on_hand(
         _FakeContext(),
         client,
@@ -1014,19 +892,19 @@ async def test_act_on_hand_heads_up_seen_opponent_negative_ev_opens_to_stop_loss
         0.5,
         _RoundTracker(),
     )
+
     assert pending_fold is False
-    # EV 为负 → 比牌止损，而不是继续跟注
-    assert client.requests == [("/api/portal/zhajinhua/action", {"action": "open"})]
+    assert client.requests == [("/api/portal/zhajinhua/action", {"action": "fold"})]
 
 
 @pytest.mark.asyncio
-async def test_act_on_hand_heads_up_seen_opponent_negative_ev_folds_when_no_compare() -> None:
-    """单挑对手已看牌、EV 为负但门户不给比牌 → 弃牌止损，仍不跟注。"""
+async def test_act_on_hand_heads_up_positive_ev_uses_normal_call() -> None:
+    """单挑已看牌、EV 为正时走普通 call，而非单挑强制动作。"""
     game = _game(
         {"id": "self", "alive": True, "isSelf": True, "seen": True},
-        {"id": "opp", "alive": True, "seen": True},
-        pot=100,
-        call_bet=2000,
+        {"id": "opp", "alive": True, "seen": False},
+        pot=10000,
+        call_bet=100,
     )
     game.update(
         {
@@ -1036,24 +914,25 @@ async def test_act_on_hand_heads_up_seen_opponent_negative_ev_folds_when_no_comp
         }
     )
     client = _FakeClient()
+
     pending_fold = await _act_on_hand(
         _FakeContext(),
         client,
         {"zjh_notify_hand": False},
         game,
-        "2♠ 3♥ 5♦",
-        "散牌",
+        "A♠ K♥ Q♦",
+        "顺子",
         0.5,
         _RoundTracker(),
     )
-    # 无比牌动作 → 走弃牌流程（_FakeClient 无 foldConfirm，直接完成）
+
     assert pending_fold is False
-    assert client.requests == [("/api/portal/zhajinhua/action", {"action": "fold"})]
+    assert client.requests == [("/api/portal/zhajinhua/action", {"action": "call"})]
 
 
 @pytest.mark.asyncio
-async def test_act_on_hand_heads_up_showdown_override_still_wins() -> None:
-    """单挑对手已看牌时 showdown 覆盖仍优先于单挑特殊逻辑。"""
+async def test_act_on_hand_showdown_override_still_wins() -> None:
+    """服务端授权 showdown 时仍优先应战，不受普通 EV 弃牌影响。"""
     game = _game(
         {"id": "self", "alive": True, "isSelf": True, "seen": True},
         {"id": "opp", "alive": True, "seen": True},
@@ -1229,22 +1108,6 @@ def test_blind_notification_renders_peek_without_decision() -> None:
     assert "牌桌 #5011 · 未看牌" in notification
     assert "半价成本" not in notification
     assert "原因：牌局数据不完整，先看牌再按实际手牌决策" in notification
-
-
-def test_heads_up_blind_notification_renders_showdown_and_call() -> None:
-    # 正向：单挑蒙牌应战开牌与盲跟两种决策都带对手看牌状态与原因。
-    game = _blind_heads_up_game(opp_seen=True)
-    decision = _blind_decision(game, 0.5, _RoundTracker())
-
-    showdown = _heads_up_blind_notification("showdown", 5012, True, decision, 1000, 100)
-    assert showdown.splitlines()[0] == "🃏 炸金花 · 单挑蒙牌 · 应战开牌"
-    assert "对手已看牌" in showdown
-    assert "直接比大小" in showdown
-
-    call = _heads_up_blind_notification("call", 5012, False, decision, 1000, 100)
-    assert "单挑蒙牌 · 盲跟" in call
-    assert "对手未看牌" in call
-    assert "盲跟保住半价优惠" in call
 
 
 @pytest.mark.asyncio
