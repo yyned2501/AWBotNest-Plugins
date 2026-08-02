@@ -1179,6 +1179,26 @@ def test_blind_notification_renders_peek_without_decision() -> None:
     assert "原因：牌局数据不完整，先看牌再按实际手牌决策" in notification
 
 
+def test_blind_notification_renders_terminal_decision() -> None:
+    # 回归：蒙牌决策改 Terminal EV 后，_blind_notification 必须兼容 _TerminalDecision
+    # （无 one_vs_one/blind_opponents 等 _CallDecision 字段），否则线上轮询崩。
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": False},
+        {"id": "opp", "alive": True, "seen": True},
+        pot=16500,
+        call_bet=6000,
+    )
+    terminal = _terminal_ev_decision(game, 0.65, _RoundTracker(), depth=2)
+    notification = _blind_notification("peek", 5012, terminal, 16500, 6000, terminal.reason)
+
+    lines = notification.splitlines()
+    assert lines[0] == "🃏 炸金花 · 看牌买信息"
+    assert "牌桌 #5012 · 未看牌" in notification
+    assert "终局期望" in notification
+    assert "单步EV对照" in notification
+    assert "原因：" in notification
+
+
 @pytest.mark.asyncio
 async def test_confirm_fold_success_notifies_and_clears_pending() -> None:
     # 正向：确认弃牌成功 → 推送弃牌通知、清空待确认状态并返回 True。

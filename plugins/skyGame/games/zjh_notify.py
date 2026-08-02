@@ -9,7 +9,14 @@ from __future__ import annotations
 from typing import Any
 
 from .zjh_hand import _normalize_hand_type
-from .zjh_model import _blind_call_cost, _CallDecision, _Choice, _combined_opponent_threshold, _RoundTracker
+from .zjh_model import (
+    _blind_call_cost,
+    _CallDecision,
+    _Choice,
+    _combined_opponent_threshold,
+    _RoundTracker,
+    _TerminalDecision,
+)
 from .zjh_state import _is_alive, _is_self, _opponent_entries, _players
 
 
@@ -124,18 +131,33 @@ def _fold_notification(rid: Any, hand: str, hand_type: str, reason: str, decisio
 def _blind_notification(
     action: str,
     rid: Any,
-    decision: _CallDecision | None,
+    decision: _TerminalDecision | _CallDecision | None,
     pot: float,
     call_bet: float,
     reason: str,
 ) -> str:
-    """生成多人蒙牌决策通知：盲跟（蒙）、看牌（看）、应战（showdown）或主动开牌（open）。"""
-    labels = {"call": "蒙牌盲跟", "peek": "看牌买信息", "showdown": "蒙牌应战", "open": "蒙牌主动开牌"}
+    """生成多人蒙牌决策通知：盲跟（蒙）、看牌（看）、应战（showdown）或主动开牌（open）。
+
+    decision 可为 Terminal EV 决策（v1.14.0，含 reason/terminal_ev）或旧单步 EV 决策
+    （_CallDecision，含 one_vs_one/对手构成）。两者展示字段不同，分别处理。
+    """
+    labels = {
+        "call": "蒙牌盲跟",
+        "peek": "看牌买信息",
+        "showdown": "蒙牌应战",
+        "open": "蒙牌主动开牌",
+        "fold": "蒙牌弃牌",
+    }
     lines = [f"🃏 炸金花 · {labels.get(action, action)}", f"牌桌 #{rid} · 未看牌"]
     if decision is not None:
         lines.append(f"底池 {pot:.0f} · 半价成本 {_blind_call_cost(call_bet):.0f}")
-        lines.append(f"平均单挑 {decision.one_vs_one:.1%} · 对手 {_opponent_brief(decision)}")
-        lines.append(f"蒙牌胜率 {decision.win_probability:.1%} · 期望收益 {decision.expected_value:+.0f}")
+        if isinstance(decision, _TerminalDecision):
+            # Terminal EV 决策：展示终局 EV 与单步 EV 对照
+            lines.append(f"终局期望 {decision.terminal_ev:+.0f} · 单步EV对照 {decision.single_step_ev:+.0f}")
+        else:
+            # 旧单步 EV 决策：展示胜率与对手构成
+            lines.append(f"平均单挑 {decision.one_vs_one:.1%} · 对手 {_opponent_brief(decision)}")
+            lines.append(f"蒙牌胜率 {decision.win_probability:.1%} · 期望收益 {decision.expected_value:+.0f}")
     lines.append(f"原因：{reason}")
     return "\n".join(lines)
 
