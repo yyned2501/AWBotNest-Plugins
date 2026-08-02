@@ -537,14 +537,22 @@ def _blind_decision(game: dict[str, Any], fallback_threshold: float, tracker: _R
 def _blind_peek_or_call(
     game: dict[str, Any], actions: list[Any], fallback_threshold: float, tracker: _RoundTracker
 ) -> tuple[str | None, _CallDecision | None]:
-    """多人蒙牌时按 EV 决定「盲跟」还是「看牌」，返回动作与蒙牌评估明细。
+    """多人蒙牌时按 EV 决定「盲跟」「看牌」或直接比牌，返回动作与蒙牌评估明细。
 
-    蒙牌跟注半价：EV ≥ 0 时盲跟本身就划算，继续盲跟；EV < 0 时平均手牌已不划算，
-    看牌买信息（牌大再上、牌小弃）。门户不给看牌才退回盲跟保底；两者都不给返回 None。
+    蒙牌跟注半价：EV ≥ 0 时先看门户是否开放 showdown/open 可直接结束本轮
+    （避免盲跟后对手加注导致后续投入翻倍）；都不开放才盲跟。
+    EV < 0 时看牌买信息（牌大再上、牌小弃）。门户不给看牌才退回盲跟保底；
+    两者都不给返回 None。
     """
     blind_choice = _blind_decision(game, fallback_threshold, tracker)
-    if blind_choice is not None and blind_choice.expected_value >= 0 and "call" in actions:
-        return "call", blind_choice
+    if blind_choice is not None and blind_choice.expected_value >= 0:
+        # EV≥0：优先用 showdown/open 结束本轮，避免盲跟后对手加注导致后续投入翻倍
+        if "showdown" in actions:
+            return "showdown", blind_choice
+        if "open" in actions:
+            return "open", blind_choice
+        if "call" in actions:
+            return "call", blind_choice
     if "peek" in actions:
         return "peek", blind_choice
     if "call" in actions:

@@ -129,8 +129,8 @@ def _blind_notification(
     call_bet: float,
     reason: str,
 ) -> str:
-    """生成多人蒙牌决策通知：盲跟（蒙）或看牌（看），附蒙牌半价 EV 明细。"""
-    labels = {"call": "蒙牌盲跟", "peek": "看牌买信息"}
+    """生成多人蒙牌决策通知：盲跟（蒙）、看牌（看）、应战（showdown）或主动开牌（open）。"""
+    labels = {"call": "蒙牌盲跟", "peek": "看牌买信息", "showdown": "蒙牌应战", "open": "蒙牌主动开牌"}
     lines = [f"🃏 炸金花 · {labels.get(action, action)}", f"牌桌 #{rid} · 未看牌"]
     if decision is not None:
         lines.append(f"底池 {pot:.0f} · 半价成本 {_blind_call_cost(call_bet):.0f}")

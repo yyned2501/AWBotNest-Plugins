@@ -710,7 +710,7 @@ def test_blind_peek_or_call_heads_up_uses_same_ev_path() -> None:
 
 
 def test_blind_peek_or_call_heads_up_keeps_positive_ev_blind_call() -> None:
-    # 单挑双方蒙牌、底池足够大时，仍按普通半价 EV 正常盲跟。
+    # 单挑双方蒙牌、底池足够大时，EV≥0 优先用 open 结束本轮（避免对手加注后投入翻倍）。
     game = _game(
         {"id": "self", "alive": True, "isSelf": True, "seen": False},
         {"id": "blind", "alive": True, "seen": False},
@@ -719,9 +719,54 @@ def test_blind_peek_or_call_heads_up_keeps_positive_ev_blind_call() -> None:
     )
     action, choice = _blind_peek_or_call(game, ["call", "peek", "open"], 0.5, _RoundTracker())
 
-    assert action == "call"
+    assert action == "open"
     assert choice is not None
     assert choice.win_probability == pytest.approx(0.5)
+    assert choice.expected_value > 0
+
+
+def test_blind_peek_or_call_positive_ev_prefers_showdown() -> None:
+    # 回归：EV≥0 时 showdown 优先于 open 和 call，直接应战结束本轮。
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": False},
+        {"id": "blind", "alive": True, "seen": False},
+        pot=10000,
+        call_bet=100,
+    )
+    action, choice = _blind_peek_or_call(game, ["call", "peek", "open", "showdown"], 0.5, _RoundTracker())
+
+    assert action == "showdown"
+    assert choice is not None
+    assert choice.expected_value > 0
+
+
+def test_blind_peek_or_call_positive_ev_uses_open_when_no_showdown() -> None:
+    # 回归：EV≥0 时无 showdown 但有 open 则主动开牌。
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": False},
+        {"id": "blind", "alive": True, "seen": False},
+        pot=10000,
+        call_bet=100,
+    )
+    action, choice = _blind_peek_or_call(game, ["call", "peek", "open"], 0.5, _RoundTracker())
+
+    assert action == "open"
+    assert choice is not None
+    assert choice.expected_value > 0
+
+
+def test_blind_peek_or_call_positive_ev_falls_back_to_call() -> None:
+    # 回归：EV≥0 但无 showdown/open 时才退回盲跟。
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": False},
+        {"id": "blind", "alive": True, "seen": False},
+        pot=10000,
+        call_bet=100,
+    )
+    action, choice = _blind_peek_or_call(game, ["call", "peek"], 0.5, _RoundTracker())
+
+    assert action == "call"
+    assert choice is not None
     assert choice.expected_value > 0
 
 

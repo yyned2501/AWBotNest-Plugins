@@ -365,9 +365,15 @@ async def _poll_loop(ctx: object) -> None:
                         # EV≥0 时盲跟本身划算；EV<0 时看牌获取信息，随后按真实手牌正常决策。
                         blind_action, blind_choice = _blind_peek_or_call(g, actions, seen_threshold, tracker)
                         if blind_choice is not None:
+                            _action_label = {
+                                "call": "盲跟",
+                                "peek": "看牌",
+                                "showdown": "应战",
+                                "open": "主动开牌",
+                            }.get(blind_action or "", "无可执行动作")
                             ctx.log.info(
                                 "蒙牌决策[%s]: 平均胜率=%.4f 蒙=%d 看=%d 底池=%.0f 半价成本=%.0f EV=%+.2f",
-                                {"call": "盲跟", "peek": "看牌"}.get(blind_action or "", "无可执行动作"),
+                                _action_label,
                                 blind_choice.win_probability,
                                 blind_choice.blind_opponents,
                                 blind_choice.seen_opponents,
@@ -375,7 +381,21 @@ async def _poll_loop(ctx: object) -> None:
                                 _blind_call_cost(float(g.get("callBet", 0))),
                                 blind_choice.expected_value,
                             )
-                        if blind_action == "call":
+                        if blind_action in ("showdown", "open"):
+                            await client.post("/api/portal/zhajinhua/action", {"action": blind_action})
+                            turns_taken += 1
+                            if cfg.get("zjh_notify_hand", True):
+                                await ctx.notify(
+                                    _blind_notification(
+                                        blind_action,
+                                        rid,
+                                        blind_choice,
+                                        float(g.get("pot", 0) or 0),
+                                        float(g.get("callBet", 0) or 0),
+                                        "蒙牌EV≥0，直接开牌结束本轮避免对手加注后投入翻倍",
+                                    )
+                                )
+                        elif blind_action == "call":
                             await client.post("/api/portal/zhajinhua/action", {"action": "call"})
                             turns_taken += 1
                             if cfg.get("zjh_notify_hand", True):
