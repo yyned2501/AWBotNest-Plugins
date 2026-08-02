@@ -1,5 +1,5 @@
 # =============================================================================
-# AWBotNest 插件：天空游戏 (skyGame) v1.12.0
+# AWBotNest 插件：天空游戏 (skyGame) v1.12.1
 #
 # 天空系列游戏的统一入口：Vue 配置界面左侧按游戏分组，各游戏逻辑拆到
 # games/ 子模块，互不干扰。当前收录：
@@ -11,7 +11,12 @@
 # 代码组织：
 #   games/hdsky.py       门户共享 HTTP（cookie + CSRF + requestKey + 401 自动续期）
 #   games/hdsky_auth.py  Cookie 续期（CookieCloud → 站内信抽码 → 登录 → 写 cookie）
-#   games/zhajinhua.py   炸金花轮询状态机
+#   games/zhajinhua.py   炸金花轮询编排入口（加入/轮询/弃牌确认/启停）
+#   games/zjh_hand.py    炸金花手牌解析（花色点数/牌型归一/查表键值）
+#   games/zjh_state.py   炸金花牌局公开状态读取（玩家列表/存活/看牌/自身标识）
+#   games/zjh_model.py   炸金花概率模型、门槛推断、轮询跟踪与 EV 决策
+#   games/zjh_notify.py  炸金花通知与决策日志
+#   games/zjh_prob.py    炸金花穷举概率表（自动生成）
 #   games/horse.py       养马养护循环
 # =============================================================================
 
@@ -23,7 +28,7 @@ from .games import hdsky_auth
 __plugin__ = {
     "name": "天空游戏",
     "id": "skyGame",
-    "version": "1.12.0",
+    "version": "1.12.1",
     "author": "Yy",
     "description": "天空系列游戏统一入口：炸金花自动参与、养马自动养护，左侧按游戏分组配置。",
     "scope": "user",
@@ -309,6 +314,11 @@ __plugin__ = {
         },
     },
     "changelog": (
+        "v1.12.1 更新：\n"
+        "- 炸金花纯代码重构，行为完全不变：原 1159 行的 games/zhajinhua.py 按职责拆为五个子模块——"
+        "zjh_hand（手牌解析）、zjh_state（牌局状态读取）、zjh_model（概率模型/门槛推断/跟踪/EV 决策）、"
+        "zjh_notify（通知与日志），zhajinhua.py 只留轮询编排与启停。概率算法、门槛反推、EV 判定、"
+        "通知文案一字未改，66 条回归测试全绿；为后续概率模型加固（范围上限/反诈唬）腾出可维护的结构\n"
         "v1.12.0 更新：\n"
         "- 移除炸金花单挑特殊策略：此前单挑蒙牌会绕过 EV 直接开牌/盲跟，已看牌又可能无条件跟注，"
         "会把未知弱牌带进对手已看牌、连续追加后的高成本比牌；现在无论单挑或多人，"
