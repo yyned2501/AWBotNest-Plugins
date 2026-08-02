@@ -35,7 +35,7 @@
 | `game.phase` | 门户阶段文本；目前仅记录/诊断，不作为动作授权条件。 |
 | `game.pot` | 当前底池。 |
 | `game.callBet` | 当前动作成本。 |
-| `game.actions` | 当前可提交动作的列表；动作授权的唯一来源。已观察到 `join`、`call`、`peek`、`fold`、`open`、`raise`、`showdown`。 |
+| `game.actions` | 当前可提交动作的列表；动作授权的唯一来源。已观察到 `join`、`call`、`peek`、`fold`、`open`、`raise`、`showdown`。实测：`open`/`showdown` 仅在单挑局面出现，且只在对手已看牌时给出；单挑双方都蒙牌时仅 `peek/fold/call/raise`（开不了牌）。 |
 | `game.self.joined` | 本账号是否已加入本局。 |
 | `game.self.isTurn` | 是否轮到本账号行动。 |
 | `game.self.alive` | 本账号是否仍在局。 |
@@ -58,13 +58,15 @@
 - 每次快照先由 `callBet / (pot + callBet)` 得到该局面的实际胜率盈亏平衡点；再以 `P(t) = t^B × Π((t - tᵢ)/(1 - tᵢ))` 按蒙牌与已看牌对手权重二分反推行动者的单挑牌力门槛。
 - 推断看牌对手牌力时，上牌快照和继续下注快照都参与计算，并取两次决策所需的较高单挑门槛；缺少任一已观测阶段时，日志必须标注降级来源。
 - 单挑对手未看牌 → 直接跟注不自主看牌；对手已看牌 → EV 为负也跟注不弃牌（`_act_on_hand()` 的 `_is_heads_up()` 分支）。
+- 单挑且我方仍蒙牌 → 不看牌直接开牌：门户开放 `showdown`/`open` 任一即提交（实测只在对手已看牌时给出），两者都不开放（对手同样蒙牌）才退回盲跟；看牌会让后续投入翻倍，单挑无多人信息可换，直接比大小（`_poll_loop()` 看牌前分支的 `_heads_up_blind_action()`）。
+- 蒙牌跟注成本为已看牌的一半（实测同一 `callBet=3000` 下，蒙牌 `+1500 跟注`、已看牌 `+3000 跟注`），这是“单挑蒙牌不看牌直接开”的依据：看牌后每次跟注翻倍。
 - 参与的对局结束（`roundId` 变化）时，推送最终结果通知：手牌、牌型、存活状态。
 - 遛马动作用于冷却拒绝时返回外层 `ok: true`、`result.code == "cooldown"`、`result.remainMs`（剩余毫秒）、`result.message`；冷却约 45 分钟，且期间 `state.canWalk` 仍为 `true`，不能用来判断是否可遛。插件记下 `remainMs` 换算的到期时间退避，未到不再尝试；`cooldown` 不计入失败计数，连续真失败 3 次后跳过本轮。（`horse.py` 的 `_care_once()`）
 - 养马实测字段：`stats.walkCountToday/walkMax`（每日遛马上限）、`stats.feedCountToday/feedMax`、`profile.satiety`（饱腹度）、`horse.balance`（银元）、`profile.state.{isDead,canWalk,canFeed}`。
 
 ## 待现场验证
 
-- `showdown` 是否在所有局面都只需 `{ "action": "showdown" }`，或是否需额外目标/确认字段。
+- `showdown` 实测只需 `{ "action": "showdown" }`（多次提交均 `ok: true`，无目标/确认字段）；`open` 同为开牌动作但尚未在实测中单独提交验证。
 - 对手发起应战后 `game.phase` 的实际取值；当前插件不会用它阻断行动。
 - `player.bet` 是总投入还是本轮增量，以及门户在蒙牌与看牌阶段的精确费用规则。
 

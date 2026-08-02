@@ -18,6 +18,7 @@ from plugins.skyGame.games.zhajinhua import (
     _extract_hand_value,
     _game_result_notification,
     _hand_threshold_for_actual_win_probability,
+    _heads_up_blind_action,
     _heads_up_opponent_seen,
     _in_hand,
     _is_heads_up,
@@ -717,6 +718,60 @@ def test_heads_up_opponent_seen_false_when_opponent_blind() -> None:
 
 def test_heads_up_opponent_seen_false_when_no_opponent() -> None:
     assert _heads_up_opponent_seen({}) is False
+
+
+def _blind_heads_up_game(opp_seen: bool) -> dict[str, object]:
+    """构造我方蒙牌的单挑局面（self.seen=False + 一个对手）。"""
+    return _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": False},
+        {"id": "opp", "alive": True, "seen": opp_seen},
+    )
+
+
+def test_heads_up_blind_action_prefers_showdown_over_peek() -> None:
+    # 正向（实测门户动作集 peek,fold,raise,showdown）：有 showdown 就直接开，绝不看牌
+    game = _blind_heads_up_game(opp_seen=True)
+    assert _heads_up_blind_action(game, ["peek", "fold", "raise", "showdown"]) == "showdown"
+
+
+def test_heads_up_blind_action_uses_open_when_no_showdown() -> None:
+    # 正向（实测门户动作集 peek,fold,call,raise,open）：无 showdown 时用 open 开牌
+    game = _blind_heads_up_game(opp_seen=True)
+    assert _heads_up_blind_action(game, ["peek", "fold", "call", "raise", "open"]) == "open"
+
+
+def test_heads_up_blind_action_prefers_showdown_when_both_available() -> None:
+    # 正向：两者都给时优先 showdown（应战开牌）
+    game = _blind_heads_up_game(opp_seen=True)
+    assert _heads_up_blind_action(game, ["peek", "fold", "call", "raise", "open", "showdown"]) == "showdown"
+
+
+def test_heads_up_blind_action_calls_when_opponent_also_blind() -> None:
+    # 异常路径（实测对手也蒙牌时门户只给 peek,fold,call,raise，开不了牌）：退回盲跟，绝不看牌
+    game = _blind_heads_up_game(opp_seen=False)
+    assert _heads_up_blind_action(game, ["peek", "fold", "call", "raise"]) == "call"
+
+
+def test_heads_up_blind_action_never_returns_peek() -> None:
+    # 回归核心：即便只有 peek/call 可选，也不能返回 peek（看牌会翻倍投入）
+    game = _blind_heads_up_game(opp_seen=False)
+    assert _heads_up_blind_action(game, ["peek", "call"]) == "call"
+
+
+def test_heads_up_blind_action_returns_none_when_not_heads_up() -> None:
+    # 异常路径：多对手局面不触发，交回常规看牌决策
+    multi = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": False},
+        {"id": "opp1", "alive": True, "seen": True},
+        {"id": "opp2", "alive": True, "seen": False},
+    )
+    assert _heads_up_blind_action(multi, ["peek", "fold", "call", "raise", "open"]) is None
+
+
+def test_heads_up_blind_action_returns_none_without_any_executable_action() -> None:
+    # 异常路径：单挑但既不能开牌也不能跟注（仅 peek/fold）时返回 None，不强行看牌
+    game = _blind_heads_up_game(opp_seen=False)
+    assert _heads_up_blind_action(game, ["peek", "fold"]) is None
 
 
 @pytest.mark.asyncio

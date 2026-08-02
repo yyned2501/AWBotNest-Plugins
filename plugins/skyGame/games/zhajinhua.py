@@ -5,6 +5,7 @@
 #   - 每 zjh_poll_interval 秒轮询牌局状态
 #   - 未加入且可加入 → 加入
 #   - 轮到我了 → 第一轮蒙牌（盲跟），第二轮看牌
+#   - 单挑且我方仍蒙牌 → 不看牌直接开牌（showdown/open），开不了才盲跟
 #   - 看牌后完全按增量期望收益（EV）决策：EV ≥ 0 跟注，否则弃牌
 #   - 胜率按对手看牌状态分开计算：蒙牌对手用 p^n，已看牌且继续下注的对手
 #     按其行动时底池赔率反推牌力门槛再做条件胜率
@@ -245,6 +246,22 @@ def _heads_up_opponent_seen(game: dict[str, Any]) -> bool:
     for _, player in _opponent_entries(game):
         return bool(player.get("seen", False))
     return False
+
+
+def _heads_up_blind_action(game: dict[str, Any], actions: list[Any]) -> str | None:
+    """单挑且我方仍蒙牌时应执行的动作：优先直接开牌，否则盲跟，绝不看牌。
+
+    蒙牌后看牌会让后续投入翻倍，而单挑已无多人信息可换，直接比大小即可。
+    服务端开放 showdown（应战开牌）或 open（主动开牌）任一即用之；两者都不开放
+    （对手同样蒙牌时门户只给 peek/fold/call/raise）才退回盲跟，保持蒙牌等下一轮。
+    非单挑局面返回 None，交回常规看牌决策。
+    """
+    if not _is_heads_up(game):
+        return None
+    open_action = next((action for action in ("showdown", "open") if action in actions), None)
+    if open_action is not None:
+        return open_action
+    return "call" if "call" in actions else None
 
 
 def _actual_win_probability(hand_threshold: float, blind_opponents: int, seen_thresholds: tuple[float, ...]) -> float:
@@ -926,12 +943,15 @@ async def _poll_loop(ctx: object) -> None:
                         ctx.log.info("第一轮蒙牌，盲跟")
                         await client.post("/api/portal/zhajinhua/action", {"action": "call"})
                         turns_taken += 1
-                    elif _is_heads_up(g) and not _heads_up_opponent_seen(g):
-                        # 单挑对手未看牌 → 跳过看牌，直接跟注/开牌
-                        showdown_action = _action_override(actions)
-                        action = showdown_action if showdown_action else "call"
-                        ctx.log.info("单挑对手未看牌，跳过看牌直接%s", action)
-                        await client.post("/api/portal/zhajinhua/action", {"action": action})
+                    elif (heads_up_action := _heads_up_blind_action(g, actions)) is not None:
+                        # 单挑且我方蒙牌：不看牌（看牌会翻倍投入），直接开牌比大小。
+                        # 门户开放 showdown/open 即用之；对手同样蒙牌开不了才退回盲跟。
+                        ctx.log.info(
+                            "单挑蒙牌，跳过看牌直接%s（对手%s）",
+                            heads_up_action,
+                            "已看牌" if _heads_up_opponent_seen(g) else "未看牌",
+                        )
+                        await client.post("/api/portal/zhajinhua/action", {"action": heads_up_action})
                         turns_taken += 1
                     elif "peek" in actions:
                         # 第二轮看牌
