@@ -15,6 +15,8 @@ const DEFAULTS = {
   bot: '',
   hdsky_cookie_file: '/app/data/hdsky_cookie.txt',
   hdsky_base_url: 'https://hdsky.supertimi.de:8443',
+  hdsky_debug: false,
+  hdsky_debug_file: '/app/data/hdsky_debug.jsonl',
   // Cookie 自动续期
   auth_auto_renew: true,
   cc_server: 'http://192.168.31.10:3000',
@@ -146,6 +148,22 @@ async function renewNow() {
             <div class="fld">
               <span class="lbl">门户地址</span>
               <input v-model="cfg.hdsky_base_url" class="inp" spellcheck="false" />
+            </div>
+          </section>
+
+          <section class="card">
+            <div class="card-h">调试</div>
+            <label class="row switch">
+              <input v-model="cfg.hdsky_debug" type="checkbox" />
+              <span>门户调试记录</span>
+            </label>
+            <span class="help" style="margin-top:-4px">
+              开启后把每次门户 API 的请求与响应（脱敏后）追加写入下方 JSONL 文件，供事后核对实际请求；不改变平台日志级别
+            </span>
+            <div class="fld">
+              <span class="lbl">调试记录文件路径</span>
+              <input v-model="cfg.hdsky_debug_file" class="inp" spellcheck="false" />
+              <span class="help">容器内 JSONL 路径（宿主 appdata/awbotnest/data 目录），超 10MB 自动轮转为 .1</span>
             </div>
           </section>
 
