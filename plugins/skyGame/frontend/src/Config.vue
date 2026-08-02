@@ -42,6 +42,7 @@ const DEFAULTS = {
   zjh_open_max_win_rate: 50,
   zjh_raise_enabled: false,
   zjh_raise_min_win_rate: 75,
+  zjh_raise_frequency: 65,
   zjh_call_range_cap: 85,
   zjh_raise_range_floor: 75,
   zjh_bluff_rate: 8,
@@ -347,6 +348,11 @@ async function renewNow() {
                 <span class="help">正 EV 且最终实际胜率达到阈值时，若允许 raise 则追加。</span>
                 <span class="lbl">最低实际胜率：{{ cfg.zjh_raise_min_win_rate }}%</span>
                 <input v-model.number="cfg.zjh_raise_min_win_rate" type="range" min="5" max="100" step="5" />
+                <template v-if="cfg.zjh_raise_enabled">
+                  <span class="lbl">达标加注频率：{{ cfg.zjh_raise_frequency }}%</span>
+                  <input v-model.number="cfg.zjh_raise_frequency" type="range" min="0" max="100" step="5" />
+                  <span class="help">达阈值时按此概率加注、其余慢打平跟做伪装；100=达标必加。</span>
+                </template>
               </div>
             </div>
           </section>

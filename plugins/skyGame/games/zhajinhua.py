@@ -245,6 +245,7 @@ async def _act_on_hand(
         float(cfg.get("zjh_open_max_win_rate", 50)) / 100,
         bool(cfg.get("zjh_raise_enabled", False)),
         float(cfg.get("zjh_raise_min_win_rate", 75)) / 100,
+        float(cfg.get("zjh_raise_frequency", 100)) / 100,
     )
 
     if action in {"call", "raise", "open", "showdown"}:

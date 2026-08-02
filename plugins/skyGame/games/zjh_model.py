@@ -9,6 +9,8 @@
 from __future__ import annotations
 
 import math
+import random
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -1043,11 +1045,17 @@ def _choose_action(
     open_threshold: float,
     raise_enabled: bool,
     raise_threshold: float,
+    raise_frequency: float = 1.0,
+    rng: Callable[[], float] = random.random,
 ) -> tuple[str, str]:
     """按最终实际胜率选择跟注、主动开牌、追加或应战摊牌，动作必须获服务端允许。
 
     强制摊牌阶段 actions 只有 fold/raise/showdown（无 call/open）：EV 支持继续时，
     showdown 作为「继续」动作（相当于全价跟注到摊牌）；胜率达标且允许则 raise。
+
+    raise_frequency：胜率达标时的加注概率（0~1，默认 1.0 即达标必加）。大牌不必加、
+    以概率 raise_frequency 加注、其余时候慢打平跟，做混合策略伪装——避免「bot 加注=怪兽」
+    被对手摸透后弃牌，导致大牌只赢小底池。rng 供测试注入确定性随机源。
     """
     decision = choice.decision
     if not choice.call or decision is None:
@@ -1056,7 +1064,12 @@ def _choose_action(
     if open_enabled and "open" in actions and win_probability < open_threshold:
         return "open", f"最终实际胜率{win_probability:.1%}低于主动开牌阈值{open_threshold:.1%}"
     if raise_enabled and "raise" in actions and win_probability >= raise_threshold:
-        return "raise", f"最终实际胜率{win_probability:.1%}达到追加阈值{raise_threshold:.1%}"
+        if raise_frequency >= 1.0 or rng() < raise_frequency:
+            return (
+                "raise",
+                f"最终实际胜率{win_probability:.1%}达到追加阈值{raise_threshold:.1%}（加注频率{raise_frequency:.0%}）",
+            )
+        # 达标但本次随机慢打：伪装大牌不加注，落入跟注/应战（混合策略防针对）
     if "call" in actions:
         return "call", choice.reason
     if "showdown" in actions:

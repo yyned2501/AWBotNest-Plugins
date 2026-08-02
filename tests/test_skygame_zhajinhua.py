@@ -601,6 +601,37 @@ def test_choose_action_raises_for_high_final_actual_win_rate() -> None:
     assert _choose_action(choice, ["raise", "call"], False, 0.5, True, 0.75)[0] == "raise"
 
 
+def test_choose_action_raise_frequency_slow_plays_when_rng_high() -> None:
+    """加注频率随机化：胜率达标但随机数 ≥ 频率 → 慢打平跟（伪装大牌防针对）。"""
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True},
+        {"id": "blind", "alive": True, "seen": False},
+        pot=1000,
+        call_bet=100,
+    )
+    choice = _choose("顺子", 11, game, 0.5, _RoundTracker())
+    assert choice.decision is not None and choice.decision.win_probability > 0.75
+    # 频率 0.65，rng=0.9 ≥ 0.65 → 不加注，落回 call
+    assert _choose_action(choice, ["raise", "call"], False, 0.5, True, 0.75, 0.65, rng=lambda: 0.9)[0] == "call"
+    # rng=0.1 < 0.65 → 加注
+    assert _choose_action(choice, ["raise", "call"], False, 0.5, True, 0.75, 0.65, rng=lambda: 0.1)[0] == "raise"
+
+
+def test_choose_action_raise_frequency_extremes() -> None:
+    """边界：频率 1.0 达标必加（旧行为，短路不查 rng）；频率 0 从不加注。"""
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True},
+        {"id": "blind", "alive": True, "seen": False},
+        pot=1000,
+        call_bet=100,
+    )
+    choice = _choose("顺子", 11, game, 0.5, _RoundTracker())
+    # 频率 1.0：即便 rng 接近 1 也必加
+    assert _choose_action(choice, ["raise", "call"], False, 0.5, True, 0.75, 1.0, rng=lambda: 0.999)[0] == "raise"
+    # 频率 0：rng=0 也不加（0<0 为 False）→ 慢打 call
+    assert _choose_action(choice, ["raise", "call"], False, 0.5, True, 0.75, 0.0, rng=lambda: 0.0)[0] == "call"
+
+
 def test_choose_action_falls_back_to_call_when_server_disallows_attack() -> None:
     game = _game(
         {"id": "self", "alive": True, "isSelf": True},
