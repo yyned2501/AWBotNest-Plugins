@@ -7,9 +7,13 @@
 3. 改完代码跑 `ruff check` + `ruff format --check`
 4. **同步提升版本号：`__init__.py` 的 `__plugin__["version"]` 和 `manifest.json` 对应条目必须一起改，漏一个算 bug**
 5. 更新 changelog
-6. 调用 `deploy-plugin` skill 同步到平台并热重载
-7. commit + push 到远程仓库
-8. 验证：`curl` 检查插件版本/日志确认生效
+6. **先 commit + push 到远程仓库**
+7. 再调用 `deploy-plugin` skill 同步到平台并热重载
+8. 验证：`curl` 检查插件版本/日志确认生效（重载约 20 秒后再复查一次版本，确认没被回退）
+
+> **为什么必须先提交推送、再部署**：平台会在你 push 后约 20 秒自动从 git（origin 默认分支）拉代码覆盖插件目录并重载。
+> 若先部署、后提交，部署上去的未提交版本会被这次 git 同步**回退成远程旧版本**（表现为 reload 成新版、几十秒后又变回旧版）。
+> 因此顺序固定为：改码 → commit + push → deploy → 验证。验证时务必等过这 20 秒再查版本。
 
 ## 外部 API 文档维护
 
