@@ -23,8 +23,17 @@ def _is_straight(ranks: RankTuple) -> bool:
 
 
 def _rank_tuples() -> list[RankTuple]:
-    """按炸金花点数比较顺序返回所有非顺子的不重复点数组合。"""
-    return [tuple(reversed(values)) for values in combinations(_RANKS, 3) if not _is_straight(tuple(reversed(values)))]
+    """按炸金花点数比较顺序（high, mid, low 升序）返回所有非顺子的不重复点数组合。
+
+    必须严格按牌力升序排列：weaker_count 直接取枚举序号 × 同牌型花色组合数，
+    若枚举序与牌力序不一致（如 combinations 原生按 low 优先），强散牌会被算出
+    比弱散牌更低的胜率。散牌/金花比大小为 high→mid→low，元组即 (high, mid, low)，
+    直接 sorted() 即得牌力升序。
+    """
+    tuples = [
+        tuple(reversed(values)) for values in combinations(_RANKS, 3) if not _is_straight(tuple(reversed(values)))
+    ]
+    return sorted(tuples)
 
 
 def _format_table(name: str, table: dict[object, int]) -> str:

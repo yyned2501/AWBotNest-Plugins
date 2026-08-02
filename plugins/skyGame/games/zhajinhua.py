@@ -6,8 +6,9 @@
 #   - 未加入且可加入 → 加入
 #   - 蒙牌按 EV 决策「蒙还是看」：蒙牌跟注成本为已看牌一半，EV ≥ 0 继续盲跟；
 #     EV < 0 看牌买信息，牌大再上、牌小弃（不区分单挑/多人）
-#   - 看牌后完全按增量期望收益（EV）决策：EV ≥ 0 跟注，否则弃牌（不区分单挑/多人）
-#   - 服务端 actions 出现 showdown 时优先应战；这是门户动作授权，不是策略绕行
+#   - 看牌后完全按增量期望收益（EV）决策：EV 在弃牌容差内跟注，否则弃牌（不区分单挑/多人）
+#   - 无「服务端强制应战」规则：开/加/跟/弃/应战全由 EV 驱动；强制摊牌阶段（actions 无 call）
+#     EV 支持继续时选 showdown/raise，该弃就弃
 #   - 胜率按对手看牌状态分开计算：已看牌（手牌确定）对蒙牌对手用 t^B；蒙牌（手牌未知）
 #     不能把平均胜率 0.5 当固定手牌，需对未知手牌强度积分（三人全蒙为 1/3 而非 0.5²）；
 #     已看牌且继续下注的对手按其行动时底池赔率反推牌力门槛再做条件胜率
@@ -35,7 +36,6 @@ from .zjh_hand import (
 from .zjh_model import (
     _FOLD_CONFIRM_MAX_RETRIES,
     _NEUTRAL_RANGE_MODEL,
-    _action_override,
     _actual_win_probability,
     _blind_call_cost,
     _blind_decision,
@@ -211,42 +211,41 @@ async def _act_on_hand(
     hand_type: str,
     fallback_threshold: float,
     tracker: _RoundTracker,
-    action_override: str | None = None,
 ) -> bool:
-    """对已看牌手牌做 EV 决策，并执行服务器允许的动作。"""
+    """对已看牌手牌做 EV 决策，并执行服务器允许的动作。
+
+    无「服务端强制应战」规则：开/加/跟/弃/应战全部由 EV 驱动（_choose + _choose_action）。
+    强制摊牌阶段（actions 无 call）EV 支持继续时，_choose_action 会选 showdown/raise。
+    """
     rid = game.get("roundId")
     hand_value = _extract_hand_value(hand_type, hand)
-    choice = _choose(hand_type, hand_value, game, fallback_threshold, tracker, _RangeModel.from_config(cfg))
+    choice = _choose(
+        hand_type,
+        hand_value,
+        game,
+        fallback_threshold,
+        tracker,
+        _RangeModel.from_config(cfg),
+        float(cfg.get("zjh_fold_ev_tolerance", 0) or 0),
+    )
     _log_decision(ctx, hand, hand_type, hand_value, game, choice, tracker)
 
     decision = choice.decision
     actions = game.get("actions", [])
 
-    if action_override and action_override in actions:
-        action, reason = action_override, "对手发起比牌，服务端要求应战开牌"
-    elif not choice.call:
+    if not choice.call:
         return await _request_fold(ctx, client, cfg, game, hand, hand_type, choice, tracker)
-    else:
-        action, reason = _choose_action(
-            choice,
-            actions if isinstance(actions, list) else [],
-            bool(cfg.get("zjh_open_enabled", False)),
-            float(cfg.get("zjh_open_max_win_rate", 50)) / 100,
-            bool(cfg.get("zjh_raise_enabled", False)),
-            float(cfg.get("zjh_raise_min_win_rate", 75)) / 100,
-        )
+    action, reason = _choose_action(
+        choice,
+        actions if isinstance(actions, list) else [],
+        bool(cfg.get("zjh_open_enabled", False)),
+        float(cfg.get("zjh_open_max_win_rate", 50)) / 100,
+        bool(cfg.get("zjh_raise_enabled", False)),
+        float(cfg.get("zjh_raise_min_win_rate", 75)) / 100,
+    )
 
-    if action in {"call", "raise", "open"}:
+    if action in {"call", "raise", "open", "showdown"}:
         _record_self_threshold(game, tracker, "continue", ctx.log)
-    if action_override:
-        ctx.log.info(
-            "应战开牌: 牌桌=%s phase=%r alive=%s isTurn=%s actions=%s",
-            rid,
-            game.get("phase"),
-            game.get("self", {}).get("alive"),
-            game.get("self", {}).get("isTurn"),
-            actions,
-        )
     ctx.log.info("执行动作[%s]：%s；服务端可用动作=%s", action, reason, actions)
     result = await client.post("/api/portal/zhajinhua/action", {"action": action})
     if not result.get("ok"):
@@ -456,8 +455,7 @@ async def _poll_loop(ctx: object) -> None:
 
                 elif joined and is_turn and isinstance(actions, list) and actions:
                     if hand:
-                        # 服务端 actions 是动作授权的唯一来源；showdown 出现时优先应战。
-                        action_override = _action_override(actions)
+                        # 已看牌：EV 决策开/加/跟/弃/应战，无服务端强制应战规则。
                         fold_pending = await _act_on_hand(
                             ctx,
                             client,
@@ -467,7 +465,6 @@ async def _poll_loop(ctx: object) -> None:
                             hand_type,
                             seen_threshold,
                             tracker,
-                            action_override,
                         )
                     else:
                         # 蒙牌：用 Terminal EV 决策树决定「盲跟 / 看牌 / 弃牌」。
@@ -588,8 +585,6 @@ async def _poll_loop(ctx: object) -> None:
                                     ctx.log.warning("看牌后仍读不到手牌，本轮不决策，等下次轮询补齐")
                                 else:
                                     ctx.log.info("手牌: %s (%s)", hand, hand_type)
-                                    peek_actions = g.get("actions", [])
-                                    action_override = _action_override(peek_actions)
                                     fold_pending = await _act_on_hand(
                                         ctx,
                                         client,
@@ -599,7 +594,6 @@ async def _poll_loop(ctx: object) -> None:
                                         hand_type,
                                         seen_threshold,
                                         tracker,
-                                        action_override,
                                     )
                         else:
                             ctx.log.warning(

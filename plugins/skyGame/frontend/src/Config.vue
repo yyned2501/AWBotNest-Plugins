@@ -45,6 +45,7 @@ const DEFAULTS = {
   zjh_call_range_cap: 85,
   zjh_raise_range_floor: 75,
   zjh_bluff_rate: 8,
+  zjh_fold_ev_tolerance: 5,
   zjh_terminal_depth: 2,
   zjh_blind_max_calls: 3,
   zjh_profile_enabled: true,
@@ -382,6 +383,11 @@ async function renewNow() {
               <span class="lbl">反诈唬基线：{{ cfg.zjh_bluff_rate }}%</span>
               <input v-model.number="cfg.zjh_bluff_rate" type="range" min="0" max="30" step="1" />
               <span class="help">每个已看牌对手有该比例概率是纯空气牌（诈唬），抬高我方胜率。0% = 关闭。</span>
+            </div>
+            <div class="fld">
+              <span class="lbl">弃牌 EV 容差：{{ cfg.zjh_fold_ev_tolerance }}% callBet</span>
+              <input v-model.number="cfg.zjh_fold_ev_tolerance" type="range" min="0" max="30" step="1" />
+              <span class="help">跟注 EV 只是略负（≥ −此比例×callBet）时不弃牌。0% = 旧行为（EV&lt;0 即弃）。</span>
             </div>
           </section>
 

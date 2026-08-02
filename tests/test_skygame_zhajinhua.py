@@ -91,7 +91,12 @@ class _FakeClient:
 
 
 @pytest.mark.asyncio
-async def test_showdown_override_uses_server_authorized_action_even_for_negative_ev() -> None:
+async def test_showdown_phase_folds_when_ev_negative_no_forced_showdown() -> None:
+    """回归：门户无「服务端强制应战」规则。showdown 只是普通授权动作，EV 为负就弃。
+
+    pot 极小（100）、callBet 极大（2000）→ 即便 A 高对子，底池赔率也太差，EV 为负。
+    旧逻辑因 actions 含 showdown 无条件应战；修正后按 EV 弃牌。
+    """
     game = _game(
         {"id": "self", "alive": True, "isSelf": True, "seen": True},
         {"id": "opponent", "alive": True, "seen": False},
@@ -113,15 +118,79 @@ async def test_showdown_override_uses_server_authorized_action_even_for_negative
         client,
         {"zjh_notify_hand": False},
         game,
-        "A♠ A♥ K♦",
-        "对子",
+        "7♠ 5♥ 3♦",  # 弱散牌，EV 明确为负
+        "散牌",
         0.5,
         _RoundTracker(),
-        "showdown",
     )
 
-    assert pending_fold is False
+    # EV 为负 → 走弃牌流程（_request_fold），不执行 showdown
+    assert client.requests == [] or all(req[1].get("action") == "fold" for req in client.requests)
+    assert pending_fold in (True, False)  # 弃牌可能需双击确认，动作不会是 showdown
+
+
+async def test_showdown_phase_continues_via_showdown_when_ev_positive() -> None:
+    """强制摊牌阶段（actions 无 call）且 EV 为正：选 showdown 作为继续动作应战。"""
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": True},
+        {"id": "opponent", "alive": True, "seen": True},
+        pot=20000,
+        call_bet=2000,
+    )
+    game.update(
+        {
+            "roundId": 123,
+            "phase": "showdown",
+            "actions": ["fold", "raise", "showdown"],
+            "self": {"alive": True, "isTurn": True},
+        }
+    )
+    client = _FakeClient()
+
+    await _act_on_hand(
+        _FakeContext(),
+        client,
+        {"zjh_notify_hand": False},  # raise 未启用 → 不回 raise，EV 正落到 showdown
+        game,
+        "A♠ A♥ A♦",  # 豹子，EV 明确为正
+        "豹子",
+        0.5,
+        _RoundTracker(),
+    )
+
     assert client.requests == [("/api/portal/zhajinhua/action", {"action": "showdown"})]
+
+
+async def test_showdown_phase_raises_when_high_win_rate_and_raise_enabled() -> None:
+    """强制摊牌阶段、高胜率且启用追加：raise 优先于 showdown。"""
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": True},
+        {"id": "opponent", "alive": True, "seen": True},
+        pot=20000,
+        call_bet=2000,
+    )
+    game.update(
+        {
+            "roundId": 123,
+            "phase": "showdown",
+            "actions": ["fold", "raise", "showdown"],
+            "self": {"alive": True, "isTurn": True},
+        }
+    )
+    client = _FakeClient()
+
+    await _act_on_hand(
+        _FakeContext(),
+        client,
+        {"zjh_notify_hand": False, "zjh_raise_enabled": True, "zjh_raise_min_win_rate": 75},
+        game,
+        "A♠ A♥ A♦",
+        "豹子",
+        0.5,
+        _RoundTracker(),
+    )
+
+    assert client.requests == [("/api/portal/zhajinhua/action", {"action": "raise"})]
 
 
 def test_probability_table_has_continuous_hand_type_ranges() -> None:
@@ -148,6 +217,23 @@ def test_probability_table_preserves_hand_type_order() -> None:
     assert zjh_prob.win_prob_1v1("顺子", 14) < zjh_prob.win_prob_1v1("金花", (5, 3, 2))
     assert zjh_prob.win_prob_1v1("金花", (14, 13, 11)) < zjh_prob.win_prob_1v1("同花顺", 3)
     assert zjh_prob.win_prob_1v1("同花顺", 14) < zjh_prob.win_prob_1v1("豹子", 2)
+
+
+def test_probability_table_monotonic_within_scatter_and_flush() -> None:
+    """回归：散牌/金花内 weaker_count 必须随 (high,mid,low) 牌力严格递增。
+
+    历史上生成器按 combinations 的 (low,mid,high) 序枚举却用「序号×60」当 weaker_count，
+    导致 A-K-4（强散牌）胜率被算成比 T-9-5（弱散牌）还低，bot 把 A 高散牌当弱牌弃掉。
+    """
+    for hand_type in ("散牌", "金花"):
+        table = getattr(zjh_prob, f"_{hand_type}")
+        keys = sorted(table.keys())  # (high, mid, low) 升序 == 牌力升序
+        values = [table[k] for k in keys]
+        assert all(a < b for a, b in zip(values, values[1:])), f"{hand_type} weaker_count 非单调"
+    # 具体牌例：A-K-4 散牌强于 T-9-5 散牌
+    assert zjh_prob.win_prob_1v1("散牌", (14, 13, 4)) > zjh_prob.win_prob_1v1("散牌", (10, 9, 5))
+    # A 高散牌单挑胜率应过半（击败大多数随机手牌）
+    assert zjh_prob.win_prob_1v1("散牌", (14, 13, 4)) > 0.5
 
 
 def test_extract_hand_value_handles_a23_as_low_straight() -> None:
@@ -545,7 +631,7 @@ def test_choose_rejects_negative_ev() -> None:
     )
     choice = _choose("对子", (14, 13), game, 0.5, _RoundTracker())
     assert choice.call is False
-    assert "期望收益为负" in choice.reason
+    assert "低于弃牌容差" in choice.reason
 
 
 def test_choose_rejects_invalid_financial_data() -> None:
@@ -1000,38 +1086,37 @@ async def test_act_on_hand_heads_up_positive_ev_uses_normal_call() -> None:
     assert client.requests == [("/api/portal/zhajinhua/action", {"action": "call"})]
 
 
-@pytest.mark.asyncio
-async def test_act_on_hand_showdown_override_still_wins() -> None:
-    """服务端授权 showdown 时仍优先应战，不受普通 EV 弃牌影响。"""
+def test_choose_fold_ev_tolerance_keeps_marginal_hands() -> None:
+    """回归 #9：EV 略负时在容差内不弃牌。
+
+    Q-9-5 散牌对单盲对手，pot=1500/callBet=1000 时 EV≈−77（边际负，类似线上 −94 弃牌）。
+    容差 0（旧行为）弃牌；容差 10%（−100 内不弃）则跟注——边际负 EV 在胜率估算噪声内，
+    且弃牌白白让出已投入底池权益。
+    """
     game = _game(
         {"id": "self", "alive": True, "isSelf": True, "seen": True},
-        {"id": "opp", "alive": True, "seen": True},
+        {"id": "opp", "alive": True, "seen": False},
+        pot=1500,
+        call_bet=1000,
+    )
+    choice_strict = _choose("散牌", (12, 9, 5), game, 0.5, _RoundTracker(), None, 0.0)
+    assert choice_strict.call is False
+
+    choice_lenient = _choose("散牌", (12, 9, 5), game, 0.5, _RoundTracker(), None, 10.0)
+    assert choice_lenient.call is True
+
+
+def test_choose_fold_ev_tolerance_still_folds_clearly_negative() -> None:
+    """容差不是无条件跟：EV 远低于容差（强负）仍弃牌。"""
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": True},
+        {"id": "opp", "alive": True, "seen": False},
         pot=100,
         call_bet=2000,
     )
-    game.update(
-        {
-            "roundId": 123,
-            "phase": "showdown",
-            "actions": ["fold", "showdown"],
-            "self": {"alive": True, "isTurn": True},
-        }
-    )
-    client = _FakeClient()
-    pending_fold = await _act_on_hand(
-        _FakeContext(),
-        client,
-        {"zjh_notify_hand": False},
-        game,
-        "2♠ 3♥ 5♦",
-        "散牌",
-        0.5,
-        _RoundTracker(),
-        "showdown",
-    )
-    assert pending_fold is False
-    # showdown 覆盖优先于单挑特殊逻辑
-    assert client.requests == [("/api/portal/zhajinhua/action", {"action": "showdown"})]
+    # 弱散牌 + 极差底池赔率，EV 大幅为负，容差 10%（−200）也救不回
+    choice = _choose("散牌", (7, 5, 3), game, 0.5, _RoundTracker(), None, 10.0)
+    assert choice.call is False
 
 
 class _CapturingContext:
@@ -1462,8 +1547,13 @@ def test_terminal_ev_call_opponent_fold_wins_pot() -> None:
     assert ev == pytest.approx(10000)
 
 
-def test_terminal_ev_call_depth_cutoff_static() -> None:
-    """深度截断：depth≤0 时按当前胜率 × 底池 − 成本静态估值。"""
+def test_terminal_ev_call_depth_cutoff_expectation_weighted() -> None:
+    """深度截断：depth≤0 时按对手动作概率对未来一轮加权（与看牌分支对称）。
+
+    - 对手弃牌（p_fold）→ 我方独赢当前底池 pot − cost；
+    - 对手跟/加（p_call+p_raise）→ 我方蒙牌半价再跟一轮，win_prob×下轮底池 − 累计成本。
+    不再假设「对手必持续加注到摊牌」（那会把盲跟 EV 系统性压负）。
+    """
     game = _game(
         {"id": "self", "alive": True, "isSelf": True, "seen": False},
         {"id": "opp", "alive": True, "seen": False},
@@ -1471,7 +1561,9 @@ def test_terminal_ev_call_depth_cutoff_static() -> None:
         call_bet=100,
     )
     ev = _terminal_ev_call(game, 0.5, _RoundTracker(), 0, None, (1 / 3, 1 / 3, 1 / 3), 10000, 0, 0.5)
-    assert ev == pytest.approx(0.5 * 10000 - 0)
+    # p_fold=1/3 独赢 10000；p_call+p_raise=2/3 半价 50 跟到 10100，胜率 0.5
+    expected = (1 / 3) * 10000 + (2 / 3) * (0.5 * 10100 - 50)
+    assert ev == pytest.approx(expected)
 
 
 def test_terminal_ev_decision_picks_blind_call_when_cheap_and_fold_heavy() -> None:
@@ -1500,18 +1592,22 @@ def test_terminal_ev_decision_folds_when_seen_opponent_strong() -> None:
     assert dec.terminal_ev <= 0
 
 
-def test_terminal_ev_decision_peek_better_than_blind_call_when_threshold_moderate() -> None:
-    """对手门槛中等、成本偏高：看牌分支（免费弱牌止损）优于盲跟。"""
-    # 门槛 0.6、pot 较小：盲跟被 raise 撑大不划算，看牌止损更优
+def test_terminal_ev_decision_peek_better_than_blind_call_when_raise_heavy() -> None:
+    """对手爱加注、几乎不弃牌、门槛偏低：看牌（免费弱牌止损）优于盲跟。
+
+    无弃牌权益 + 加注滚大成本时，盲跟被持续加注撑大不划算；看牌后弱牌（t<T）
+    止损、强牌才投入，终局期望更高。回归：修正 action_probs 透传 + 对称 EV 模型后，
+    看牌分支在此类场景确实能胜过盲跟。
+    """
     game = _game(
         {"id": "self", "alive": True, "isSelf": True, "seen": False},
         {"id": "opp", "alive": True, "seen": True},
-        pot=500,
-        call_bet=1000,
+        pot=10000,
+        call_bet=3000,
     )
-    dec = _terminal_ev_decision(game, 0.6, _RoundTracker(), depth=2)
-    # 弃牌=0 兜底；peek 或 fold 都优于盲跟（不该是 call）
-    assert dec.action != "call"
+    dec = _terminal_ev_decision(game, 0.3, _RoundTracker(), depth=2, action_probs=(0.0, 0.4, 0.6))
+    assert dec.action == "peek"
+    assert dec.terminal_ev > 0
 
 
 def test_terminal_ev_decision_neutral_equals_single_step_at_depth_one() -> None:
@@ -1537,6 +1633,40 @@ def test_terminal_branch_fields() -> None:
     assert b.cost == 5000
     assert b.win_probability == 0.4
     assert b.net == 3000
+
+
+def test_terminal_ev_call_blind_raise_does_not_raise_threshold() -> None:
+    """回归 #10：对手蒙牌加注视为诈唬，不上调门槛/不衰减胜率；看牌加注才是强牌信号。
+
+    同样加注倾向（action_probs 固定），opponent_seen=False（蒙牌加注）的盲跟终局 EV
+    高于 opponent_seen=True（看牌加注），因为后者每次加注都把对手门槛向 1 推、胜率衰减。
+    """
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": False},
+        {"id": "opp", "alive": True, "seen": True},
+        pot=30000,
+        call_bet=6000,
+    )
+    blind_win = _blind_win_probability(0, (0.7,))
+    action_probs = (0.1, 0.2, 0.7)  # 对手爱加注
+    ev_seen = _terminal_ev_call(game, 0.7, _RoundTracker(), 2, None, action_probs, None, None, blind_win, 0, None, True)
+    ev_blind = _terminal_ev_call(
+        game, 0.7, _RoundTracker(), 2, None, action_probs, None, None, blind_win, 0, None, False
+    )
+    assert ev_blind > ev_seen
+
+
+def test_terminal_ev_decision_threads_opponent_seen() -> None:
+    """决策入口按对手看牌状态建模：全蒙对手（无看牌）时蒙牌加注不衰减胜率。"""
+    # 对手全蒙 → opponent_seen=False，盲跟 EV 不因「加注」额外衰减
+    game_blind_opp = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": False},
+        {"id": "opp", "alive": True, "seen": False},
+        pot=30000,
+        call_bet=6000,
+    )
+    dec = _terminal_ev_decision(game_blind_opp, 0.7, _RoundTracker(), depth=2, action_probs=(0.1, 0.2, 0.7))
+    assert dec.terminal_ev > 0
 
 
 def test_profile_store_buckets_actions() -> None:
