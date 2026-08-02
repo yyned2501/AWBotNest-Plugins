@@ -20,6 +20,8 @@
 | 轮询牌局状态 | `GET /api/portal/zhajinhua` | 无 | `zhajinhua.py` 的 `_poll_loop()` |
 | 加入牌桌 | `POST /api/portal/zhajinhua/join` | `{}` | `_poll_loop()` |
 | 执行牌局动作 | `POST /api/portal/zhajinhua/action` | `{ "action": "<服务端 actions 中声明的原始值>" }` | `_act_on_hand()`、弃牌和看牌逻辑 |
+| 读取养马状态 | `GET /api/portal/horse` | 无 | `horse.py` 的 `_care_once()`，实测响应 |
+| 执行养马动作 | `POST /api/portal/horse/action` | `{ "action": "walk"\|"feed"\|"revive", "requestKey": "<web_+32hex>", "feedType"?: "weed"\|"fine"\|"divine" }` | `_horse_action()`，实测响应 |
 
 动作只能在轮询响应的 `game.self.isTurn == true` 时，且动作值出现在 `game.actions` 列表中时提交。插件不得根据本地猜测构造不在该列表中的动作。
 
@@ -57,7 +59,8 @@
 - 推断看牌对手牌力时，上牌快照和继续下注快照都参与计算，并取两次决策所需的较高单挑门槛；缺少任一已观测阶段时，日志必须标注降级来源。
 - 单挑对手未看牌 → 直接跟注不自主看牌；对手已看牌 → EV 为负也跟注不弃牌（`_act_on_hand()` 的 `_is_heads_up()` 分支）。
 - 参与的对局结束（`roundId` 变化）时，推送最终结果通知：手牌、牌型、存活状态。
-- 遛马连续失败 3 次后跳过本轮，`cooldown` 不计入失败计数。（`horse.py` 的 `_care_once()`）
+- 遛马动作用于冷却拒绝时返回外层 `ok: true`、`result.code == "cooldown"`、`result.remainMs`（剩余毫秒）、`result.message`；冷却约 45 分钟，且期间 `state.canWalk` 仍为 `true`，不能用来判断是否可遛。插件记下 `remainMs` 换算的到期时间退避，未到不再尝试；`cooldown` 不计入失败计数，连续真失败 3 次后跳过本轮。（`horse.py` 的 `_care_once()`）
+- 养马实测字段：`stats.walkCountToday/walkMax`（每日遛马上限）、`stats.feedCountToday/feedMax`、`profile.satiety`（饱腹度）、`horse.balance`（银元）、`profile.state.{isDead,canWalk,canFeed}`。
 
 ## 待现场验证
 

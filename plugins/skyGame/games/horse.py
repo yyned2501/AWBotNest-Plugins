@@ -49,7 +49,7 @@ async def _care_once(ctx: object, cfg: dict, client: HdskyClient) -> None:
     """单次养护决策：最多执行一个动作。"""
     data = await client.get("/api/portal/horse")
     if "_error" in data:
-        ctx.log.warning("养马状态请求失败: %s", data["_error"])
+        ctx.log.warning("养马状态请求失败: %s", data["_error"] or "未知网络错误")
         client.reset_csrf()
         return
     horse = data.get("horse") or {}
@@ -102,15 +102,28 @@ async def _care_once(ctx: object, cfg: dict, client: HdskyClient) -> None:
         if walk_fail_count >= 3:
             ctx.log.debug("遛马连续失败 %d 次，跳过本轮", walk_fail_count)
             return
+        # 门户遛马冷却约 45 分钟，冷却期间 canWalk 仍为 true；靠上次响应的 remainMs 退避，
+        # 避免每轮轮询都撞冷却、刷出大量看似失败的「遛马」日志
+        cooldown_until_key = "horse:walk_cooldown_until"
+        now_ms = int(datetime.datetime.now().timestamp() * 1000)
+        cooldown_until = int(ctx.kv.get(cooldown_until_key, 0) or 0)
+        if now_ms < cooldown_until:
+            ctx.log.debug("遛马冷却中，剩余 %d 分钟，跳过本轮", (cooldown_until - now_ms) // 60000)
+            return
         r = await _horse_action(client, "walk")
-        ctx.log.info("遛马（今日 %d/%d）", walk_count + 1, walk_max)
         result = r.get("result", {}) or {}
         if result.get("code") == "cooldown":
+            remain_ms = int(result.get("remainMs", 0) or 0)
+            if remain_ms > 0:
+                ctx.kv.set(cooldown_until_key, now_ms + remain_ms)
             ctx.log.debug("遛马冷却中，不计数: %s", result.get("message", ""))
         elif result.get("ok", r.get("ok", False)):
             ctx.kv.set(walk_fail_key, 0)
+            ctx.kv.delete(cooldown_until_key)
+            ctx.log.info("遛马成功（今日 %d/%d）", walk_count + 1, walk_max)
         else:
             ctx.kv.set(walk_fail_key, walk_fail_count + 1)
+            ctx.log.warning("遛马失败: %s", result.get("message") or result.get("code") or "未知")
         await _notify_result(ctx, cfg, r, "遛马失败")
         return
 
