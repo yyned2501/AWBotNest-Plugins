@@ -232,6 +232,20 @@ class ProfileStore:
         weight = len(pcts) / (len(pcts) + PRIOR_STRENGTH)
         return weight * floor + (1 - weight) * base_threshold
 
+    def call_threshold_ceiling(self, uid: str, base_ceiling: float) -> float | None:
+        """对手平跟手牌范围上界：实测平跟分位的上四分位（最强实测平跟牌）。
+
+        爱拿大牌平跟慢打的对手上四分位高 → 上限高 → 我方胜率低；
+        反之弱牌平跟者上四分位低 → 上限低。按样本数向通用推断 base_ceiling 收缩；
+        无样本返回 None（调用方回退通用推断）。
+        """
+        pcts = self.hand_percentiles(uid, "call")
+        if not pcts:
+            return None
+        ceiling = _percentile(pcts, 0.75)
+        weight = len(pcts) / (len(pcts) + PRIOR_STRENGTH)
+        return weight * ceiling + (1 - weight) * base_ceiling
+
     # ── 持久化 ──
 
     def load_all(self) -> None:

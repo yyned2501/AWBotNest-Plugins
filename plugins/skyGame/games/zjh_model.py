@@ -453,8 +453,9 @@ def _seen_opponent_ranges(
 
     加注对手：[max(推断门槛, raise_floor), 1.0]；平跟/仅看牌：[推断门槛, call_cap]。
     门槛实测反推优先，缺失才用回退分位；observed 标记来源。
-    profile 非空时，把画像引用、对手 uid 与动作类型填入 _SeenRange，供
-    _seen_factor 做实测胜率收缩混合与逐对手诈唬率。
+    profile 非空时，把画像引用、对手 uid 与动作类型填入 _SeenRange，并
+    用画像的 raise_threshold_floor 调整加注下限、call_threshold_ceiling 调整
+    平跟上界——诈唬型对手（常拿弱牌加注）下限被拉低 → 范围扩大 → 我方胜率更高。
     """
     blind, _ = _opponent_counts(game)
     ranges: list[_SeenRange] = []
@@ -468,9 +469,19 @@ def _seen_opponent_ranges(
         is_raise = bool(continue_snapshot.is_raise) if continue_snapshot is not None else False
         action = "raise" if is_raise else "call"
         if is_raise:
-            ranges.append(_SeenRange(max(lower, range_model.raise_floor), 1.0, observed, profile, key, action))
+            base_floor = max(lower, range_model.raise_floor)
+            if profile is not None and key:
+                floor = profile.raise_threshold_floor(key, base_floor)
+                if floor is not None:
+                    base_floor = floor
+            ranges.append(_SeenRange(base_floor, 1.0, observed, profile, key, action))
         else:
-            ranges.append(_SeenRange(lower, range_model.call_cap, observed, profile, key, action))
+            base_cap = range_model.call_cap
+            if profile is not None and key:
+                ceiling = profile.call_threshold_ceiling(key, base_cap)
+                if ceiling is not None:
+                    base_cap = ceiling
+            ranges.append(_SeenRange(lower, base_cap, observed, profile, key, action))
     return blind, ranges
 
 

@@ -92,10 +92,21 @@ class _DebugRecorder:
 
     def __init__(self, path: str) -> None:
         self._path = path
+        # 按 (method, path) 缓存上一次 response 原文，连续相同跳过
+        self._last_response: dict[tuple[str, str], str | None] = {}
 
     def record(self, method: str, path: str, body: dict | None, response: dict[str, Any]) -> None:
         """追加一条记录；任何失败都静默，绝不影响插件主流程。"""
         try:
+            key = (method, path)
+            raw = json.dumps(
+                {"request": _redact(body), "response": _redact(response)},
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            if self._last_response.get(key) == raw:
+                return  # 内容与上一条相同，跳过
+            self._last_response[key] = raw
             self._rotate_if_needed()
             entry = {
                 "ts": datetime.datetime.now().isoformat(timespec="seconds"),
