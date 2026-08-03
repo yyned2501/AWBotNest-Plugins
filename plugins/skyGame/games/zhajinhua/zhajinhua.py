@@ -24,8 +24,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from . import hdsky_auth
-from .hdsky import HdskyClient
+from .. import hdsky_auth
+from ..hdsky import HdskyClient
 from .zjh_hand import (
     _acquire_hand_after_peek,
     _extract_hand_value,
@@ -281,6 +281,7 @@ def _train_opponent_actions(
     my_seen: bool,
     is_heads_up: bool,
     round_action: dict[str, str] | None = None,
+    raise_freq_recorded: set[str] | None = None,
 ) -> None:
     """每轮训练画像：遍历所有存活对手，检测动作变化并去重记录。
 
@@ -292,6 +293,8 @@ def _train_opponent_actions(
     值为 (lastAction, bet) 签名。
     round_action：本轮各对手最激进动作 {uid: "raise"|"call"}（raise 覆盖 call），
     供结算回填按实际动作分桶；None 时不维护。
+    raise_freq_recorded：本轮已记录加注频率的对手 uid 集合，防止同局多次调用
+    record_raise_freq；None 时不记录加注频率。
     """
     for index, player in enumerate(_players(game)):
         if _is_self(player):
@@ -328,6 +331,14 @@ def _train_opponent_actions(
             is_heads_up,
             display_name=str(player.get("displayName", "") or ""),
         )
+        # 每局每个对手只记一次加注频率（首次动作变更时）
+        if raise_freq_recorded is not None and uid not in raise_freq_recorded:
+            blind_count, seen_count = _opponent_counts(game)  # (蒙牌数, 看牌数)
+            # 排除当前对手自身
+            adj_seen = seen_count - (1 if op_seen else 0)
+            adj_blind = blind_count - (0 if op_seen else 1)
+            store.record_raise_freq(uid, op_seen, adj_seen, adj_blind, action == "raise")
+            raise_freq_recorded.add(uid)
 
 
 async def _poll_loop(ctx: object) -> None:
@@ -352,6 +363,8 @@ async def _poll_loop(ctx: object) -> None:
     last_opponent_seen: dict[str, tuple[str, float]] = {}
     # 本轮各对手最激进动作 uid → "raise"|"call"（结算回填按实际动作分桶用）
     round_opponent_action: dict[str, str] = {}
+    # 本轮已记录加注频率的对手 uid（同局只记一次，避免重复计）
+    round_raise_freq_recorded: set[str] = set()
     # 刚结束那局（lastResult 待回填）的对手动作快照：lastResult 滞后一局，
     # roundId 切换时把当前轮动作移入此变量，供随后到达的 lastResult 回填取用
     settled_round_action: dict[str, str] = {}
@@ -406,6 +419,7 @@ async def _poll_loop(ctx: object) -> None:
                     # 上一局动作移入 settled，供随后到达的 lastResult 回填；本轮重新累计
                     settled_round_action = round_opponent_action
                     round_opponent_action = {}
+                    round_raise_freq_recorded = set()
 
                 # 每轮更新 displayName→id 映射；新一局结算回填对手真实手牌分位到画像
                 for index, player in enumerate(_players(g)):
@@ -436,6 +450,7 @@ async def _poll_loop(ctx: object) -> None:
                         bool(s.get("seen", False)),
                         is_hu,
                         round_opponent_action,
+                        round_raise_freq_recorded,
                     )
                 # 弃牌/出局后本局不再有任何决策，停止跟踪对手快照与门槛推导。
                 # 否则对手互相缠斗时门槛会递归虚高（单挑反推的不动点在 1.0，

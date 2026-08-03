@@ -5,8 +5,8 @@ from __future__ import annotations
 
 import pytest
 
-from plugins.skyGame.games import gen_zjh_prob, zjh_prob
-from plugins.skyGame.games.zhajinhua import (
+from plugins.skyGame.games.zhajinhua import gen_zjh_prob, zjh_prob
+from plugins.skyGame.games.zhajinhua.zhajinhua import (
     _FOLD_CONFIRM_MAX_RETRIES,
     _NEUTRAL_RANGE_MODEL,
     _acquire_hand_after_peek,
@@ -55,7 +55,7 @@ from plugins.skyGame.games.zhajinhua import (
     _train_opponent_actions,
     _update_round_tracker,
 )
-from plugins.skyGame.games.zjh_profile import (
+from plugins.skyGame.games.zhajinhua.zjh_profile import (
     PRIOR_STRENGTH,
     ProfileStore,
     _bucket,
@@ -2253,3 +2253,133 @@ def test_train_opponent_actions_skips_folded_opponents() -> None:
     )
     _train_opponent_actions(store, game, last_seen, False, True)
     assert "folded" not in store.debug_dump()
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 加注频率追踪（v1.14.7）
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_record_raise_freq_records_correctly_per_bucket() -> None:
+    """record_raise_freq 按不同分桶正确记录 total/raises。"""
+    store = ProfileStore()
+    # 同桶累计
+    store.record_raise_freq("a", True, 1, 0, True)  # s_s1b0, raise
+    store.record_raise_freq("a", True, 1, 0, False)  # s_s1b0, not raise
+    store.record_raise_freq("a", False, 0, 1, False)  # b_s0b1, not raise
+    dump = store.debug_dump()
+    freq_a = dump["a"]["raise_freq"]
+    assert freq_a["s_s1b0"] == {"total": 2, "raises": 1}
+    assert freq_a["b_s0b1"] == {"total": 1, "raises": 0}
+    # 不同玩家互不影响
+    store.record_raise_freq("b", True, 1, 0, True)
+    dump = store.debug_dump()
+    freq_b = dump["b"]["raise_freq"]
+    assert freq_b["s_s1b0"] == {"total": 1, "raises": 1}
+
+
+def test_raise_floor_from_freq_none_and_shrink() -> None:
+    """加注频率推断：无样本返回 None，有样本按贝叶斯收缩。"""
+    store = ProfileStore()
+    # 无样本
+    assert store.raise_floor_from_freq("nobody", "s_s1b0", 0.6) is None
+    # 10 局 raise 8 局：raise_rate=0.8 → min_strength=0.2
+    for _ in range(8):
+        store.record_raise_freq("a", True, 1, 0, True)
+    for _ in range(2):
+        store.record_raise_freq("a", True, 1, 0, False)
+    freq_floor = store.raise_floor_from_freq("a", "s_s1b0", 0.6)
+    weight = 10 / (10 + PRIOR_STRENGTH)
+    expected = weight * 0.2 + (1 - weight) * 0.6
+    assert freq_floor == pytest.approx(expected)
+    assert 0.0 < freq_floor < 0.6  # 低于 base_threshold
+    # 全加注 → min_strength ≈ 0.0
+    store2 = ProfileStore()
+    for _ in range(5):
+        store2.record_raise_freq("b", True, 1, 0, True)
+    all_raise = store2.raise_floor_from_freq("b", "s_s1b0", 0.5)
+    w2 = 5 / (5 + PRIOR_STRENGTH)
+    assert all_raise == pytest.approx(w2 * 0.0 + (1 - w2) * 0.5)
+    # 全不加注 → min_strength ≈ 1.0
+    store3 = ProfileStore()
+    for _ in range(5):
+        store3.record_raise_freq("c", True, 1, 0, False)
+    no_raise = store3.raise_floor_from_freq("c", "s_s1b0", 0.5)
+    w3 = 5 / (5 + PRIOR_STRENGTH)
+    assert no_raise == pytest.approx(w3 * 1.0 + (1 - w3) * 0.5)
+    assert no_raise > 0.5  # 高于 base_threshold
+
+
+def test_raise_floor_from_freq_bucket() -> None:
+    """raise_floor_from_freq_bucket 与 raise_floor_from_freq 结果一致。"""
+    store = ProfileStore()
+    for _ in range(6):
+        store.record_raise_freq("a", True, 1, 0, True)
+    direct = store.raise_floor_from_freq("a", "s_s1b0", 0.6)
+    wrapper = store.raise_floor_from_freq_bucket("a", True, 1, 0, 0.6)
+    assert direct == wrapper
+    # 无数据返回 None
+    assert store.raise_floor_from_freq_bucket("nobody", False, 0, 0, 0.5) is None
+
+
+def test_train_opponent_actions_records_raise_freq() -> None:
+    """_train_opponent_actions 传入 raise_freq_recorded 时记录加注频率。"""
+    store = ProfileStore()
+    last_seen: dict[str, tuple[str, float]] = {}
+    recorded: set[str] = set()
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": False},
+        {"id": "p1", "alive": True, "seen": False, "lastAction": "+3000 追加", "bet": 6000},
+        {"id": "p2", "alive": True, "seen": False, "lastAction": "+1500 跟注", "bet": 4500},
+    )
+    _train_opponent_actions(store, game, last_seen, False, False, None, recorded)
+    assert "p1" in recorded
+    assert "p2" in recorded
+    dump = store.debug_dump()
+    freq = dump.get("p1", {}).get("raise_freq", {})
+    assert freq, "p1 应有加注频率数据"
+    # 3 人局（self + p1 + p2），p1 看牌=False，排除 p1 自身后
+    # seen_count = 0, blind_count = 1（p2 蒙牌）
+    assert "b_s0b1" in freq
+    assert freq["b_s0b1"]["total"] == 1
+    assert freq["b_s0b1"]["raises"] == 1  # p1 追加=raise
+    p2_freq = dump.get("p2", {}).get("raise_freq", {})
+    assert "b_s0b1" in p2_freq
+    assert p2_freq["b_s0b1"]["raises"] == 0  # p2 跟注
+
+
+def test_train_opponent_actions_raise_freq_dedup() -> None:
+    """同局同对手只记一次加注频率（raise_freq_recorded 去重）。"""
+    store = ProfileStore()
+    last_seen: dict[str, tuple[str, float]] = {}
+    recorded: set[str] = set()
+    base = {"id": "self", "alive": True, "isSelf": True, "seen": False}
+    opp = {"id": "p1", "alive": True, "seen": False, "lastAction": "+3000 追加", "bet": 6000}
+    # 第一次：记录
+    _train_opponent_actions(store, _game(base, dict(opp)), last_seen, False, True, None, recorded)
+    n_after_first = store.debug_dump()["p1"]["raise_freq"]["b_s0b0"]["total"]
+    # 第二次：动作不变 → 签名不上传，不触发记录
+    _train_opponent_actions(store, _game(base, dict(opp)), last_seen, False, True, None, recorded)
+    assert store.debug_dump()["p1"]["raise_freq"]["b_s0b0"]["total"] == n_after_first
+
+
+def test_opponent_raise_threshold_freq_fallback() -> None:
+    """_opponent_raise_threshold 无实测手牌分位时回退加注频率推断。"""
+    store = ProfileStore()
+    base = 0.5
+    # 无画像数据 → 回退通用推断
+    t_generic = _opponent_raise_threshold(base, 1)
+    t_no_data = _opponent_raise_threshold(base, 1, store, "unknown")
+    assert t_no_data == pytest.approx(t_generic)
+    # 有加注频率但无 hand_pctile → 回退频率推断（需传 game）
+    # 10 局 raise 8 局 → min_strength ≈ 0.2，应低于通用推断
+    for _ in range(8):
+        store.record_raise_freq("freq_raiser", True, 0, 0, True)
+    for _ in range(2):
+        store.record_raise_freq("freq_raiser", True, 0, 0, False)
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": False},
+        {"id": "freq_raiser", "alive": True, "seen": True, "lastAction": "+3000 追加", "bet": 6000},
+    )
+    t_freq = _opponent_raise_threshold(base, 1, store, "freq_raiser", game)
+    assert t_freq < t_generic  # 对手 raise 频繁 → 门槛低于通用推断

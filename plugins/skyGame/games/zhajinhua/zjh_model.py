@@ -474,6 +474,15 @@ def _seen_opponent_ranges(
                 floor = profile.raise_threshold_floor(key, base_floor)
                 if floor is not None:
                     base_floor = floor
+                else:
+                    # 无实测手牌分位时回退加注频率推断
+                    blind_count, seen_count = _opponent_counts(game)
+                    op_seen = bool(player.get("seen", False))
+                    adj_seen = seen_count - (1 if op_seen else 0)
+                    adj_blind = blind_count - (0 if op_seen else 1)
+                    freq_floor = profile.raise_floor_from_freq_bucket(key, op_seen, adj_seen, adj_blind, base_floor)
+                    if freq_floor is not None:
+                        base_floor = freq_floor
             ranges.append(_SeenRange(base_floor, 1.0, observed, profile, key, action))
         else:
             base_cap = range_model.call_cap
@@ -600,7 +609,11 @@ class _TerminalDecision:
 
 
 def _opponent_raise_threshold(
-    base_threshold: float, raise_count: int, profile: Any = None, opponent_uid: str | None = None
+    base_threshold: float,
+    raise_count: int,
+    profile: Any = None,
+    opponent_uid: str | None = None,
+    game: dict[str, Any] | None = None,
 ) -> float:
     """对手连续 raise 后其手牌门槛的上调。
 
@@ -608,6 +621,9 @@ def _opponent_raise_threshold(
     真实手牌分位（结算回填），用其实测下四分位（最弱加注牌）向通用推断收缩作为
     门槛：诈唬型对手（弱牌加注多）门槛被拉低 → 我方胜率更高。profile 需为
     ProfileStore（提供 raise_threshold_floor），配合 opponent_uid 定位对手。
+
+    无实测手牌分位时，回退加注频率推断（raise_floor_from_freq_bucket）：对手加注
+    频率高 → 最小牌力低 → 胜率更高。双方都无数据则用通用推断。
     """
     threshold = base_threshold
     for _ in range(raise_count):
@@ -617,6 +633,19 @@ def _opponent_raise_threshold(
         floor = profile.raise_threshold_floor(opponent_uid, threshold)
         if floor is not None:
             threshold = floor
+        elif game is not None:
+            # 无实测手牌分位时回退加注频率推断
+            blind_count, seen_count = _opponent_counts(game)
+            op_seen = False
+            for key, player in _opponent_entries(game):
+                if key == opponent_uid:
+                    op_seen = bool(player.get("seen", False))
+                    break
+            adj_seen = seen_count - (1 if op_seen else 0)
+            adj_blind = blind_count - (0 if op_seen else 1)
+            freq_floor = profile.raise_floor_from_freq_bucket(opponent_uid, op_seen, adj_seen, adj_blind, threshold)
+            if freq_floor is not None:
+                threshold = freq_floor
     return min(max(threshold, 0.0), 1.0)
 
 
@@ -728,7 +757,7 @@ def _terminal_ev_call(
     # 蒙牌加注视为诈唬/空气：不上调门槛，胜率维持（只承担 callBet 滚大的代价）。
     if p_raise > 0:
         if opponent_seen:
-            new_threshold = _opponent_raise_threshold(fallback_threshold, raise_count + 1, profile, opponent_uid)
+            new_threshold = _opponent_raise_threshold(fallback_threshold, raise_count + 1, profile, opponent_uid, game)
             new_win = _blind_vs_seen_win(new_threshold)
         else:
             new_win = win_prob

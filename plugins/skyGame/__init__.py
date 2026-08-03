@@ -11,13 +11,7 @@
 # 代码组织：
 #   games/hdsky.py       门户共享 HTTP（cookie + CSRF + requestKey + 401 自动续期）
 #   games/hdsky_auth.py  Cookie 续期（CookieCloud → 站内信抽码 → 登录 → 写 cookie）
-#   games/zhajinhua.py   炸金花轮询编排入口（加入/轮询/弃牌确认/启停）
-#   games/zjh_hand.py    炸金花手牌解析（花色点数/牌型归一/查表键值）
-#   games/zjh_state.py   炸金花牌局公开状态读取（玩家列表/存活/看牌/自身标识）
-#   games/zjh_model.py   炸金花概率模型、门槛推断、轮询跟踪、范围上限/反诈唬、Terminal EV 决策树
-#   games/zjh_profile.py 炸金花按玩家 ID 的对手画像（动作频率分桶 + 跨局 kv 持久化）
-#   games/zjh_notify.py  炸金花通知与决策日志
-#   games/zjh_prob.py    炸金花穷举概率表（自动生成）
+#   games/zhajinhua/     炸金花包（详见 zhajinhua/__init__.py）
 #   games/horse.py       养马养护循环
 # =============================================================================
 
@@ -29,7 +23,7 @@ from .games import hdsky_auth
 __plugin__ = {
     "name": "天空游戏",
     "id": "skyGame",
-    "version": "1.14.6",
+    "version": "1.14.7",
     "author": "Yy",
     "description": "天空系列游戏统一入口：炸金花自动参与、养马自动养护，左侧按游戏分组配置。",
     "scope": "user",

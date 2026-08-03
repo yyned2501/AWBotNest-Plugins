@@ -37,6 +37,7 @@ _CALL_PCTS = "call_pcts"  # 平跟后最终真实手牌分位
 _TOTAL_HANDS = "total_hands"
 _DISPLAY = "display_name"
 _UPDATED = "updated_ms"
+_RAISE_FREQ = "raise_freq"  # 加注频率分桶: {bucket_key: {"total": N, "raises": M}}
 
 # 空动作计数
 _EMPTY_ACTIONS = {"fold": 0, "call": 0, "raise": 0}
@@ -54,6 +55,16 @@ def _bucket(my_seen: bool, op_seen: bool, is_heads_up: bool) -> str:
     op_side = _OP_SEEN if op_seen else _OP_BLIND
     heads = _HU if is_heads_up else _MULTI
     return f"{my_side}_{op_side}_{heads}"
+
+
+def _freq_bucket(op_seen: bool, seen_count: int, blind_count: int) -> str:
+    """加注频率分桶键：对手状态 + 其他看牌人数 + 其他蒙牌人数。
+
+    例如 s_s1b1 = 对手看牌，另有1人看牌、1人蒙牌，共4人存活。
+    b_s0b2 = 对手蒙牌，无其他看牌人、另有2人蒙牌，共3人存活。
+    """
+    op = "s" if op_seen else "b"
+    return f"{op}_s{seen_count}b{blind_count}"
 
 
 def _percentile(values: list[float], q: float) -> float:
@@ -124,6 +135,73 @@ class ProfileStore:
         key = _RAISE_PCTS if action == "raise" else _CALL_PCTS
         profile.setdefault(key, []).append(pctile)
         self._dirty.add(uid)
+
+    # ── 训练：记录对手加注频率（按对手状态+剩余人数分桶）──
+
+    def record_raise_freq(
+        self,
+        uid: str,
+        op_seen: bool,
+        seen_count: int,
+        blind_count: int,
+        is_raise: bool,
+    ) -> None:
+        """记录对手在本局的加注频率统计。
+
+        按对手看牌状态 + 其他看牌人数 + 其他蒙牌人数分桶，如 s_s1b1。
+        每局调用一次（hand-level），is_raise=True 表示该局对手至少加注一次。
+        """
+        uid = self._normalize_uid(uid)
+        profile = self._ensure(uid)
+        bucket_key = _freq_bucket(op_seen, seen_count, blind_count)
+        freq_buckets = profile.setdefault(_RAISE_FREQ, {})
+        bucket = freq_buckets.setdefault(bucket_key, {"total": 0, "raises": 0})
+        bucket["total"] += 1
+        if is_raise:
+            bucket["raises"] += 1
+        self._dirty.add(uid)
+
+    # ── 查询：某对手在某状态桶的动作概率 ──
+
+    def raise_floor_from_freq(self, uid: str, bucket_key: str, base_threshold: float) -> float | None:
+        """从加注频率推断对手最小加注牌力。
+
+        raise_rate = raises / total，min_strength = 1.0 - raise_rate。
+        向 base_threshold 贝叶斯收缩；无样本返回 None。
+        """
+        uid = self._normalize_uid(uid)
+        profile = self._cache.get(uid)
+        if profile is None:
+            return None
+        freq_buckets = profile.get(_RAISE_FREQ)
+        if not isinstance(freq_buckets, dict):
+            return None
+        bucket = freq_buckets.get(bucket_key)
+        if not isinstance(bucket, dict):
+            return None
+        total = bucket.get("total", 0)
+        raises = bucket.get("raises", 0)
+        if total <= 0:
+            return None
+        raise_rate = raises / total
+        min_strength = 1.0 - raise_rate  # 80% raise → min_strength ≈ 0.2
+        weight = total / (total + PRIOR_STRENGTH)
+        return weight * min_strength + (1 - weight) * base_threshold
+
+    def raise_floor_from_freq_bucket(
+        self,
+        uid: str,
+        op_seen: bool,
+        seen_count: int,
+        blind_count: int,
+        base_threshold: float,
+    ) -> float | None:
+        """从加注频率推断对手最小加注牌力（按原始参数分桶）。
+
+        与 record_raise_freq 参数对称，方便调用方无需构造 bucket_key。
+        """
+        bucket_key = _freq_bucket(op_seen, seen_count, blind_count)
+        return self.raise_floor_from_freq(uid, bucket_key, base_threshold)
 
     # ── 查询：某对手在某状态桶的动作概率 ──
 

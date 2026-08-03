@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from .hdsky import HdskyClient
+from ..hdsky import HdskyClient
 
 # 手牌解析：花色符号和点数映射
 _SUIT_SYMBOLS = "♠♥♦♣"
