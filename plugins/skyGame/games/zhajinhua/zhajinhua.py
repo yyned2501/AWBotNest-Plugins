@@ -57,6 +57,7 @@ from .zjh_model import (
     _opponent_threshold,
     _opponents_win_probability,
     _OpponentSnapshot,
+    _peek_terminal_ev,
     _PendingFold,
     _range_factor,
     _ranged_win_probability,
@@ -127,8 +128,10 @@ __all__ = [
     "_opponent_threshold",
     "_opponents_win_probability",
     "_parse_hand",
+    "_peek_terminal_ev",
     "_range_factor",
     "_ranged_win_probability",
+    "_request_blind_fold",
     "_seen_factor",
     "_seen_opponent_ranges",
     "_self_hand",
@@ -176,6 +179,44 @@ async def _request_fold(
     return False
 
 
+async def _request_blind_fold(
+    ctx: object,
+    client: HdskyClient,
+    cfg: dict,
+    game: dict[str, Any],
+    terminal: _TerminalDecision,
+    tracker: _RoundTracker,
+) -> bool:
+    """蒙牌决策树判定弃牌最优时提交 fold（线上曾漏：只打告警不提交，卡死到门户超时）。
+
+    与已看牌弃牌同一动作端点与双击确认机制：需要 foldConfirm 时把预构建的
+    蒙牌弃牌通知存入 `tracker.pending_fold`，由 `_confirm_fold` 确认后推送。
+    返回 True 表示弃牌已提交且正在等待确认（调用方置 fold_pending）。
+    """
+    result = await client.post("/api/portal/zhajinhua/action", {"action": "fold"})
+    if not result.get("ok"):
+        ctx.log.warning("蒙牌弃牌请求失败: %s", result.get("error"))
+        return False
+
+    notification = _blind_notification(
+        "fold",
+        game.get("roundId"),
+        terminal,
+        float(game.get("pot", 0) or 0),
+        float(game.get("callBet", 0) or 0),
+        terminal.reason,
+    )
+    needs_confirm = bool((result.get("game") or game).get("self", {}).get("foldConfirm", False))
+    if needs_confirm:
+        tracker.pending_fold = _PendingFold(game.get("roundId"), "", "", None, notification)
+        ctx.log.info("蒙牌弃牌等待二次确认，通知将在确认成功后发送")
+        return True
+
+    if cfg.get("zjh_notify_hand", True):
+        await ctx.notify(notification)
+    return False
+
+
 async def _confirm_fold(
     ctx: object,
     client: HdskyClient,
@@ -194,15 +235,19 @@ async def _confirm_fold(
 
     pending = tracker.pending_fold
     if cfg.get("zjh_notify_hand", True) and pending is not None:
-        await ctx.notify(
-            _fold_notification(
-                pending.rid,
-                pending.hand,
-                pending.hand_type,
-                pending.choice.reason,
-                pending.choice.decision,
+        if pending.notification:
+            # 蒙牌弃牌：通知文本已在请求时预构建（未看牌无手牌，不走已看牌弃牌样式）
+            await ctx.notify(pending.notification)
+        elif pending.choice is not None:
+            await ctx.notify(
+                _fold_notification(
+                    pending.rid,
+                    pending.hand,
+                    pending.hand_type,
+                    pending.choice.reason,
+                    pending.choice.decision,
+                )
             )
-        )
     if cfg.get("zjh_notify_fold_confirm", False):
         await ctx.notify("🃏 双击确认弃牌")
     tracker.pending_fold = None
@@ -608,26 +653,13 @@ async def _poll_loop(ctx: object) -> None:
                                         "蒙牌终局EV盲跟最优（EV≥0），不看牌避免翻倍投入",
                                     )
                                 )
+                        elif blind_action == "fold" and isinstance(blind_choice, _TerminalDecision):
+                            # 决策树判定弃牌最优 → 立即提交（此前无此分支，
+                            # fold 掉进尾部告警不提交，线上卡死到门户超时）
+                            fold_pending = await _request_blind_fold(ctx, client, cfg, g, blind_choice, tracker)
                         elif blind_action == "peek":
-                            if isinstance(blind_choice, _TerminalDecision):
-                                ctx.log.info(
-                                    "蒙牌决策[看牌]: 终局EV=%+.2f（盲跟%+.2f · 看牌%+.2f · 弃牌0）"
-                                    " 底池=%.0f 半价成本=%.0f 存活对手=%d 动作概率=%s",
-                                    blind_choice.terminal_ev,
-                                    blind_choice.call_ev,
-                                    blind_choice.peek_ev,
-                                    g.get("pot", 0),
-                                    _blind_call_cost(float(g.get("callBet", 0))),
-                                    len(blind_opponents),
-                                    " | ".join(
-                                        f"{o.uid.split(':')[-1]}={o.action_probs[0]:.2f}/"
-                                        f"{o.action_probs[1]:.2f}/{o.action_probs[2]:.2f}"
-                                        for o in blind_opponents
-                                    )
-                                    if blind_opponents
-                                    else "先验",
-                                )
-                            elif blind_choice is None:
+                            # 决策明细已在上方通用块打印（含蒙牌决策[看牌]），此处仅补数据不完整场景
+                            if blind_choice is None:
                                 ctx.log.info("牌局数据不完整，看牌后按实际手牌决策")
                             if cfg.get("zjh_notify_hand", True):
                                 peek_reason = _blind_peek_reason(blind_choice, actions)

@@ -41,10 +41,12 @@ from plugins.skyGame.games.zhajinhua.zhajinhua import (
     _opponents_win_probability,
     _OpponentSnapshot,
     _parse_hand,
+    _peek_terminal_ev,
     _PendingFold,
     _range_factor,
     _ranged_win_probability,
     _RangeModel,
+    _request_blind_fold,
     _RoundTracker,
     _seen_factor,
     _seen_opponent_ranges,
@@ -56,6 +58,7 @@ from plugins.skyGame.games.zhajinhua.zhajinhua import (
     _terminal_ev_decision,
     _terminal_ev_peek_multi,
     _TerminalBranch,
+    _TerminalDecision,
     _train_opponent_actions,
     _update_round_tracker,
 )
@@ -911,8 +914,9 @@ def test_blind_peek_or_call_blind_calls_on_positive_ev() -> None:
 
 
 def test_blind_peek_or_call_peeks_on_negative_ev() -> None:
-    # 正向：盲跟 Terminal EV<0 时，看牌买信息或弃牌止损，绝不继续盲跟。
-    # （对手已看牌且门槛高时，看牌后强牌概率低，peek 也救不回 → 直接弃牌止损）
+    # 正向：盲跟 Terminal EV<0 时看牌买信息止损，绝不继续盲跟。
+    # 看牌免费：弱牌看后弃（净 0=直接弃）、强牌再上，看牌弱占优于弃牌——
+    # 门户给看牌时蒙牌永不选 fold，且看牌 EV 结构性 ≥0。
     game = _game(
         {"id": "self", "alive": True, "isSelf": True, "seen": False},
         {"id": "seen", "alive": True, "seen": True},
@@ -921,15 +925,14 @@ def test_blind_peek_or_call_peeks_on_negative_ev() -> None:
     )
     action, choice = _blind_peek_or_call(game, ["call", "peek", "fold", "raise"], 0.9, _RoundTracker())
 
-    # 新语义：盲跟 EV 大负，弃牌或看牌止损，绝不盲跟
-    assert action in ("fold", "peek")
+    assert action == "peek"
     assert choice is not None
-    assert choice.expected_value <= 0
+    assert choice.expected_value >= 0
 
 
 def test_blind_peek_or_call_heads_up_uses_same_ev_path() -> None:
-    # 回归：单挑蒙牌对强看牌对手，盲跟 Terminal EV 为负时不盲跟
-    # （看牌买信息或直接弃牌止损，绝不继续被对手 raise 套牢）。
+    # 回归：单挑蒙牌对强看牌对手，盲跟 Terminal EV 为负时不盲跟——
+    # 看牌免费买信息（弱牌止损、强牌再上），绝不继续被对手 raise 套牢。
     game = _game(
         {"id": "self", "alive": True, "isSelf": True, "seen": False},
         {"id": "seen", "alive": True, "seen": True},
@@ -938,9 +941,9 @@ def test_blind_peek_or_call_heads_up_uses_same_ev_path() -> None:
     )
     action, choice = _blind_peek_or_call(game, ["peek", "fold", "showdown"], 0.9, _RoundTracker())
 
-    assert action in ("fold", "peek")
+    assert action == "peek"
     assert choice is not None
-    assert choice.expected_value <= 0
+    assert choice.expected_value >= 0
 
 
 def test_blind_peek_or_call_heads_up_keeps_positive_ev_blind_call() -> None:
@@ -1004,9 +1007,10 @@ def test_blind_peek_or_call_positive_ev_falls_back_to_call() -> None:
     assert choice.expected_value > 0
 
 
-def test_blind_peek_or_call_falls_back_to_call_without_peek_action() -> None:
-    # 异常路径：盲跟 EV 为负且门户不给看牌（actions 无 peek）时，
-    # 新语义下直接弃牌止损（不再盲跟保底——保底盲跟反而被对手 raise 套牢）。
+def test_blind_peek_or_call_folds_without_peek_action_when_call_ev_negative() -> None:
+    # 异常路径：门户不给看牌（actions 无 peek）且盲跟 EV 为负时，直接弃牌止损。
+    # （看牌弱占优于弃牌，但看牌不可用时只剩盲跟/弃牌，按盲跟 EV 符号决定——
+    # 负 EV 不盲跟，避免被对手 raise 套牢）
     game = _game(
         {"id": "self", "alive": True, "isSelf": True, "seen": False},
         {"id": "seen", "alive": True, "seen": True},
@@ -1015,9 +1019,23 @@ def test_blind_peek_or_call_falls_back_to_call_without_peek_action() -> None:
     )
     action, choice = _blind_peek_or_call(game, ["call", "fold"], 0.9, _RoundTracker())
 
-    assert action in ("fold", "call")
+    assert action == "fold"
     assert choice is not None
-    assert choice.expected_value <= 0
+
+
+def test_blind_peek_or_call_calls_without_peek_action_when_call_ev_positive() -> None:
+    # 异常路径：门户不给看牌但盲跟 EV≥0 时仍盲跟（看牌不可用，盲跟半价划算就盲跟）。
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": False},
+        {"id": "blind", "alive": True, "seen": False},
+        pot=10000,
+        call_bet=100,
+    )
+    action, choice = _blind_peek_or_call(game, ["call", "fold"], 0.5, _RoundTracker())
+
+    assert action == "call"
+    assert choice is not None
+    assert choice.call_ev >= 0
 
 
 def test_blind_peek_or_call_returns_none_without_executable_action() -> None:
@@ -1471,6 +1489,153 @@ def test_fold_confirm_max_retries_is_bounded() -> None:
     assert _FOLD_CONFIRM_MAX_RETRIES > 0
 
 
+# ── 蒙牌弃牌提交（v1.15.1 修复「决策树判弃牌却从不提交」卡死 bug）─────────────
+
+
+def _terminal_fold() -> _TerminalDecision:
+    return _TerminalDecision(
+        action="fold",
+        terminal_ev=0.0,
+        single_step_ev=-100.0,
+        call_ev=-500.0,
+        peek_ev=-10.0,
+        fold_ev=0.0,
+        branches=(),
+        reason="蒙牌弃牌 Terminal EV 0 ≥ 盲跟 -500 / 看牌 -10",
+    )
+
+
+@pytest.mark.asyncio
+async def test_request_blind_fold_submits_and_notifies() -> None:
+    # 正向：决策树判弃牌时真正提交 fold 动作，无需确认即推送蒙牌弃牌通知。
+    ctx = _RecordingContext()
+    client = _ResultClient({"ok": True})
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": False},
+        {"id": "opp", "alive": True, "seen": True},
+        pot=20150,
+        call_bet=3100,
+    )
+    tracker = _RoundTracker()
+
+    pending = await _request_blind_fold(ctx, client, {"zjh_notify_hand": True}, game, _terminal_fold(), tracker)
+
+    assert pending is False  # 无需二次确认
+    assert client.requests == [("/api/portal/zhajinhua/action", {"action": "fold"})]
+    assert tracker.pending_fold is None
+    assert len(ctx.messages) == 1
+    assert "蒙牌弃牌" in ctx.messages[0]
+
+
+@pytest.mark.asyncio
+async def test_request_blind_fold_defers_notification_when_confirm_needed() -> None:
+    # 异常路径：门户要求双击确认（foldConfirm）时延后通知，待确认成功后才推送。
+    ctx = _RecordingContext()
+    client = _ResultClient({"ok": True, "game": {"self": {"foldConfirm": True}}})
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": False},
+        {"id": "opp", "alive": True, "seen": True},
+        pot=20150,
+        call_bet=3100,
+    )
+    tracker = _RoundTracker()
+
+    pending = await _request_blind_fold(ctx, client, {"zjh_notify_hand": True}, game, _terminal_fold(), tracker)
+
+    assert pending is True  # 等待确认
+    assert tracker.pending_fold is not None
+    assert tracker.pending_fold.notification  # 预构建通知已暂存
+    assert ctx.messages == []  # 确认前不推送
+
+    # 确认成功 → 推送预构建的蒙牌弃牌通知并清空待确认状态
+    confirm_client = _ResultClient({"ok": True})
+    confirmed = await _confirm_fold(ctx, confirm_client, {"zjh_notify_hand": True}, tracker)
+    assert confirmed is True
+    assert tracker.pending_fold is None
+    assert len(ctx.messages) == 1
+    assert "蒙牌弃牌" in ctx.messages[0]
+
+
+@pytest.mark.asyncio
+async def test_request_blind_fold_failure_returns_false() -> None:
+    # 异常路径：门户拒绝弃牌请求 → 返回 False、不通知、不设待确认，交回轮询重试。
+    ctx = _RecordingContext()
+    client = _ResultClient({"ok": False, "error": "not your turn"})
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": False},
+        {"id": "opp", "alive": True, "seen": True},
+        pot=1000,
+        call_bet=100,
+    )
+    tracker = _RoundTracker()
+
+    pending = await _request_blind_fold(ctx, client, {"zjh_notify_hand": True}, game, _terminal_fold(), tracker)
+
+    assert pending is False
+    assert tracker.pending_fold is None
+    assert ctx.messages == []
+
+
+def test_peek_terminal_ev_never_negative() -> None:
+    # 回归核心（用户质疑「万一是豹子呢」）：看牌免费、弱牌弃=直接弃（净 0），
+    # 看牌弱占优于弃牌 → 无论对手多强、成本多高，看牌 EV 结构性 ≥0。
+    scenarios = [
+        # (底池, callBet, 对手门槛, 对手动作概率)
+        (100, 2000, 0.9, (0.0, 0.2, 0.8)),  # 强看牌加注型、成本远大于底池
+        (100, 50000, 0.99, (0.0, 0.0, 1.0)),  # 极强对手、天价成本
+        (16500, 6000, 0.65, (0.08, 0.22, 0.70)),  # 真实盘面 5129
+        (21450, 3300, 0.719, (0.0, 0.38, 0.62)),  # 真实盘面 5569
+    ]
+    for pot, call_bet, threshold, probs in scenarios:
+        opps = [_BlindOpponent("opp", True, probs, threshold)]
+        ev = _terminal_ev_peek_multi(
+            {"roundId": 1, "pot": pot, "callBet": call_bet}, 0.5, _RoundTracker(), 2, None, opps
+        )
+        assert ev >= 0, f"看牌 EV 不应为负：pot={pot} callBet={call_bet} T={threshold} got {ev}"
+
+
+def test_peek_terminal_ev_all_fold_wins_pot() -> None:
+    # 边界：对手必弃 → 看牌后任意手牌都白赢底池，EV = 底池 × P(继续)。
+    # 全对手弃牌时继续 EV(t)=pot>0 对一切 t 成立 → T*=0，peek_ev = pot。
+    opps = [_BlindOpponent("opp", False, (1.0, 0.0, 0.0), 0.0)]
+    ev = _terminal_ev_peek_multi({"roundId": 1, "pot": 10000, "callBet": 1000}, 0.5, _RoundTracker(), 2, None, opps)
+    assert ev == pytest.approx(10000)
+
+
+def test_terminal_ev_decision_never_folds_blind() -> None:
+    # 回归：蒙牌决策树永不输出 fold（看牌 EV 结构性 ≥0 = 弃牌 EV，弱占优取看牌）。
+    scenarios = [
+        (100, 2000, 0.9, (0.0, 0.2, 0.8)),
+        (100, 50000, 0.99, (0.0, 0.0, 1.0)),
+        (21450, 3300, 0.719, (0.0, 0.38, 0.62)),
+    ]
+    for pot, call_bet, threshold, probs in scenarios:
+        opps = [_BlindOpponent("opp", True, probs, threshold)]
+        dec = _terminal_ev_decision(
+            {"roundId": 1, "pot": pot, "callBet": call_bet}, 0.5, _RoundTracker(), depth=2, opponents=opps
+        )
+        assert dec.action != "fold", f"蒙牌不应判弃牌：pot={pot} callBet={call_bet} got {dec.action}"
+
+
+def test_blind_peek_or_call_prefers_peek_over_fold_when_available() -> None:
+    # 回归：即使（异常路径下）决策树输出 fold，门户给看牌时仍优先看牌——
+    # 看牌免费、信息永不亏，弱占优于弃牌。
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": False},
+        {"id": "seen", "alive": True, "seen": True},
+        pot=100,
+        call_bet=2000,
+    )
+    action, choice = _blind_peek_or_call(game, ["call", "peek", "fold", "raise"], 0.9, _RoundTracker())
+    assert action == "peek"
+    assert choice is not None
+
+
+def test_peek_terminal_ev_empty_branches_returns_zero() -> None:
+    # 异常路径：空分支（无对手）返回 0，防御除零/空迭代。
+    assert _peek_terminal_ev([]) == 0.0
+
+
 # ── 阶段二：范围上限 + 反诈唬补丁 ──────────────────────────────────────────────
 
 
@@ -1725,8 +1890,13 @@ def test_terminal_ev_decision_picks_blind_call_when_cheap_and_fold_heavy() -> No
     assert dec.terminal_ev > 0
 
 
-def test_terminal_ev_decision_folds_when_seen_opponent_strong() -> None:
-    """单挑对强看牌对手（门槛 0.9）、成本高：盲跟 EV 大负，弃牌或看牌止损。"""
+def test_terminal_ev_decision_peeks_when_seen_opponent_strong() -> None:
+    """单挑对强看牌对手（门槛 0.9）、成本高：盲跟 EV 大负，但看牌免费弱占优于弃牌。
+
+    回归（用户质疑「万一是豹子呢」）：看牌后弱牌弃=直接弃（净 0）、强牌再上，
+    所以看牌 EV 结构性 ≥0，蒙牌决策树永不应输出 fold——旧版拿配置门槛当强弱分界，
+    把 [配置值, 盈亏平衡点) 的牌误计为「负 EV 仍继续」拖负看牌 EV，错判「弃牌最优」。
+    """
     game = _game(
         {"id": "self", "alive": True, "isSelf": True, "seen": False},
         {"id": "opp", "alive": True, "seen": True},
@@ -1734,8 +1904,9 @@ def test_terminal_ev_decision_folds_when_seen_opponent_strong() -> None:
         call_bet=2000,
     )
     dec = _terminal_ev_decision(game, 0.9, _RoundTracker(), depth=2)
-    assert dec.action in ("fold", "peek")
-    assert dec.terminal_ev <= 0
+    assert dec.action == "peek"
+    assert dec.peek_ev >= 0
+    assert dec.call_ev < 0
 
 
 def test_terminal_ev_decision_peek_better_than_blind_call_when_raise_heavy() -> None:
@@ -2517,7 +2688,7 @@ def test_terminal_ev_decision_routes_multi_opponents() -> None:
 
 
 def test_terminal_ev_peek_multi_uses_all_opponents() -> None:
-    """多人看牌分支：强牌条件胜率对全部存活对手积分，弃牌分支白赢底池。"""
+    """多人看牌分支：内盈亏平衡点只对继续有正 EV 的手牌积分，全弃对手移出。"""
 
     game = _game(
         {"id": "self", "alive": True, "isSelf": True, "seen": False},
@@ -2526,13 +2697,17 @@ def test_terminal_ev_peek_multi_uses_all_opponents() -> None:
         pot=10000,
         call_bet=1000,
     )
-    # p1 必弃、p2 必平跟：强牌分支只有 p2 继续，强牌条件胜率对 p2（门槛 0.5）积分
+    # p1 必弃、p2 必平跟：唯一组合下 p1 移出，只剩 p2（看牌门槛 0.5）
     opps = [
         _BlindOpponent("p1", False, (1.0, 0.0, 0.0), 0.0),
         _BlindOpponent("p2", True, (0.0, 1.0, 0.0), 0.5),
     ]
     peek_ev = _terminal_ev_peek_multi(game, 0.5, _RoundTracker(), 2, None, opps)
-    # 手算：threshold=0.5 → strong_prob=0.5。强牌分支 p2 必跟：
-    #   池 = 10000+1000=11000，成本 1000，强牌胜率 = ∫₀.₅¹ (t-0.5)/(0.5) dt = 0.25
-    #   branch_ev = 0.25*11000 - 1000 = 1750；peek_ev = 0.5*1750 = 875
-    assert peek_ev == pytest.approx(0.5 * (0.25 * 11000 - 1000))
+    # 手算（内盈亏平衡点）：池 = 10000+1000 = 11000，全价成本 1000，
+    # 胜率(t) = (t−0.5)/0.5；盈亏平衡 t* = 0.5 + 0.5×(1000/11000)。
+    # peek_ev = ∫_{t*}^1 (胜率(t)×11000 − 1000) dt（t<t* 弃牌贡献 0）
+    t_star = 0.5 + 0.5 * (1000 / 11000)
+    win_integral = ((1 - 0.5) ** 2 - (t_star - 0.5) ** 2) / (2 * 0.5)
+    expected = 11000 * win_integral - 1000 * (1 - t_star)
+    assert peek_ev == pytest.approx(expected)
+    assert peek_ev > 0  # 看牌免费：结构性非负

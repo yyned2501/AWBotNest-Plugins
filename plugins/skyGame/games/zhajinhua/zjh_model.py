@@ -46,12 +46,17 @@ class _OpponentSnapshot:
 
 @dataclass(frozen=True)
 class _PendingFold:
-    """等待门户二次确认的弃牌通知内容。"""
+    """等待门户二次确认的弃牌通知内容。
+
+    `notification` 非空时确认成功后直接推送该预构建文本（蒙牌弃牌：无手牌、
+    展示终局 EV 分解）；为空则按 `choice` 构建已看牌弃牌通知（旧路径）。
+    """
 
     rid: Any
     hand: str
     hand_type: str
-    choice: _Choice
+    choice: _Choice | None = None
+    notification: str = ""
 
 
 @dataclass
@@ -784,6 +789,55 @@ def _terminal_ev_call_multi(
     return ev
 
 
+def _peek_terminal_ev(
+    branches: list[tuple[float, int, tuple[float, ...], float, float]],
+) -> float:
+    """看牌分支终局 EV 公共内核：看牌免费、只在 EV(t)≥0 时继续，结果结构性 ≥0。
+
+    看牌后手牌强度 t~U[0,1]，逐个 t 选「继续 / 弃牌」：弃牌净 0，与不看牌直接弃完全
+    相同——所以看牌弱占优于弃牌（万一是豹子：免费看牌的选择权永不亏钱），看牌 EV
+    不可能为负。每条分支为 (联合概率, 剩余蒙牌数, 看牌对手门槛, 摊牌底池, 跟注成本)；
+    全弃分支记为「对零对手摊牌」（胜率恒 1、成本 0）。
+
+    继续的 EV(t) = Σ 联合概率×(win(t)×底池 − 成本) 随 t 单调不减：二分反推盈亏平衡
+    点 T*（EV(0)≥0 时取 T*=0），t<T* 弃牌（贡献 0）、t≥T* 继续，
+    peek_ev = ∫_{T*}^1 EV(t) dt，逐分支积分用 _blind_win_probability(lower=T*) 闭式。
+
+    旧实现拿 zjh_peeked_threshold 配置值当强/弱牌分界：真实盈亏平衡点高于配置值时
+    （强看牌对手、加注后成本高），[配置值, 平衡点) 的牌被误计入「负 EV 仍继续」，
+    把整体 EV 拖成负数，错误得出「弃牌最优」——与「看牌免费」直接矛盾。
+    """
+    if not branches:
+        return 0.0
+
+    def ev_at(t: float) -> float:
+        ev = 0.0
+        for weight, blind, seen, pot_win, cost in branches:
+            win = 1.0 if not blind and not seen else _actual_win_probability(t, blind, seen)
+            ev += weight * (win * pot_win - cost)
+        return ev
+
+    if ev_at(0.0) >= 0:
+        t_star = 0.0
+    else:
+        lower, upper = 0.0, 1.0
+        for _ in range(60):
+            middle = (lower + upper) / 2
+            if ev_at(middle) >= 0:
+                upper = middle
+            else:
+                lower = middle
+        t_star = upper
+        if t_star >= 1:
+            return 0.0
+
+    ev = 0.0
+    for weight, blind, seen, pot_win, cost in branches:
+        win_integral = 1.0 - t_star if not blind and not seen else _blind_win_probability(blind, seen, lower=t_star)
+        ev += weight * (pot_win * win_integral - cost * (1.0 - t_star))
+    return max(ev, 0.0)
+
+
 def _terminal_ev_peek_multi(
     game: dict[str, Any],
     fallback_threshold: float,
@@ -792,33 +846,28 @@ def _terminal_ev_peek_multi(
     profile: Any = None,
     opponents: list[_BlindOpponent] | None = None,
 ) -> float:
-    """多人看牌分支终局期望：peek 免费，弱牌止损、强牌全价跟注。
+    """多人看牌分支终局期望：peek 免费，内盈亏平衡点保证 EV≥0（弱牌止损、强牌全价跟）。
 
-    看牌后 t~U[0,1]，对手门槛 T：t<T 弃牌（概率 T，净收益 0）；t≥T 强牌全价跟注
-    call_bet，再枚举所有存活对手一轮动作——全部弃牌白赢底池，否则按强牌条件胜率
-    （t∈[T,1] 对剩余对手精确积分）摊牌。
+    时序：我方看牌（免费）→ 强牌全价跟注 → 对手反应（枚举全存活对手 fold/call/raise
+    组合，P=0 剪枝）→ 全弃白赢底池，否则按手牌强度摊牌。对手加注后我方跟注付加价后
+    的全价 new_call_bet，看牌对手加注上调其门槛。看牌后是否继续由 _peek_terminal_ev
+    按内盈亏平衡点决策（不再用外部配置门槛当强弱分界），结构上永不为负。
     """
-    threshold = fallback_threshold if 0 <= fallback_threshold < 1 else 0.5
     if not opponents:
         return 0.0
     pot = float(game.get("pot", 0) or 0)
     call_bet = float(game.get("callBet", 0) or 0)
 
-    weak_prob = threshold
-    strong_prob = 1.0 - threshold
-    branch_ev = 0.0
+    branches: list[tuple[float, int, tuple[float, ...], float, float]] = []
     for combo, joint in _iter_action_choices(opponents):
         new_opponents, new_pot, new_call_bet = _apply_opponent_actions(game, profile, opponents, combo, pot, call_bet)
         if not new_opponents:
-            branch_ev += joint * pot  # 全弃 → 白赢当前底池（无需再投入）
+            branches.append((joint, 0, (), pot, 0.0))  # 全弃 → 白赢当前底池（无需再投入）
             continue
-        # 强牌条件胜率：我方 t∈[T,1] 对剩余对手
         blind = sum(1 for opp in new_opponents if not opp.op_seen)
         seen_thresholds = tuple(opp.threshold for opp in new_opponents if opp.op_seen)
-        strong_win = _blind_win_probability(blind, seen_thresholds, lower=threshold)
-        branch_ev += joint * (strong_win * new_pot - call_bet)
-
-    return weak_prob * 0 + strong_prob * branch_ev
+        branches.append((joint, blind, seen_thresholds, new_pot, new_call_bet))
+    return _peek_terminal_ev(branches)
 
 
 def _opponent_raise_threshold(
@@ -1017,18 +1066,14 @@ def _terminal_ev_peek(
     profile: Any = None,
     action_probs: tuple[float, float, float] | None = None,
 ) -> float:
-    """看牌分支的终局期望：peek 免费，看牌后信息充分再决策。
+    """单对手看牌分支终局期望（opponents=None 旧路径）：与多人版同内核，EV 结构性 ≥0。
 
-    看牌后我方手牌 t~U[0,1]，对手门槛 T：
-      - 我方 t < T（弱牌）→ 弃牌，增量成本 0，概率 = T；
-      - 我方 t ≥ T（强牌）→ 看牌后全价跟注，与对手摊牌，
-        条件胜率 `_blind_vs_seen_win(T) = (1−T)/2`（我方 t≥T 对对手 s∈[T,1]
-        的期望胜率），需付看牌后跟注成本 call_bet。
-    与盲跟分支对称：强牌分支内同样按对手动作概率（action_probs）对未来轮次
-    加权，对手弃牌时白赢当前底池，对手跟/加时进入下一轮继续推演。
-    避免旧实现的乐观高估（把 threshold 当弱牌概率、假设必摊牌不扣对手加注成本）。
+    对手按门槛 fallback_threshold 的已看牌建模（与旧行为一致）：弃牌 → 白赢底池；
+    跟注 → 摊牌底池 pot+callBet、成本 callBet；加注 → 门槛经 _opponent_raise_threshold
+    上调、摊牌底池 pot+1.5×callBet、成本 1.5×callBet。看牌后是否继续由
+    _peek_terminal_ev 按内盈亏平衡点决策——看牌免费，弱牌弃掉与不看牌弃牌同净 0，
+    因此结果永不为负（修复旧外部门槛分界把 EV 拖负、误判「弃牌最优」的问题）。
     """
-    threshold = fallback_threshold if 0 <= fallback_threshold < 1 else 0.5
     if action_probs is None:
         action_probs = (1 / 3, 1 / 3, 1 / 3)
     p_fold, p_call, p_raise = action_probs
@@ -1039,25 +1084,17 @@ def _terminal_ev_peek(
 
     pot = float(game.get("pot", 0) or 0)
     call_bet = float(game.get("callBet", 0) or 0)
+    threshold = fallback_threshold if 0 <= fallback_threshold < 1 else 0.5
 
-    # 弱牌（t<T）弃牌：净收益 0
-    weak_prob = threshold
-    # 强牌（t≥T）概率
-    strong_prob = 1.0 - threshold
-    # 强牌条件胜率：我方 t≥T 对对手 s∈[T,1] 的期望胜率
-    strong_win = _blind_vs_seen_win(threshold)
-
-    # 强牌分支内部：按对手动作概率加权未来一轮
-    #  - 对手弃牌：白赢当前底池（无需再投入）
-    #  - 对手跟/加：我方全价跟注 call_bet 后摊牌，赢底池
-    branch_ev = 0.0
+    branches: list[tuple[float, int, tuple[float, ...], float, float]] = []
     if p_fold > 0:
-        branch_ev += p_fold * pot
-    if p_call + p_raise > 0:
-        # 强牌 vs 对手范围，条件胜率；赢 pot+call，扣我方全价跟注成本
-        branch_ev += (p_call + p_raise) * (strong_win * (pot + call_bet) - call_bet)
-
-    return weak_prob * 0 + strong_prob * branch_ev
+        branches.append((p_fold, 0, (), pot, 0.0))
+    if p_call > 0:
+        branches.append((p_call, 0, (threshold,), pot + call_bet, call_bet))
+    if p_raise > 0:
+        raise_threshold = _opponent_raise_threshold(threshold, 1, profile)
+        branches.append((p_raise, 0, (raise_threshold,), pot + call_bet * 1.5, call_bet * 1.5))
+    return _peek_terminal_ev(branches)
 
 
 def _terminal_ev_decision(
@@ -1249,16 +1286,22 @@ def _blind_peek_or_call(
     if terminal.action == "peek":
         if "peek" in actions:
             return "peek", terminal
+        # 看牌不可用：只剩盲跟/弃牌二选一，按盲跟 EV 符号决定（EV≥0 才盲跟，否则弃牌止损）
+        if terminal.call_ev >= 0 and "call" in actions:
+            return "call", terminal
+        if "fold" in actions:
+            return "fold", terminal
         if "call" in actions:
             return "call", terminal
         return None, terminal
 
-    # 4. Terminal EV 判定弃牌最优 → 弃牌
+    # 4. Terminal EV 判定弃牌最优 → 看牌免费、信息永不亏（弱牌弃=直接弃，强牌再上），
+    #    弱占优于弃牌：门户给看牌就看牌，不给才弃
     if terminal.action == "fold":
-        if "fold" in actions:
-            return "fold", terminal
         if "peek" in actions:
             return "peek", terminal
+        if "fold" in actions:
+            return "fold", terminal
         if "call" in actions:
             return "call", terminal
         return None, terminal
@@ -1292,7 +1335,7 @@ def _blind_peek_reason(blind_choice: _TerminalDecision | _CallDecision | None, a
         if blind_choice.action == "peek":
             return "蒙牌 Terminal EV 看牌最优：弱牌止损、强牌再上，避免盲跟被对手加注套牢"
         if blind_choice.action == "fold":
-            return "蒙牌 Terminal EV 弃牌最优：继续盲跟终局期望为负"
+            return "蒙牌 Terminal EV 弃牌最优，但看牌免费、信息永不亏，改为看牌——弱牌止损、强牌再上"
         return "看牌买信息——牌大再上、牌小弃"
     # 旧单步 EV 决策返回（兜底）
     if blind_choice.expected_value < 0:

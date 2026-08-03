@@ -60,10 +60,10 @@
 - 单挑对手未看牌 → 直接跟注不自主看牌（`_act_on_hand()` 的 `_is_heads_up()` 分支）。
 - 单挑且对手已看牌、EV 为负 → 比牌止损（`showdown`/`open`，门户允许即用）或弃牌止损（无比牌动作时），绝不继续跟注；旧逻辑「EV为负也不弃牌」曾导致终胜率 0% 仍连跟多轮、单局巨亏（`_heads_up_stop_loss_action()`）。
 - 单挑且我方仍蒙牌 → 不看牌直接开牌：门户开放 `showdown`/`open` 任一即提交（实测只在对手已看牌时给出），两者都不开放（对手同样蒙牌）才退回盲跟；看牌会让后续投入翻倍，单挑无多人信息可换，直接比大小（`_poll_loop()` 看牌前分支的 `_heads_up_blind_action()`）。
-- 多人蒙牌（非单挑）按 Terminal EV 决策树决定「盲跟 / 看牌 / 弃牌」，优先级低于单挑分支（`_blind_peek_or_call()`）：递归推演 `zjh_terminal_depth` 轮，每轮枚举**所有存活对手**的 fold/call/raise 动作组合（笛卡尔积，`P=0` 的动作剪枝，`zjh_profile` 按对手 ID 独立查画像动作概率，而非旧版「取全部对手平均值当单对手」）；弃牌者移出存活列表、胜率按剩余对手重算（`_blind_win_probability` 对未知手牌精确积分），看牌对手加注上调其门槛、蒙牌加注视为诈唬不上调；全部弃牌则独赢底池。盲跟候选 EV≥0 才盲跟（半价 `callBet/2`），否则比看牌/弃牌取最优；看牌免费，牌大再上、牌小交给看牌后 EV 弃牌。看牌响应后的实际手牌决策仍走 `_act_on_hand()`。
+- 多人蒙牌（非单挑）按 Terminal EV 决策树决定「盲跟 / 看牌」，优先级低于单挑分支（`_blind_peek_or_call()`）：递归推演 `zjh_terminal_depth` 轮，每轮枚举**所有存活对手**的 fold/call/raise 动作组合（笛卡尔积，`P=0` 的动作剪枝，`zjh_profile` 按对手 ID 独立查画像动作概率，而非旧版「取全部对手平均值当单对手」）；弃牌者移出存活列表、胜率按剩余对手重算（`_blind_win_probability` 对未知手牌精确积分），看牌对手加注上调其门槛、蒙牌加注视为诈唬不上调；全部弃牌则独赢底池。盲跟候选 EV≥0 才盲跟（半价 `callBet/2`），否则看牌。**蒙牌决策树不输出弃牌**（v1.15.1）：看牌免费、弱牌看后弃=直接弃（净 0）、强牌再上，看牌弱占优于弃牌；看牌分支 EV 按内盈亏平衡点积分（旧版拿配置门槛当强弱分界，对手很强时把看牌 EV 拖负、误判「弃牌最优」），结构性 ≥0。仅当门户不给看牌时才按盲跟 EV 符号在跟注/弃牌间选；判弃牌时经 `_request_blind_fold()` 提交 fold（与已看牌弃牌同一动作端点，可能触发 `foldConfirm` 双击确认，通知用蒙牌弃牌样式）。看牌响应后的实际手牌决策仍走 `_act_on_hand()`。
 - 蒙牌跟注成本为已看牌的一半（实测同一 `callBet=3000` 下，蒙牌 `+1500 跟注`、已看牌 `+3000 跟注`）；`peek`（看牌）动作本身不扣费（实测看牌前后 `player.bet` 无增量、`lastAction` 无下注文本），其代价仅是失去后续跟注的半价优惠（看牌后变为 `seen`，每次跟注按全价 `callBet`）。这是“蒙牌 EV 决策”和“单挑蒙牌不看牌直接开”的共同依据。
 - 参与的对局结束（`roundId` 变化）时，推送最终结果通知：手牌、牌型、存活状态。
-- **开牌动作仅在单挑出现（实测）**：`open`/`showdown` 只在存活玩家=2（单挑）时出现在 `actions`；多人局 actions 只有 `peek`/`fold`/`call`/`raise`。指南「场上>3人不比牌」被门户天然满足，无需插件限人数。
+- **开牌动作主要在单挑出现（实测）**：`open`/`showdown` 绝大多数情况只在存活玩家=2（单挑）时出现在 `actions`。**但 2026-08-03 线上日志观察到例外**：一存活对手=2（含我方共 3 人）的多人局 `actions` 也含 `open`（`phase='playing'`），与「仅单挑」结论冲突，待进一步确认触发条件。插件在盲跟 EV≥0 分支会优先 `showdown`/`open`，若多人局确实给出 `open` 需确认提交是否合法。
 - **强制摊牌（实测）**：单挑约 6-8 轮后 `phase` 变为 `"showdown"`，`actions` 只剩 `fold`/`raise`/`showdown`（不再有 `call`/`open`），必须摊牌结束。单挑期间对手可每轮 `raise`，`callBet` 递增（实测 3000→24000），pot 可滚到 20-29 万。
 - **`showdown` 成本 = 当前 `callBet`（单倍）**：实测结算时我方 delta 等于累计投入全额亏损，无双倍比牌费。
 - **结算数据源 `game.lastResult`**：`GET /api/portal/zhajinhua` 每轮响应的 `game.lastResult` 含上一局结算：`roundId`、`winner`、`pot`、`winnerReturn`、`rake`（约 0.5%）、`selfDelta`、`players[]`（含 `displayName`、`bet`、`delta`、`result`（获胜/比牌落败/已弃牌）、`handType`、`isWinner`）。`players` 无 `id`，需用牌局 GET 的 `displayName→id` 映射关联（对手画像结算回填依据）。
