@@ -58,7 +58,7 @@ from plugins.skyGame.games.zhajinhua.zhajinhua import (
 from plugins.skyGame.games.zhajinhua.zjh_profile import (
     PRIOR_STRENGTH,
     ProfileStore,
-    _bucket,
+    _freq_bucket,
     _hand_pctile_from_result,
     _percentile,
     feed_last_result,
@@ -1812,16 +1812,16 @@ def test_terminal_ev_decision_threads_opponent_seen() -> None:
 def test_profile_store_buckets_actions() -> None:
     """画像按状态分桶统计对手动作，flush 后可从 kv 恢复。"""
     store = ProfileStore()
-    store.record_action("account:1", "raise", my_seen=False, op_seen=True, is_heads_up=True)
-    store.record_action("account:1", "raise", my_seen=False, op_seen=True, is_heads_up=True)
-    store.record_action("account:1", "call", my_seen=False, op_seen=True, is_heads_up=True)
-    store.record_action("account:1", "fold", my_seen=False, op_seen=True, is_heads_up=False)
-    p_fold, p_call, p_raise = store.action_probabilities("account:1", False, True, True)
+    store.record_action("account:1", "raise", op_seen=True, seen_count=0, blind_count=0)
+    store.record_action("account:1", "raise", op_seen=True, seen_count=0, blind_count=0)
+    store.record_action("account:1", "call", op_seen=True, seen_count=0, blind_count=0)
+    store.record_action("account:1", "fold", op_seen=True, seen_count=0, blind_count=1)
+    p_fold, p_call, p_raise = store.action_probabilities("account:1", True, 0, 0)
     assert p_raise == pytest.approx(2 / 3)
     assert p_call == pytest.approx(1 / 3)
     assert p_fold == pytest.approx(0)
     # 不同桶互不影响
-    p_f2, _, p_r2 = store.action_probabilities("account:1", False, True, False)
+    p_f2, _, p_r2 = store.action_probabilities("account:1", True, 0, 1)
     assert p_f2 == pytest.approx(1.0)
     assert p_r2 == pytest.approx(0)
 
@@ -1830,14 +1830,14 @@ def test_profile_store_unknown_opponent_falls_back_to_prior() -> None:
     """未知对手回退全局先验；少样本向先验收缩。"""
     store = ProfileStore()
     # 无任何样本 → 均等先验
-    p = store.action_probabilities("unknown", False, True, True)
+    p = store.action_probabilities("unknown", True, 0, 0)
     assert p == pytest.approx((1 / 3, 1 / 3, 1 / 3))
     # 有全局样本：A 常 raise（全局先验偏 raise）
-    store.record_action("account:a", "raise", False, True, True)
-    store.record_action("account:a", "raise", False, True, True)
+    store.record_action("account:a", "raise", op_seen=True, seen_count=0, blind_count=0)
+    store.record_action("account:a", "raise", op_seen=True, seen_count=0, blind_count=0)
     # 少样本对手（1 次 call）向全局先验收缩
-    store.record_action("account:new", "call", False, True, True)
-    p_new = store.action_probabilities("account:new", False, True, True)
+    store.record_action("account:new", "call", op_seen=True, seen_count=0, blind_count=0)
+    p_new = store.action_probabilities("account:new", True, 0, 0)
     # 全局先验 raise 主导：新对手的 raise 概率被先验抬高（> 纯经验 0）
     assert p_new[2] > 0
     # call 概率被先验稀释（从纯经验 1.0 降下来，向全局 raise 靠拢）
@@ -1870,14 +1870,14 @@ def test_profile_store_persist_roundtrip() -> None:
 
     kv = FakeKV()
     store = ProfileStore(kv)
-    store.record_action("account:9", "raise", False, True, True, display_name="Damon")
+    store.record_action("account:9", "raise", op_seen=True, seen_count=0, blind_count=0, display_name="Damon")
     store.flush()
     assert len(kv.keys()) == 1
     assert kv.get("zjh:profile:account:9")["display_name"] == "Damon"
 
     store2 = ProfileStore(kv)
     store2.load_all()
-    p = store2.action_probabilities("account:9", False, True, True)
+    p = store2.action_probabilities("account:9", True, 0, 0)
     assert p == pytest.approx((0, 0, 1.0))
 
 
@@ -2066,11 +2066,11 @@ def test_hand_pctile_from_result_parses() -> None:
 
 
 def test_bucket_keys() -> None:
-    """状态分桶键：我蒙/看 × 对手蒙/看 × 单挑/多人。"""
-    assert _bucket(False, False, True) == "b_b_hu"
-    assert _bucket(False, True, True) == "b_s_hu"
-    assert _bucket(True, True, False) == "s_s_multi"
-    assert _bucket(True, False, True) == "s_b_hu"
+    """动作分桶键：对手状态 + 其他看牌人数 + 其他蒙牌人数。"""
+    assert _freq_bucket(False, 0, 0) == "b_s0b0"
+    assert _freq_bucket(False, 1, 0) == "b_s1b0"
+    assert _freq_bucket(True, 1, 1) == "s_s1b1"
+    assert _freq_bucket(True, 0, 1) == "s_s0b1"
 
 
 def test_terminal_ev_real_world_5129_should_not_blind_call() -> None:
@@ -2178,14 +2178,15 @@ def test_train_opponent_actions_records_all_alive_opponents() -> None:
         {"id": "p1", "alive": True, "seen": False, "lastAction": "+1500 跟注", "bet": 4500},
         {"id": "p2", "alive": True, "seen": False, "lastAction": "+3000 追加", "bet": 6000},
     )
-    _train_opponent_actions(store, game, last_seen, my_seen=False, is_heads_up=False)
+    _train_opponent_actions(store, game, last_seen)
     dump = store.debug_dump()
     assert "p1" in dump
     assert "p2" in dump
-    # p1 跟注、p2 加注
-    p1_f, p1_c, p1_r = store.action_probabilities("p1", False, False, False)
+    # p1 跟注、p2 加注；3人局（self+p1+p2），p1/p2 都蒙牌
+    # 排除自身后: seen_count=0, blind_count=1
+    p1_f, p1_c, p1_r = store.action_probabilities("p1", False, 0, 1)
     assert p1_c > 0
-    p2_f, p2_c, p2_r = store.action_probabilities("p2", False, False, False)
+    p2_f, p2_c, p2_r = store.action_probabilities("p2", False, 0, 1)
     assert p2_r > 0
 
 
@@ -2201,15 +2202,15 @@ def test_train_opponent_actions_dedupes_same_action() -> None:
     }
     opp = {"id": "p1", "alive": True, "seen": False, "lastAction": "+1500 跟注", "bet": 4500}
     # 第一轮：记录
-    _train_opponent_actions(store, _game(base, dict(opp)), last_seen, False, True)
+    _train_opponent_actions(store, _game(base, dict(opp)), last_seen)
     n_after_first = store.debug_dump()["p1"]["total_hands"]
     # 第二轮：同一动作不变 → 不重复记录
-    _train_opponent_actions(store, _game(base, dict(opp)), last_seen, False, True)
-    _train_opponent_actions(store, _game(base, dict(opp)), last_seen, False, True)
+    _train_opponent_actions(store, _game(base, dict(opp)), last_seen)
+    _train_opponent_actions(store, _game(base, dict(opp)), last_seen)
     assert store.debug_dump()["p1"]["total_hands"] == n_after_first
     # 动作变化（追加）→ 记录新动作
     opp2 = dict(opp, lastAction="+3000 追加", bet=6000)
-    _train_opponent_actions(store, _game(base, opp2), last_seen, False, True)
+    _train_opponent_actions(store, _game(base, opp2), last_seen)
     assert store.debug_dump()["p1"]["total_hands"] == n_after_first + 1
 
 
@@ -2221,7 +2222,7 @@ def test_train_opponent_actions_ignores_registration_action() -> None:
         {"id": "self", "alive": True, "isSelf": True, "seen": False},
         {"id": "p1", "alive": True, "seen": False, "lastAction": "报名", "bet": 3000},
     )
-    _train_opponent_actions(store, game, last_seen, False, True)
+    _train_opponent_actions(store, game, last_seen)
     # 无任何动作被记录（total_hands 保持 0）
     dump = store.debug_dump()
     assert "p1" not in dump or dump["p1"].get("total_hands", 0) == 0
@@ -2236,11 +2237,11 @@ def test_train_opponent_actions_covers_blind_peeked_and_opponent_turn() -> None:
         {"id": "self", "alive": True, "isSelf": True, "seen": True},
         {"id": "p1", "alive": True, "seen": True, "lastAction": "+3000 追加", "bet": 9000},
     )
-    _train_opponent_actions(store, game, last_seen, my_seen=True, is_heads_up=False)
+    _train_opponent_actions(store, game, last_seen)
     dump = store.debug_dump()
     assert "p1" in dump
-    # 分桶为 s_s_multi（我看、对手看、多人）
-    assert "s_s_multi" in dump["p1"]
+    # 分桶为 s_s0b0（对手看牌，无其他看牌/蒙牌人，单挑）
+    assert "s_s0b0" in dump["p1"]
 
 
 def test_train_opponent_actions_skips_folded_opponents() -> None:
@@ -2251,7 +2252,7 @@ def test_train_opponent_actions_skips_folded_opponents() -> None:
         {"id": "self", "alive": True, "isSelf": True, "seen": False},
         {"id": "folded", "alive": False, "seen": False, "lastAction": "弃牌", "bet": 3000},
     )
-    _train_opponent_actions(store, game, last_seen, False, True)
+    _train_opponent_actions(store, game, last_seen)
     assert "folded" not in store.debug_dump()
 
 
@@ -2332,7 +2333,7 @@ def test_train_opponent_actions_records_raise_freq() -> None:
         {"id": "p1", "alive": True, "seen": False, "lastAction": "+3000 追加", "bet": 6000},
         {"id": "p2", "alive": True, "seen": False, "lastAction": "+1500 跟注", "bet": 4500},
     )
-    _train_opponent_actions(store, game, last_seen, False, False, None, recorded)
+    _train_opponent_actions(store, game, last_seen, None, recorded)
     assert "p1" in recorded
     assert "p2" in recorded
     dump = store.debug_dump()
@@ -2356,10 +2357,10 @@ def test_train_opponent_actions_raise_freq_dedup() -> None:
     base = {"id": "self", "alive": True, "isSelf": True, "seen": False}
     opp = {"id": "p1", "alive": True, "seen": False, "lastAction": "+3000 追加", "bet": 6000}
     # 第一次：记录
-    _train_opponent_actions(store, _game(base, dict(opp)), last_seen, False, True, None, recorded)
+    _train_opponent_actions(store, _game(base, dict(opp)), last_seen, None, recorded)
     n_after_first = store.debug_dump()["p1"]["raise_freq"]["b_s0b0"]["total"]
     # 第二次：动作不变 → 签名不上传，不触发记录
-    _train_opponent_actions(store, _game(base, dict(opp)), last_seen, False, True, None, recorded)
+    _train_opponent_actions(store, _game(base, dict(opp)), last_seen, None, recorded)
     assert store.debug_dump()["p1"]["raise_freq"]["b_s0b0"]["total"] == n_after_first
 
 

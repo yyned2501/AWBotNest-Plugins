@@ -278,8 +278,6 @@ def _train_opponent_actions(
     store: object,
     game: dict[str, Any],
     last_seen: dict[str, tuple[str, float]],
-    my_seen: bool,
-    is_heads_up: bool,
     round_action: dict[str, str] | None = None,
     raise_freq_recorded: set[str] | None = None,
 ) -> None:
@@ -323,12 +321,16 @@ def _train_opponent_actions(
             if action == "raise" or round_action.get(uid) != "raise":
                 round_action[uid] = action
         op_seen = bool(player.get("seen", False))
+        blind_count, seen_count = _opponent_counts(game)  # (蒙牌数, 看牌数)
+        # 排除当前对手自身
+        adj_seen = seen_count - (1 if op_seen else 0)
+        adj_blind = blind_count - (0 if op_seen else 1)
         store.record_action(
             uid,
             action,
-            my_seen,
             op_seen,
-            is_heads_up,
+            adj_seen,
+            adj_blind,
             display_name=str(player.get("displayName", "") or ""),
         )
         # 每局每个对手只记一次加注频率（首次动作变更时）
@@ -437,18 +439,10 @@ async def _poll_loop(ctx: object) -> None:
                 s = g.get("self", {})
                 # 每轮公共训练画像：遍历所有存活对手，检测动作变化去重记录
                 if cfg.get("zjh_profile_enabled", True):
-                    alive_opponents = [
-                        _player_key(player, index)
-                        for index, player in enumerate(_players(g))
-                        if not _is_self(player) and (player.get("alive") or player.get("active", False))
-                    ]
-                    is_hu = len(alive_opponents) <= 1
                     _train_opponent_actions(
                         profile_store,
                         g,
                         last_opponent_seen,
-                        bool(s.get("seen", False)),
-                        is_hu,
                         round_opponent_action,
                         round_raise_freq_recorded,
                     )
@@ -509,12 +503,6 @@ async def _poll_loop(ctx: object) -> None:
                     else:
                         # 蒙牌：用 Terminal EV 决策树决定「盲跟 / 看牌 / 弃牌」。
                         # 连续盲跟达上限强制看牌；对手动作概率来自画像。
-                        alive_count = sum(
-                            1
-                            for index, player in enumerate(_players(g))
-                            if index != next((i for i, p in enumerate(_players(g)) if _is_self(p)), -1)
-                            and (player.get("alive") or player.get("active", False))
-                        )
                         # 取第一个存活对手 uid 作为画像键（单挑即为唯一对手，多人取首个）
                         opponent_uid: str | None = None
                         for index, player in enumerate(_players(g)):
@@ -523,9 +511,7 @@ async def _poll_loop(ctx: object) -> None:
                             if player.get("alive") or player.get("active", False):
                                 opponent_uid = _player_key(player, index)
                                 break
-                        is_hu = alive_count <= 1
-                        my_seen = bool(s.get("seen", False))
-                        # 画像动作概率（我方蒙牌、对手状态、单挑/多人）
+                        # 画像动作概率（按对手视角分桶）
                         action_probs: tuple[float, float, float] | None = None
                         if opponent_uid and cfg.get("zjh_profile_enabled", True):
                             op_seen = False
@@ -533,7 +519,12 @@ async def _poll_loop(ctx: object) -> None:
                                 if not _is_self(player) and _player_key(player, index) == opponent_uid:
                                     op_seen = bool(player.get("seen", False))
                                     break
-                            action_probs = profile_store.action_probabilities(opponent_uid, my_seen, op_seen, is_hu)
+                            blind_count, seen_count = _opponent_counts(g)
+                            adj_seen = seen_count - (1 if op_seen else 0)
+                            adj_blind = blind_count - (0 if op_seen else 1)
+                            action_probs = profile_store.action_probabilities(
+                                opponent_uid, op_seen, adj_seen, adj_blind
+                            )
                         blind_action, blind_choice = _blind_peek_or_call(
                             g,
                             actions,

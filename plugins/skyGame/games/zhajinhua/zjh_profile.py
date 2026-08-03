@@ -21,17 +21,7 @@ from .zjh_state import _player_key, _players
 # kv 键前缀
 _KV_PREFIX = "zjh:profile:"
 
-# 状态分桶维度：我方蒙/看 × 对手蒙/看 × 是否单挑
-_MY_BLIND = "b"
-_MY_SEEN = "s"
-_OP_BLIND = "b"
-_OP_SEEN = "s"
-_HU = "hu"  # 单挑（对手仅剩1）
-_MULTI = "multi"
-
 # 画像字典键
-_ACTIONS = "actions"  # {"fold": n, "call": n, "raise": n}
-_N_HANDS = "n_hands"  # 本桶累计动作次数（供归一化）
 _RAISE_PCTS = "raise_pcts"  # 加注后最终真实手牌分位（结算回填）
 _CALL_PCTS = "call_pcts"  # 平跟后最终真实手牌分位
 _TOTAL_HANDS = "total_hands"
@@ -39,7 +29,7 @@ _DISPLAY = "display_name"
 _UPDATED = "updated_ms"
 _RAISE_FREQ = "raise_freq"  # 加注频率分桶: {bucket_key: {"total": N, "raises": M}}
 
-# 空动作计数
+# 空动作计数（动作分桶用，桶键与加注频率分桶一致）
 _EMPTY_ACTIONS = {"fold": 0, "call": 0, "raise": 0}
 
 # 贝叶斯收缩伪样本数：样本不足时按此权重折回先验/基线（动作概率、实测胜率、诈唬率共用）
@@ -49,19 +39,12 @@ PRIOR_STRENGTH = 3.0
 _WEAK_PCTILE = 0.5
 
 
-def _bucket(my_seen: bool, op_seen: bool, is_heads_up: bool) -> str:
-    """构造状态分桶键：如 "b_b_hu"（我蒙、对手蒙、单挑）。"""
-    my_side = _MY_SEEN if my_seen else _MY_BLIND
-    op_side = _OP_SEEN if op_seen else _OP_BLIND
-    heads = _HU if is_heads_up else _MULTI
-    return f"{my_side}_{op_side}_{heads}"
-
-
 def _freq_bucket(op_seen: bool, seen_count: int, blind_count: int) -> str:
-    """加注频率分桶键：对手状态 + 其他看牌人数 + 其他蒙牌人数。
+    """分桶键：对手状态 + 其他看牌人数 + 其他蒙牌人数。
 
     例如 s_s1b1 = 对手看牌，另有1人看牌、1人蒙牌，共4人存活。
     b_s0b2 = 对手蒙牌，无其他看牌人、另有2人蒙牌，共3人存活。
+    动作分桶与加注频率分桶共用同一桶键方案。
     """
     op = "s" if op_seen else "b"
     return f"{op}_s{seen_count}b{blind_count}"
@@ -109,23 +92,25 @@ class ProfileStore:
         self,
         uid: str,
         action: str,
-        my_seen: bool,
         op_seen: bool,
-        is_heads_up: bool,
+        seen_count: int,
+        blind_count: int,
         display_name: str | None = None,
     ) -> None:
-        """记录对手一次 fold/call/raise 动作到对应状态桶。"""
+        """记录对手一次 fold/call/raise 动作到对应状态桶。
+
+        桶键与加注频率分桶一致（_freq_bucket），动作计数直接存于桶字典
+        {r: N, c: N, f: N}，无需额外嵌套。
+        """
         uid = self._normalize_uid(uid)
         profile = self._ensure(uid)
         if display_name:
             profile[_DISPLAY] = display_name
         profile[_TOTAL_HANDS] = profile.get(_TOTAL_HANDS, 0) + 1
-        bucket_key = _bucket(my_seen, op_seen, is_heads_up)
-        bucket = profile.setdefault(bucket_key, {})
-        actions = bucket.setdefault(_ACTIONS, dict(_EMPTY_ACTIONS))
-        if action in actions:
-            actions[action] += 1
-            bucket[_N_HANDS] = bucket.get(_N_HANDS, 0) + 1
+        bucket_key = _freq_bucket(op_seen, seen_count, blind_count)
+        bucket = profile.setdefault(bucket_key, dict(_EMPTY_ACTIONS))
+        if action in bucket:
+            bucket[action] += 1
             self._dirty.add(uid)
 
     def record_hand_pctile(self, uid: str, action: str, pctile: float) -> None:
@@ -206,55 +191,56 @@ class ProfileStore:
     # ── 查询：某对手在某状态桶的动作概率 ──
 
     def action_probabilities(
-        self, uid: str, my_seen: bool, op_seen: bool, is_heads_up: bool
+        self, uid: str, op_seen: bool, seen_count: int, blind_count: int
     ) -> tuple[float, float, float]:
         """返回 (P_fold, P_call, P_raise)，未知/少样本向全局先验平滑。
 
         样本数低于 prior_strength 时，按 prior_strength 的伪样本权重折回全局先验。
         """
         uid = self._normalize_uid(uid)
-        global_prior = self._global_prior(my_seen, op_seen, is_heads_up)
+        global_prior = self._global_prior(op_seen, seen_count, blind_count)
 
         profile = self._cache.get(uid)
         if profile is None:
             return global_prior
-        bucket = profile.get(_bucket(my_seen, op_seen, is_heads_up))
-        actions = bucket.get(_ACTIONS) if bucket else None
-        if not actions:
+        bucket_key = _freq_bucket(op_seen, seen_count, blind_count)
+        bucket = profile.get(bucket_key)
+        if not bucket:
             return global_prior
 
-        n = sum(actions.values())
+        n = sum(bucket.get(k, 0) for k in ("fold", "call", "raise"))
+        if n <= 0:
+            return global_prior
+
         # 样本足够则直接用经验频率；不足则向全局先验收缩
         if n >= PRIOR_STRENGTH:
-            total = max(n, 1)
             return (
-                actions.get("fold", 0) / total,
-                actions.get("call", 0) / total,
-                actions.get("raise", 0) / total,
+                bucket.get("fold", 0) / n,
+                bucket.get("call", 0) / n,
+                bucket.get("raise", 0) / n,
             )
 
         # 经验频率与全局先验按样本数加权（贝叶斯收缩）
         g_f, g_c, g_r = global_prior
         total = n + PRIOR_STRENGTH
         return (
-            (actions.get("fold", 0) + PRIOR_STRENGTH * g_f) / total,
-            (actions.get("call", 0) + PRIOR_STRENGTH * g_c) / total,
-            (actions.get("raise", 0) + PRIOR_STRENGTH * g_r) / total,
+            (bucket.get("fold", 0) + PRIOR_STRENGTH * g_f) / total,
+            (bucket.get("call", 0) + PRIOR_STRENGTH * g_c) / total,
+            (bucket.get("raise", 0) + PRIOR_STRENGTH * g_r) / total,
         )
 
-    def _global_prior(self, my_seen: bool, op_seen: bool, is_heads_up: bool) -> tuple[float, float, float]:
+    def _global_prior(self, op_seen: bool, seen_count: int, blind_count: int) -> tuple[float, float, float]:
         """聚合所有已见对手的同桶经验频率作为先验；无样本时用均等先验。"""
-        bucket_key = _bucket(my_seen, op_seen, is_heads_up)
+        bucket_key = _freq_bucket(op_seen, seen_count, blind_count)
         agg = dict(_EMPTY_ACTIONS)
         total = 0
         for profile in self._cache.values():
             bucket = profile.get(bucket_key)
-            actions = bucket.get(_ACTIONS) if bucket else None
-            if not actions:
+            if not bucket:
                 continue
             for k in agg:
-                agg[k] += actions.get(k, 0)
-            total += sum(actions.values())
+                agg[k] += bucket.get(k, 0)
+            total += sum(bucket.get(k, 0) for k in ("fold", "call", "raise"))
         if total <= 0:
             return (1 / 3, 1 / 3, 1 / 3)
         return (agg["fold"] / total, agg["call"] / total, agg["raise"] / total)
