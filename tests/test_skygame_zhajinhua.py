@@ -1631,6 +1631,64 @@ def test_blind_peek_or_call_prefers_peek_over_fold_when_available() -> None:
     assert choice is not None
 
 
+def test_blind_peek_or_call_showdown_phase_continues_when_peek_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 回归：强制摊牌阶段（actions 无 peek/call，只有 fold/raise/showdown），
+    # 决策树判看牌最优但看牌不可用、盲跟 EV≥0 时，必须用 showdown 当「继续」动作应战，
+    # 而不是落到 fold——正 EV 弃牌等于白扔底池权益。
+    from plugins.skyGame.games.zhajinhua import zjh_model
+
+    crafted = _TerminalDecision(
+        action="peek",
+        terminal_ev=500.0,
+        single_step_ev=100.0,
+        call_ev=120.0,
+        peek_ev=500.0,
+        fold_ev=0.0,
+        branches=(),
+        reason="测试构造：看牌最优且盲跟 EV≥0",
+    )
+    monkeypatch.setattr(zjh_model, "_terminal_ev_decision", lambda *args, **kwargs: crafted)
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": False},
+        {"id": "opp", "alive": True, "seen": True},
+        pot=100000,
+        call_bet=3000,
+    )
+    action, choice = _blind_peek_or_call(game, ["fold", "raise", "showdown"], 0.5, _RoundTracker())
+    assert action == "showdown"
+    assert choice is crafted
+
+
+def test_blind_peek_or_call_showdown_phase_folds_when_call_ev_negative(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 同阶段异常路径：盲跟 EV<0 时看牌又不可用 → 弃牌止损，不能硬 showdown 送钱。
+    from plugins.skyGame.games.zhajinhua import zjh_model
+
+    crafted = _TerminalDecision(
+        action="peek",
+        terminal_ev=10.0,
+        single_step_ev=-50.0,
+        call_ev=-800.0,
+        peek_ev=10.0,
+        fold_ev=0.0,
+        branches=(),
+        reason="测试构造：看牌最优但盲跟 EV<0",
+    )
+    monkeypatch.setattr(zjh_model, "_terminal_ev_decision", lambda *args, **kwargs: crafted)
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": False},
+        {"id": "opp", "alive": True, "seen": True},
+        pot=1000,
+        call_bet=24000,
+    )
+    action, choice = _blind_peek_or_call(game, ["fold", "raise", "showdown"], 0.9, _RoundTracker())
+    assert action == "fold"
+    assert choice is crafted
+
+
 def test_peek_terminal_ev_empty_branches_returns_zero() -> None:
     # 异常路径：空分支（无对手）返回 0，防御除零/空迭代。
     assert _peek_terminal_ev([]) == 0.0

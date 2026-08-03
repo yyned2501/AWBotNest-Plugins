@@ -1286,9 +1286,16 @@ def _blind_peek_or_call(
     if terminal.action == "peek":
         if "peek" in actions:
             return "peek", terminal
-        # 看牌不可用：只剩盲跟/弃牌二选一，按盲跟 EV 符号决定（EV≥0 才盲跟，否则弃牌止损）
-        if terminal.call_ev >= 0 and "call" in actions:
-            return "call", terminal
+        # 看牌不可用：按盲跟 EV 符号选「继续」或弃牌止损。
+        # 强制摊牌阶段 actions 无 peek/call，showdown/open 即「继续」动作（同分支 2 优先序），
+        # 不能落到 fold——正 EV 弃牌等于白扔底池权益
+        if terminal.call_ev >= 0:
+            if "call" in actions:
+                return "call", terminal
+            if "showdown" in actions:
+                return "showdown", terminal
+            if "open" in actions:
+                return "open", terminal
         if "fold" in actions:
             return "fold", terminal
         if "call" in actions:
