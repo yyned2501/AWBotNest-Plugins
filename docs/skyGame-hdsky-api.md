@@ -45,7 +45,7 @@
 | `game.players` / `game.seats` | 公开玩家列表（门户可能使用任一字段）。 |
 | `player.id` | 玩家稳定标识。 |
 | `player.isSelf` / `player.self` | 是否为本账号。 |
-| `player.alive` / `player.active` | 玩家是否仍在局。 |
+| `player.alive` / `player.active` | 玩家是否仍在局。实测：弃牌动作在**同一快照**就伴随 `alive=false` 出现（`lastAction='弃牌'` 只在出局状态可见，2026-08-04 实测确认），插件对出局玩家只记录 fold 动作。 |
 | `player.seen` | 是否已看牌。 |
 | `player.bet` | 玩家公开下注额；用于相邻轮询识别下注增加。 |
 | `player.lastAction` | 最近动作文本；在下注额缺失时辅助识别跟注或加注。 |
@@ -67,7 +67,8 @@
 - **强制摊牌（实测）**：单挑约 6-8 轮后 `phase` 变为 `"showdown"`，`actions` 只剩 `fold`/`raise`/`showdown`（不再有 `call`/`open`），必须摊牌结束。单挑期间对手可每轮 `raise`，`callBet` 递增（实测 3000→24000），pot 可滚到 20-29 万。
 - **`showdown` 成本 = 当前 `callBet`（单倍）**：实测结算时我方 delta 等于累计投入全额亏损，无双倍比牌费。
 - **结算数据源 `game.lastResult`**：`GET /api/portal/zhajinhua` 每轮响应的 `game.lastResult` 含上一局结算：`roundId`、`winner`、`pot`、`winnerReturn`、`rake`（约 0.5%）、`selfDelta`、`players[]`（含 `displayName`、`bet`、`delta`、`result`（获胜/比牌落败/已弃牌）、`handType`、`isWinner`）。`players` 无 `id`，需用牌局 GET 的 `displayName→id` 映射关联（对手画像结算回填依据）。
-- **`lastResult.players[]` 只给牌型、不给牌面与动作（已确认）**：每个玩家只有 `handType`（如「顺子」「散牌」），**没有具体牌面点数**（无 `hand` 卡牌文本），也**没有本局是加注还是平跟的动作字段**。因此对手画像：手牌分位只能用牌型分位带中点近似（`zjh_prob.win_prob_1v1_type`，无法定位型内具体点数）；加注/平跟分桶必须靠轮询实时跟踪 `lastAction`（`_train_opponent_actions` 的最激进动作），结算本身无从区分。
+- **`lastResult.players[]` 牌面与动作字段（2026-08-04 实测更正）**：结算**没有**本局加注/平跟的动作字段（动作分桶仍靠轮询实时跟踪 `lastAction`）。但**摊牌/比牌结束的局，每个玩家（含已弃牌者）的 `handType` 给出「牌面 → 牌型」完整组合文本**（如 `J♣ 6♣ 3♦ → 散牌`）；只有全员弃牌直接分 pot 的局无人亮牌（`handType` 为空）。因此弃牌玩家亮牌时也按本轮最激进动作回填手牌分位（「加注后弃牌」的牌是校准加注下限/诈唬率的关键样本）；无牌面则不回填、不虚构。
+- **对手范围与反诈唬全画像驱动（v1.16.0，无手动配置）**：已看牌对手范围不再用固定上下限配置——加注对手下限 = 实测加注分位下四分位（无分位回退加注频率推断 `1-raise_rate`，再回退推断门槛）；平跟对手**永不封顶**（upper 恒 1.0，对手可能慢打坚果牌）。反诈唬率逐对手计算、无全局基线：继续频率 c>0.5 本身蕴含诈唬（理性对手最多用最强 c 分位牌继续，弱牌占比下界 (c−0.5)/c，按样本收缩），再与实测继续手牌弱牌占比混合；无画像对手诈唬率 0。
 - `player.bet` 为**累计投入**（实测：3000 底注 + 1500 跟注 = 4500；单挑每轮随 `callBet` 递增）。
 - 遛马动作用于冷却拒绝时返回外层 `ok: true`、`result.code == "cooldown"`、`result.remainMs`（剩余毫秒）、`result.message`；冷却约 45 分钟，且期间 `state.canWalk` 仍为 `true`，不能用来判断是否可遛。插件记下 `remainMs` 换算的到期时间退避，未到不再尝试；`cooldown` 不计入失败计数，连续真失败 3 次后跳过本轮。（`horse.py` 的 `_care_once()`）
 - 养马实测字段：`stats.walkCountToday/walkMax`（每日遛马上限）、`stats.feedCountToday/feedMax`、`profile.satiety`（饱腹度）、`horse.balance`（银元）、`profile.state.{isDead,canWalk,canFeed}`。

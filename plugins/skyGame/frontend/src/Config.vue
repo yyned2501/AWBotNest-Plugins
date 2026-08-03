@@ -44,9 +44,6 @@ const DEFAULTS = {
   zjh_raise_min_win_rate: 75,
   zjh_raise_frequency: 65,
   zjh_first_peek_no_raise: true,
-  zjh_call_range_cap: 85,
-  zjh_raise_range_floor: 75,
-  zjh_bluff_rate: 8,
   zjh_fold_ev_tolerance: 5,
   zjh_terminal_depth: 2,
   zjh_blind_max_calls: 3,
@@ -375,27 +372,12 @@ async function renewNow() {
           </section>
 
           <section class="card">
-            <div class="card-h">范围上限与反诈唬（放松跟注）</div>
+            <div class="card-h">对手范围与反诈唬（画像自动驱动）</div>
             <span class="help">
-              看牌后评估胜率时，对手手牌不再默认可能是直到最强的任意牌：平跟/仅看牌对手按[推断门槛, 牌力上限]、
-              加注对手按[牌力下限, 100%]估计；反诈唬基线把每个已看牌对手有固定比例视为纯空气牌。整体更敢跟、少弃牌。
-              牌力上限设 100% 且反诈唬设 0% 即精确回到旧行为。
+              看牌后评估胜率时，对手手牌范围与反诈唬全部由对手画像自动推断，无需手动设置：
+              加注对手按实测加注牌力下限估计，平跟对手永不封顶（可能慢打坚果牌）；
+              继续频率异常高的对手自动计入诈唬概率。无画像对手按推断门槛、不反诈唬。
             </span>
-            <div class="fld">
-              <span class="lbl">平跟对手牌力上限：{{ cfg.zjh_call_range_cap }}%</span>
-              <input v-model.number="cfg.zjh_call_range_cap" type="range" min="50" max="100" step="5" />
-              <span class="help">只平跟/看牌不追加的对手，牌力按[推断门槛, 此上限]估计。100% = 旧行为。</span>
-            </div>
-            <div class="fld">
-              <span class="lbl">加注对手牌力下限：{{ cfg.zjh_raise_range_floor }}%</span>
-              <input v-model.number="cfg.zjh_raise_range_floor" type="range" min="50" max="100" step="5" />
-              <span class="help">追加过的对手按[max(推断门槛, 此下限), 100%]估计；低于推断门槛时以推断门槛为准。</span>
-            </div>
-            <div class="fld">
-              <span class="lbl">反诈唬基线：{{ cfg.zjh_bluff_rate }}%</span>
-              <input v-model.number="cfg.zjh_bluff_rate" type="range" min="0" max="30" step="1" />
-              <span class="help">每个已看牌对手有该比例概率是纯空气牌（诈唬），抬高我方胜率。0% = 关闭。</span>
-            </div>
             <div class="fld">
               <span class="lbl">弃牌 EV 容差：{{ cfg.zjh_fold_ev_tolerance }}% callBet</span>
               <input v-model.number="cfg.zjh_fold_ev_tolerance" type="range" min="0" max="30" step="1" />
@@ -424,7 +406,7 @@ async function renewNow() {
               <input v-model="cfg.zjh_profile_enabled" type="checkbox" />
               <span>启用对手画像</span>
             </label>
-            <span class="help">按玩家 ID 跨局统计每个对手在各状态下的跟/加/弃频率，供决策树预测动作。未知对手用全局先验。</span>
+            <span class="help">按玩家 ID 跨局统计每个对手的动作频率与实测手牌分位：决策树据此预测动作，已看牌胜率据此定对手范围与反诈唬。未知对手用全局先验、不反诈唬。</span>
           </section>
 
           <section class="card">

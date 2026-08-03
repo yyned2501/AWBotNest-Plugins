@@ -35,7 +35,6 @@ from .zjh_hand import (
 )
 from .zjh_model import (
     _FOLD_CONFIRM_MAX_RETRIES,
-    _NEUTRAL_RANGE_MODEL,
     _actual_win_probability,
     _blind_call_cost,
     _blind_decision,
@@ -61,7 +60,6 @@ from .zjh_model import (
     _PendingFold,
     _range_factor,
     _ranged_win_probability,
-    _RangeModel,
     _record_self_threshold,
     _RoundTracker,
     _seen_factor,
@@ -84,15 +82,13 @@ from .zjh_notify import (
     _log_decision,
     _notify_game_result,
 )
-from .zjh_profile import feed_last_result, get_store, reset_store
+from .zjh_profile import feed_last_result, get_store, record_round_raise_freq, reset_store
 from .zjh_state import _in_hand, _is_self, _opponent_counts, _player_key, _players
 
 __all__ = [
     "_FOLD_CONFIRM_MAX_RETRIES",
-    "_NEUTRAL_RANGE_MODEL",
     "_OpponentSnapshot",
     "_PendingFold",
-    "_RangeModel",
     "_RoundTracker",
     "_SeenRange",
     "_Choice",
@@ -144,6 +140,7 @@ __all__ = [
     "_update_round_tracker",
     "feed_last_result",
     "get_store",
+    "record_round_raise_freq",
     "reset_store",
     "start",
     "stop",
@@ -279,7 +276,6 @@ async def _act_on_hand(
         game,
         fallback_threshold,
         tracker,
-        _RangeModel.from_config(cfg),
         float(cfg.get("zjh_fold_ev_tolerance", 0) or 0),
         profile,
     )
@@ -331,26 +327,24 @@ def _train_opponent_actions(
     game: dict[str, Any],
     last_seen: dict[str, tuple[str, float]],
     round_action: dict[str, str] | None = None,
-    raise_freq_recorded: set[str] | None = None,
 ) -> None:
-    """每轮训练画像：遍历所有存活对手，检测动作变化并去重记录。
+    """每轮训练画像：遍历所有对手，检测动作变化并去重记录。
 
-    与旧 `_train_opponent_action`（只在蒙牌分支、只记首个对手、不去重）相比：
     - 覆盖所有时机（bot 看牌后、对手行动中、多人局全部对手）；
     - 用 last_seen 签名（lastAction + bet）去重：同一动作只在变化时记一次，
       避免轮询重复计数把跟注/加注频率撑高。
+    - 已出局（alive=False）玩家只记录 fold：实测门户在弃牌的同一快照就把
+      alive 置 false（lastAction='弃牌' 只在死人状态可见），若跳过死人，
+      fold 永远进不了画像，继续频率分母缺失会系统性高估诈唬率。
     last_seen 由调用方在 `_poll_loop` 维护（跨局重置），键为对手 uid，
     值为 (lastAction, bet) 签名。
     round_action：本轮各对手最激进动作 {uid: "raise"|"call"}（raise 覆盖 call），
     供结算回填按实际动作分桶；None 时不维护。
-    raise_freq_recorded：本轮已记录加注频率的对手 uid 集合，防止同局多次调用
-    record_raise_freq；None 时不记录加注频率。
     """
     for index, player in enumerate(_players(game)):
         if _is_self(player):
             continue
-        if not (player.get("alive") or player.get("active", False)):
-            continue
+        alive = bool(player.get("alive") or player.get("active", False))
         uid = _player_key(player, index)
         current_action = str(player.get("lastAction", "") or "")
         current_bet = player.get("bet")
@@ -368,11 +362,19 @@ def _train_opponent_actions(
             action = "fold"
         if action is None:
             continue  # 报名等非决策动作不计入（但已更新签名，避免反复尝试）
+        if not alive and action != "fold":
+            continue  # 出局玩家只有弃牌这一种新动作值得记录
         op_seen = bool(player.get("seen", False))
         blind_count, seen_count = _opponent_counts(game)  # (蒙牌数, 看牌数)
-        # 排除当前对手自身
-        adj_seen = seen_count - (1 if op_seen else 0)
-        adj_blind = blind_count - (0 if op_seen else 1)
+        if alive:
+            # 存活对手计入计数，排除当前对手自身
+            adj_seen = seen_count - (1 if op_seen else 0)
+            adj_blind = blind_count - (0 if op_seen else 1)
+        else:
+            # 出局玩家已被 _opponent_counts 排除在计数外，当前存活的其他对手
+            # 即近似其弃牌时刻的牌局上下文（首条观察到弃牌的轮询快照）
+            adj_seen = seen_count
+            adj_blind = blind_count
         if round_action is not None and action in ("raise", "call"):
             # 最激进动作优先：加注覆盖平跟（结算回填据此区分加注/平跟手牌分位）
             # 同时存储当时牌局状态桶参数 (action, op_seen, adj_seen, adj_blind)
@@ -386,14 +388,6 @@ def _train_opponent_actions(
             adj_blind,
             display_name=str(player.get("displayName", "") or ""),
         )
-        # 每局每个对手只记一次加注频率（首次动作变更时）
-        if raise_freq_recorded is not None and uid not in raise_freq_recorded:
-            blind_count, seen_count = _opponent_counts(game)  # (蒙牌数, 看牌数)
-            # 排除当前对手自身
-            adj_seen = seen_count - (1 if op_seen else 0)
-            adj_blind = blind_count - (0 if op_seen else 1)
-            store.record_raise_freq(uid, op_seen, adj_seen, adj_blind, action == "raise")
-            raise_freq_recorded.add(uid)
 
 
 async def _poll_loop(ctx: object) -> None:
@@ -418,8 +412,6 @@ async def _poll_loop(ctx: object) -> None:
     last_opponent_seen: dict[str, tuple[str, float]] = {}
     # 本轮各对手最激进动作 uid → (action, op_seen, seen_count, blind_count)（结算回填分桶用）
     round_opponent_action: dict[str, tuple[str, bool, int, int]] = {}
-    # 本轮已记录加注频率的对手 uid（同局只记一次，避免重复计）
-    round_raise_freq_recorded: set[str] = set()
     # 刚结束那局（lastResult 待回填）的对手动作快照：lastResult 滞后一局，
     # roundId 切换时把当前轮动作移入此变量，供随后到达的 lastResult 回填取用
     settled_round_action: dict[str, tuple[str, bool, int, int]] = {}
@@ -474,7 +466,6 @@ async def _poll_loop(ctx: object) -> None:
                     # 上一局动作移入 settled，供随后到达的 lastResult 回填；本轮重新累计
                     settled_round_action = round_opponent_action
                     round_opponent_action = {}
-                    round_raise_freq_recorded = set()
 
                 # 每轮更新 displayName→id 映射；新一局结算回填对手真实手牌分位到画像
                 for index, player in enumerate(_players(g)):
@@ -486,18 +477,19 @@ async def _poll_loop(ctx: object) -> None:
                 last_result_rid = last_result.get("roundId") if isinstance(last_result, dict) else None
                 if last_result_rid and last_result_rid != last_fed_result_rid:
                     feed_last_result(profile_store, game_data, uid_by_display, settled_round_action)
+                    # 加注频率按结算时的最激进动作记录（修复 call 后 raise 被记成非加注）
+                    record_round_raise_freq(profile_store, settled_round_action)
                     last_fed_result_rid = last_result_rid
                 if cfg.get("zjh_profile_enabled", True):
                     profile_store.flush()
                 s = g.get("self", {})
-                # 每轮公共训练画像：遍历所有存活对手，检测动作变化去重记录
+                # 每轮公共训练画像：遍历所有对手，检测动作变化去重记录（死人只记 fold）
                 if cfg.get("zjh_profile_enabled", True):
                     _train_opponent_actions(
                         profile_store,
                         g,
                         last_opponent_seen,
                         round_opponent_action,
-                        round_raise_freq_recorded,
                     )
                 # 弃牌/出局后本局不再有任何决策，停止跟踪对手快照与门槛推导。
                 # 否则对手互相缠斗时门槛会递归虚高（单挑反推的不动点在 1.0，

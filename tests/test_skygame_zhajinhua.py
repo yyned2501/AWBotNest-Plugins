@@ -8,7 +8,6 @@ import pytest
 from plugins.skyGame.games.zhajinhua import gen_zjh_prob, zjh_prob
 from plugins.skyGame.games.zhajinhua.zhajinhua import (
     _FOLD_CONFIRM_MAX_RETRIES,
-    _NEUTRAL_RANGE_MODEL,
     _acquire_hand_after_peek,
     _act_on_hand,
     _actual_win_probability,
@@ -45,7 +44,6 @@ from plugins.skyGame.games.zhajinhua.zhajinhua import (
     _PendingFold,
     _range_factor,
     _ranged_win_probability,
-    _RangeModel,
     _request_blind_fold,
     _RoundTracker,
     _seen_factor,
@@ -69,6 +67,7 @@ from plugins.skyGame.games.zhajinhua.zjh_profile import (
     _hand_pctile_from_result,
     _percentile,
     feed_last_result,
+    record_round_raise_freq,
 )
 
 
@@ -1251,10 +1250,10 @@ def test_choose_fold_ev_tolerance_keeps_marginal_hands() -> None:
         pot=1500,
         call_bet=1000,
     )
-    choice_strict = _choose("散牌", (12, 9, 5), game, 0.5, _RoundTracker(), None, 0.0)
+    choice_strict = _choose("散牌", (12, 9, 5), game, 0.5, _RoundTracker(), 0.0)
     assert choice_strict.call is False
 
-    choice_lenient = _choose("散牌", (12, 9, 5), game, 0.5, _RoundTracker(), None, 10.0)
+    choice_lenient = _choose("散牌", (12, 9, 5), game, 0.5, _RoundTracker(), 10.0)
     assert choice_lenient.call is True
 
 
@@ -1267,7 +1266,7 @@ def test_choose_fold_ev_tolerance_still_folds_clearly_negative() -> None:
         call_bet=2000,
     )
     # 弱散牌 + 极差底池赔率，EV 大幅为负，容差 10%（−200）也救不回
-    choice = _choose("散牌", (7, 5, 3), game, 0.5, _RoundTracker(), None, 10.0)
+    choice = _choose("散牌", (7, 5, 3), game, 0.5, _RoundTracker(), 10.0)
     assert choice.call is False
 
 
@@ -1697,9 +1696,8 @@ def test_peek_terminal_ev_empty_branches_returns_zero() -> None:
 # ── 阶段二：范围上限 + 反诈唬补丁 ──────────────────────────────────────────────
 
 
-def test_ranged_win_probability_matches_actual_under_neutral_model() -> None:
-    # 向后兼容核心：中性模型（上界 1.0、诈唬 0）下新模型逐值等于旧 _actual_win_probability，
-    # 保证「平跟上限 100 & 反诈唬 0」可精确回退到 v1.12.1 行为。
+def test_ranged_win_probability_matches_actual_without_profile() -> None:
+    # 向后兼容核心：无画像（upper 恒 1.0、诈唬 0）下逐值等于旧 _actual_win_probability。
     cases = [
         (0.6, 0, ((0.4, 1.0),)),
         (0.7, 1, ((0.5, 1.0),)),
@@ -1710,7 +1708,7 @@ def test_ranged_win_probability_matches_actual_under_neutral_model() -> None:
     for one_vs_one, blind, bounds in cases:
         seen_ranges = [_SeenRange(lower, upper, True) for lower, upper in bounds]
         thresholds = tuple(lower for lower, _ in bounds)
-        assert _ranged_win_probability(one_vs_one, blind, seen_ranges, 0.0) == pytest.approx(
+        assert _ranged_win_probability(one_vs_one, blind, seen_ranges) == pytest.approx(
             _actual_win_probability(one_vs_one, blind, thresholds)
         )
 
@@ -1724,15 +1722,25 @@ def test_range_factor_edges_and_degenerate_fallback() -> None:
     assert _range_factor(0.75, 0.6, 0.5) == pytest.approx((0.75 - 0.6) / (1.0 - 0.6))
 
 
-def test_seen_factor_bluff_raises_win_probability() -> None:
+def test_seen_factor_without_profile_is_pure_range_win() -> None:
+    # 无画像对手：诈唬率 0、无实测混合，seen_factor 退化为纯范围胜率。
     seen_range = _SeenRange(0.5, 0.85, True)
     hand_threshold = 0.7
+    assert _seen_factor(hand_threshold, seen_range) == pytest.approx(_range_factor(hand_threshold, 0.5, 0.85))
+
+
+def test_seen_factor_profile_bluff_raises_win_probability() -> None:
+    # 画像反诈唬：全 call 跟注站（继续频率 1.0）频率诈唬下界混入单挑胜率 t，抬高胜率。
+    store = ProfileStore()
+    for _ in range(10):
+        store.record_action("opp", "call", True, 0, 0)
+    seen_range = _SeenRange(0.5, 0.85, True, store, "opp", "call", "s_s0b0")
+    hand_threshold = 0.7
     base = _range_factor(hand_threshold, 0.5, 0.85)
-    # 诈唬 0 时等于纯范围胜率
-    assert _seen_factor(hand_threshold, seen_range, 0.0) == pytest.approx(base)
-    # 诈唬 > 0 混入单挑胜率 t，抬高胜率（放松方向）
-    assert _seen_factor(hand_threshold, seen_range, 0.1) == pytest.approx(0.9 * base + 0.1 * hand_threshold)
-    assert _seen_factor(hand_threshold, seen_range, 0.1) > base
+    bluff = store.bluff_rate("opp", "s_s0b0")
+    assert bluff > 0
+    assert _seen_factor(hand_threshold, seen_range) == pytest.approx((1 - bluff) * base + bluff * hand_threshold)
+    assert _seen_factor(hand_threshold, seen_range) > base
 
 
 def test_is_raise_action_detects_raise_keywords() -> None:
@@ -1743,8 +1751,13 @@ def test_is_raise_action_detects_raise_keywords() -> None:
     assert _is_raise_action("call") is False
 
 
-def test_seen_opponent_ranges_map_actions_to_bounds() -> None:
-    # 范围映射：平跟对手 [推断门槛, 上限]，加注对手 [max(门槛, 下限), 1.0]。
+def test_seen_opponent_ranges_caller_upper_always_one() -> None:
+    # 范围映射（画像驱动）：平跟对手 [推断门槛, 1.0] 永不封顶（对手可能慢打坚果牌）；
+    # 加注对手无画像时 [推断门槛, 1.0]；即使画像里有平跟分位数据也不设上限。
+    store = ProfileStore()
+    # 给平跟对手回填很强的平跟分位——旧版 call_threshold_ceiling 会压上限，新版必须无影响
+    for pct in (0.6, 0.7, 0.8, 0.9):
+        store.record_hand_pctile("caller", "call", pct, op_seen=True, seen_count=0, blind_count=0)
     game = _game(
         {"id": "self", "alive": True, "isSelf": True},
         {"id": "caller", "alive": True, "seen": True},
@@ -1756,23 +1769,27 @@ def test_seen_opponent_ranges_map_actions_to_bounds() -> None:
             "raiser": _OpponentSnapshot(pot=100, call_bet=100, opponents=1, is_raise=True),
         }
     )
-    model = _RangeModel(call_cap=0.85, raise_floor=0.75, bluff=0.08)
-    blind, ranges = _seen_opponent_ranges(game, tracker, 0.1, model)
+    blind, ranges = _seen_opponent_ranges(game, tracker, 0.1, store)
 
     assert blind == 0
-    # 平跟对手：[推断门槛 0.5, 上限 0.85]
+    # 平跟对手：[推断门槛 0.5, 1.0]，画像分位不封顶
     assert ranges[0].lower == pytest.approx(0.5)
-    assert ranges[0].upper == pytest.approx(0.85)
+    assert ranges[0].upper == pytest.approx(1.0)
     assert ranges[0].observed is True
-    # 加注对手：[max(0.5, 0.75)=0.75, 1.0]
-    assert ranges[1].lower == pytest.approx(0.75)
+    # 加注对手：无实测加注分位/频率数据时下限 = 推断门槛
+    assert ranges[1].lower == pytest.approx(0.5)
     assert ranges[1].upper == pytest.approx(1.0)
     assert ranges[1].observed is True
 
 
-def test_call_decision_range_and_bluff_loosen_win_probability() -> None:
-    # 放松方向：同一手牌、同一已看牌对手，封顶 + 反诈唬比中性模型胜率与 EV 都更高，
-    # 且只改上界/胜率、不改推断门槛。
+def test_call_decision_profile_loosens_win_probability() -> None:
+    # 放松方向：同一手牌、同一已看牌对手，弱牌加注/跟注站画像（实测弱牌分位 +
+    # 高继续频率反诈唬）比无画像胜率与 EV 都更高，推断门槛不变。
+    store = ProfileStore()
+    for _ in range(10):
+        store.record_action("seen", "call", True, 0, 0)
+    for pct in (0.15, 0.2, 0.25, 0.3, 0.1, 0.2):
+        store.record_hand_pctile("seen", "call", pct, op_seen=True, seen_count=0, blind_count=0)
     game = _game(
         {"id": "self", "alive": True, "isSelf": True},
         {"id": "seen", "alive": True, "seen": True},
@@ -1781,26 +1798,39 @@ def test_call_decision_range_and_bluff_loosen_win_probability() -> None:
     )
     tracker = _RoundTracker(snapshots={"seen": _OpponentSnapshot(pot=100, call_bet=100, opponents=1)})
     neutral = _call_decision("对子", (14, 13), game, 0.1, tracker)
-    loosened = _call_decision(
-        "对子", (14, 13), game, 0.1, tracker, _RangeModel(call_cap=0.85, raise_floor=0.75, bluff=0.08)
-    )
+    loosened = _call_decision("对子", (14, 13), game, 0.1, tracker, store)
 
     assert neutral is not None and loosened is not None
     assert loosened.win_probability > neutral.win_probability
     assert loosened.expected_value > neutral.expected_value
-    # 中性模型上界仍记 1.0（旧行为），放松模型上界收到 0.85，推断门槛同为 0.5
+    # 推断门槛不变，upper 恒 1.0
     assert neutral.seen_thresholds == ((0.5, 1.0, True),)
-    assert loosened.seen_thresholds == ((0.5, 0.85, True),)
+    assert loosened.seen_thresholds == ((0.5, 1.0, True),)
 
 
-def test_choose_flips_to_call_when_range_model_loosens_ev() -> None:
-    # 端到端放松：同一手牌、同一对手，中性模型 EV 为负而弃，开启封顶 + 反诈唬后 EV 转正而跟。
+def test_choose_flips_to_call_when_profile_loosens_ev() -> None:
+    # 端到端放松：同一手牌、同一对手，无画像 EV 为负而弃，弱牌画像接入后 EV 转正而跟。
+    store = ProfileStore()
+    for _ in range(10):
+        store.record_action("seen", "call", True, 0, 0)
+    for pct in (0.15, 0.2, 0.25, 0.3, 0.1, 0.2):
+        store.record_hand_pctile("seen", "call", pct, op_seen=True, seen_count=0, blind_count=0)
+
     one_vs_one = zjh_prob.win_prob_1v1("对子", (14, 13))
-    neutral_win = _ranged_win_probability(one_vs_one, 0, [_SeenRange(0.5, 1.0, True)], 0.0)
-    loosened_win = _ranged_win_probability(one_vs_one, 0, [_SeenRange(0.5, 0.85, True)], 0.08)
+    neutral_win = _ranged_win_probability(one_vs_one, 0, [_SeenRange(0.5, 1.0, True)])
+    probe_game = _game(
+        {"id": "self", "alive": True, "isSelf": True},
+        {"id": "seen", "alive": True, "seen": True},
+        pot=1000,
+        call_bet=100,
+    )
+    tracker = _RoundTracker(snapshots={"seen": _OpponentSnapshot(pot=100, call_bet=100, opponents=1)})
+    probe = _call_decision("对子", (14, 13), probe_game, 0.1, tracker, store)
+    assert probe is not None
+    loosened_win = probe.win_probability
     assert loosened_win > neutral_win
 
-    # 底池取「中性弃」与「放松跟」两条 EV=0 临界点的中点，确保两侧符号相反
+    # 底池取「无画像弃」与「画像跟」两条 EV=0 临界点的中点，确保两侧符号相反
     call_bet = 100.0
     pot = ((1 / neutral_win - 1) + (1 / loosened_win - 1)) / 2 * call_bet
     game = _game(
@@ -1811,10 +1841,8 @@ def test_choose_flips_to_call_when_range_model_loosens_ev() -> None:
     )
     tracker = _RoundTracker(snapshots={"seen": _OpponentSnapshot(pot=100, call_bet=100, opponents=1)})
 
-    neutral_choice = _choose("对子", (14, 13), game, 0.1, tracker, _NEUTRAL_RANGE_MODEL)
-    loosened_choice = _choose(
-        "对子", (14, 13), game, 0.1, tracker, _RangeModel(call_cap=0.85, raise_floor=0.75, bluff=0.08)
-    )
+    neutral_choice = _choose("对子", (14, 13), game, 0.1, tracker)
+    loosened_choice = _choose("对子", (14, 13), game, 0.1, tracker, 0.0, store)
     assert neutral_choice.call is False
     assert loosened_choice.call is True
 
@@ -2167,18 +2195,57 @@ def test_empirical_win_factor_shrinkage() -> None:
     assert store.empirical_win_factor("c", "raise", 0.5, 0.42) < 0.1
 
 
-def test_bluff_rate_fallback_and_weak_heavy() -> None:
-    """逐对手诈唬率：样本不足回退基线，弱牌多则高、强牌多则低。"""
+def test_bluff_rate_freq_and_hand_pctile_blend() -> None:
+    """逐对手诈唬率（频率异常下界 + 实测弱牌占比收缩，无全局基线）。"""
     store = ProfileStore()
-    store.record_hand_pctile("a", "raise", 0.1)
-    store.record_hand_pctile("a", "call", 0.2)  # 合计 2 < PRIOR_STRENGTH
-    assert store.bluff_rate("a", 0.08) == pytest.approx(0.08)
+    # 无数据 → 0（异常路径：陌生对手不反诈唬）
+    assert store.bluff_rate("nobody") == 0.0
+    # 全 fold（c=0）→ 频率不蕴含诈唬
+    for _ in range(6):
+        store.record_action("tight", "fold", True, 0, 0)
+    assert store.bluff_rate("tight") == 0.0
+    # 紧手 c=0.4（2 call + 3 fold）→ 0
+    store.record_action("semi", "call", True, 0, 0)
+    store.record_action("semi", "call", True, 0, 0)
+    for _ in range(3):
+        store.record_action("semi", "fold", True, 0, 0)
+    assert store.bluff_rate("semi") == 0.0
+    # 跟注站 n=10 全 call：c=1.0 → raw=0.5，收缩后 10/13×0.5
     for _ in range(10):
-        store.record_hand_pctile("b", "raise", 0.1)  # 全弱
-    assert store.bluff_rate("b", 0.08) > 0.08
+        store.record_action("station", "call", True, 0, 0)
+    freq_bluff = 10 / (10 + PRIOR_STRENGTH) * 0.5
+    assert store.bluff_rate("station") == pytest.approx(freq_bluff)
+    # 少样本（n=2 全 call）：2/5×0.5=0.2，向 0 收缩不激进
+    store.record_action("newbie", "call", True, 0, 0)
+    store.record_action("newbie", "raise", True, 0, 0)
+    assert store.bluff_rate("newbie") == pytest.approx(2 / (2 + PRIOR_STRENGTH) * 0.5)
+    # 频率 + 实测弱牌分位：弱牌占比抬高诈唬率
+    for _ in range(6):
+        store.record_hand_pctile("station", "call", 0.2)
+    weak_heavy = store.bluff_rate("station")
+    assert weak_heavy > freq_bluff
+    # 实测全强牌：把诈唬率拉回（观测优先于频率下界）
     for _ in range(10):
-        store.record_hand_pctile("c", "raise", 0.9)  # 全强
-    assert store.bluff_rate("c", 0.5) < 0.5
+        store.record_hand_pctile("strong", "raise", 0.9)
+    for _ in range(10):
+        store.record_action("strong", "raise", True, 0, 0)
+    assert store.bluff_rate("strong") < store.bluff_rate("station", None)
+
+
+def test_bluff_rate_bucket_isolation_and_aggregation() -> None:
+    """bucket_key 指定时只算该桶；None 时聚合全部桶。"""
+    store = ProfileStore()
+    # 桶 s_s1b0：8 次 call（c=1.0）；桶 s_s1b1：2 次 fold（c=0）
+    for _ in range(8):
+        store.record_action("a", "call", True, 1, 0)
+    for _ in range(2):
+        store.record_action("a", "fold", True, 1, 1)
+    only_loose = 8 / (8 + PRIOR_STRENGTH) * 0.5
+    assert store.bluff_rate("a", "s_s1b0") == pytest.approx(only_loose)
+    assert store.bluff_rate("a", "s_s1b1") == 0.0
+    # 聚合：n=10, c=0.8 → raw=(0.8-0.5)/0.8=0.375，收缩 10/13
+    agg = 10 / (10 + PRIOR_STRENGTH) * ((0.8 - 0.5) / 0.8)
+    assert store.bluff_rate("a") == pytest.approx(agg)
 
 
 def test_raise_threshold_floor_none_and_shrink() -> None:
@@ -2198,38 +2265,37 @@ def test_seen_factor_profile_blend_weak_opponent_raises_win() -> None:
     画像记录对手加注多弱牌后胜率被抬起；无画像逐值回退纯范围模型。"""
     hand_threshold = 0.7
     base_range = _SeenRange(0.75, 1.0, True)
-    plain = _seen_factor(hand_threshold, base_range, 0.0)
-    assert plain == pytest.approx(0.0)  # t ≤ 下界，范围胜率 0、bluff 0
+    plain = _seen_factor(hand_threshold, base_range)
+    assert plain == pytest.approx(0.0)  # t ≤ 下界，范围胜率 0、无画像不反诈唬
     store = ProfileStore()
     for _ in range(10):
         store.record_hand_pctile("bluffy", "raise", 0.3)
     blended_range = _SeenRange(0.75, 1.0, True, profile=store, uid="bluffy", action="raise")
-    blended = _seen_factor(hand_threshold, blended_range, 0.0)
+    blended = _seen_factor(hand_threshold, blended_range)
     assert blended > plain
     assert blended > 0.5
     # profile=None 时（默认）与纯范围模型逐值一致，不触发画像分支
-    assert _seen_factor(hand_threshold, _SeenRange(0.5, 0.85, True), 0.0) == pytest.approx(
+    assert _seen_factor(hand_threshold, _SeenRange(0.5, 0.85, True)) == pytest.approx(
         _range_factor(hand_threshold, 0.5, 0.85)
     )
 
 
 def test_call_decision_profile_integration_raises_win_for_weak_opponent() -> None:
-    """集成：紧手加注对手（范围下界 0.99）纯范围胜率≈0，画像显示其实测加注多弱牌后
-    _call_decision 胜率被显著抬起。"""
+    """集成：紧手加注对手（快照反推门槛 0.99）纯范围胜率≈0，画像显示其实测加注多弱牌后
+    _call_decision 胜率被显著抬起（加注下限画像直读 + 反诈唬 + 实测胜率混合）。"""
     game = _game(
         {"id": "self", "alive": True, "isSelf": True},
         {"id": "opp", "alive": True, "seen": True},
-        pot=1000,
-        call_bet=100,
+        pot=1,
+        call_bet=99,  # 盈亏平衡点 99/(1+99)=0.99 → 推断门槛极高
     )
-    tracker = _RoundTracker(snapshots={"opp": _OpponentSnapshot(pot=100, call_bet=100, opponents=1, is_raise=True)})
-    model = _RangeModel(call_cap=1.0, raise_floor=0.99, bluff=0.0)
-    base = _call_decision("对子", (14, 13), game, 0.1, tracker, model)
+    tracker = _RoundTracker(snapshots={"opp": _OpponentSnapshot(pot=1, call_bet=99, opponents=1, is_raise=True)})
+    base = _call_decision("对子", (14, 13), game, 0.1, tracker)
     store = ProfileStore()
     for _ in range(10):
         store.record_hand_pctile("opp", "raise", 0.2, op_seen=True, seen_count=0, blind_count=0)
         # 弱牌加注（诈唬型），桶键 s_s0b0
-    with_profile = _call_decision("对子", (14, 13), game, 0.1, tracker, model, store)
+    with_profile = _call_decision("对子", (14, 13), game, 0.1, tracker, store)
     assert base is not None and with_profile is not None
     assert base.win_probability == pytest.approx(0.0)  # 我方牌力 < 0.99 下界
     assert with_profile.win_probability > 0.5
@@ -2261,6 +2327,52 @@ def test_feed_last_result_round_action_bucketing() -> None:
     dump2 = store2.debug_dump()
     assert dump2["account:1"].get("raise_pcts")
     assert dump2["account:1"].get("call_pcts")
+
+
+def test_feed_last_result_backfills_folded_player_with_revealed_cards() -> None:
+    """实测摊牌局连已弃牌玩家也给完整牌面（「牌面 → 牌型」组合文本）：
+    弃牌者有牌面且本轮 call/raise 过时，按最激进动作回填对应桶——
+    「加注后弃牌」的牌正是校准加注下限/诈唬率的关键样本。"""
+    game = {
+        "lastResult": {
+            "roundId": "r1",
+            "players": [
+                {"displayName": "Nan", "result": "已弃牌", "handType": "J♣ 6♣ 3♦ → 散牌"},
+                {"displayName": "Win", "result": "获胜", "handType": "A♠ Q♠ 9♣ → 散牌"},
+            ],
+        }
+    }
+    store = ProfileStore()
+    feed_last_result(store, game, {"Nan": "u1", "Win": "u2"}, {"u1": ("raise", True, 0, 0), "u2": ("call", True, 0, 0)})
+    dump = store.debug_dump()
+    # 弃牌者按最激进动作进 raise 桶，且牌面可解析 → 精确分位（非牌型中点）
+    assert dump["u1"].get("raise_pcts"), "弃牌者亮牌应回填加注桶"
+    assert not dump["u1"].get("call_pcts")
+    expected = _hand_pctile_from_result("J♣ 6♣ 3♦", "散牌")
+    assert dump["u1"]["raise_pcts"][0] == pytest.approx(expected)
+    assert dump["u2"].get("call_pcts"), "获胜者正常回填平跟桶"
+
+
+def test_feed_last_result_skips_folded_without_cards_or_action() -> None:
+    """弃牌玩家无牌面（全员弃牌局无人亮牌）不回填、绝不虚构；
+    有牌面但本轮未观测到 call/raise（报名后弃牌）也无可归属桶，跳过。"""
+    game = {
+        "lastResult": {
+            "roundId": "r1",
+            "players": [
+                {"displayName": "NoCards", "result": "已弃牌", "handType": ""},
+                {"displayName": "AnteFold", "result": "已弃牌", "handType": "9♠ 7♣ 2♣ → 散牌"},
+            ],
+        }
+    }
+    store = ProfileStore()
+    # round_action 只含 AnteFold 的邻居？不给任何人动作记录
+    feed_last_result(store, game, {"NoCards": "u1", "AnteFold": "u2"}, {})
+    assert store.debug_dump() == {}
+    # 旧模式（round_action=None）下弃牌者一律不回填
+    store2 = ProfileStore()
+    feed_last_result(store2, game, {"NoCards": "u1", "AnteFold": "u2"})
+    assert store2.debug_dump() == {}
 
 
 def test_win_prob_1v1_type_band_midpoint() -> None:
@@ -2480,16 +2592,33 @@ def test_train_opponent_actions_covers_blind_peeked_and_opponent_turn() -> None:
     assert "s_s0b0" in dump["p1"]
 
 
-def test_train_opponent_actions_skips_folded_opponents() -> None:
-    """已弃牌/出局对手不训练。"""
+def test_train_opponent_actions_records_fold_for_dead_opponents() -> None:
+    """实测门户在弃牌同一快照就把 alive 置 false：出局对手的弃牌必须记一次
+    （否则继续频率分母缺 fold、系统性高估诈唬），且签名去重不重复计。"""
     store = ProfileStore()
     last_seen: dict[str, tuple[str, float]] = {}
     game = _game(
         {"id": "self", "alive": True, "isSelf": True, "seen": False},
-        {"id": "folded", "alive": False, "seen": False, "lastAction": "弃牌", "bet": 3000},
+        {"id": "folded", "alive": False, "seen": True, "lastAction": "弃牌", "bet": 3100},
     )
     _train_opponent_actions(store, game, last_seen)
-    assert "folded" not in store.debug_dump()
+    dump = store.debug_dump()
+    assert dump["folded"]["s_s0b0"]["fold"] == 1
+    # 同签名再来一轮 → 不重复记录
+    _train_opponent_actions(store, game, last_seen)
+    assert store.debug_dump()["folded"]["s_s0b0"]["fold"] == 1
+
+
+def test_train_opponent_actions_ignores_dead_players_non_fold_action() -> None:
+    """出局玩家除弃牌外的动作（陈旧快照残留）不记录。"""
+    store = ProfileStore()
+    last_seen: dict[str, tuple[str, float]] = {}
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": False},
+        {"id": "gone", "alive": False, "seen": True, "lastAction": "+3100 跟注", "bet": 6200},
+    )
+    _train_opponent_actions(store, game, last_seen)
+    assert "gone" not in store.debug_dump()
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -2559,45 +2688,26 @@ def test_raise_floor_from_freq_bucket() -> None:
     assert store.raise_floor_from_freq_bucket("nobody", False, 0, 0, 0.5) is None
 
 
-def test_train_opponent_actions_records_raise_freq() -> None:
-    """_train_opponent_actions 传入 raise_freq_recorded 时记录加注频率。"""
+def test_record_round_raise_freq_counts_most_aggressive_action() -> None:
+    """结算时按最激进动作记录加注频率：call 后 raise 的对手必须计为 raise
+    （修复旧版「首次动作变化时记录」把后置加注记成非加注的低估）。"""
     store = ProfileStore()
-    last_seen: dict[str, tuple[str, float]] = {}
-    recorded: set[str] = set()
-    game = _game(
-        {"id": "self", "alive": True, "isSelf": True, "seen": False},
-        {"id": "p1", "alive": True, "seen": False, "lastAction": "+3000 追加", "bet": 6000},
-        {"id": "p2", "alive": True, "seen": False, "lastAction": "+1500 跟注", "bet": 4500},
-    )
-    _train_opponent_actions(store, game, last_seen, None, recorded)
-    assert "p1" in recorded
-    assert "p2" in recorded
+    round_action: dict[str, tuple[str, bool, int, int]] = {
+        "p1": ("raise", False, 0, 1),  # 先跟后加 → 最激进 raise
+        "p2": ("call", False, 0, 1),  # 只跟注
+    }
+    record_round_raise_freq(store, round_action)
     dump = store.debug_dump()
-    freq = dump.get("p1", {}).get("raise_freq", {})
-    assert freq, "p1 应有加注频率数据"
-    # 3 人局（self + p1 + p2），p1 看牌=False，排除 p1 自身后
-    # seen_count = 0, blind_count = 1（p2 蒙牌）
-    assert "b_s0b1" in freq
-    assert freq["b_s0b1"]["total"] == 1
-    assert freq["b_s0b1"]["raises"] == 1  # p1 追加=raise
-    p2_freq = dump.get("p2", {}).get("raise_freq", {})
-    assert "b_s0b1" in p2_freq
-    assert p2_freq["b_s0b1"]["raises"] == 0  # p2 跟注
+    assert dump["p1"]["raise_freq"]["b_s0b1"] == {"total": 1, "raises": 1}
+    assert dump["p2"]["raise_freq"]["b_s0b1"] == {"total": 1, "raises": 0}
 
 
-def test_train_opponent_actions_raise_freq_dedup() -> None:
-    """同局同对手只记一次加注频率（raise_freq_recorded 去重）。"""
+def test_record_round_raise_freq_empty_round_action_is_noop() -> None:
+    """无动作跟踪数据（round_action 为空/None）时不记录。"""
     store = ProfileStore()
-    last_seen: dict[str, tuple[str, float]] = {}
-    recorded: set[str] = set()
-    base = {"id": "self", "alive": True, "isSelf": True, "seen": False}
-    opp = {"id": "p1", "alive": True, "seen": False, "lastAction": "+3000 追加", "bet": 6000}
-    # 第一次：记录
-    _train_opponent_actions(store, _game(base, dict(opp)), last_seen, None, recorded)
-    n_after_first = store.debug_dump()["p1"]["raise_freq"]["b_s0b0"]["total"]
-    # 第二次：动作不变 → 签名不上传，不触发记录
-    _train_opponent_actions(store, _game(base, dict(opp)), last_seen, None, recorded)
-    assert store.debug_dump()["p1"]["raise_freq"]["b_s0b0"]["total"] == n_after_first
+    record_round_raise_freq(store, None)
+    record_round_raise_freq(store, {})
+    assert store.debug_dump() == {}
 
 
 def test_opponent_raise_threshold_freq_fallback() -> None:

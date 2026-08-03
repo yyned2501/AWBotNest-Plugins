@@ -306,18 +306,64 @@ class ProfileStore:
         weight = len(pcts) / (len(pcts) + PRIOR_STRENGTH)
         return weight * wins + (1 - weight) * model_baseline
 
-    def bluff_rate(self, uid: str, baseline: float, bucket_key: str | None = None) -> float:
-        """逐对手诈唬率：其实测继续手牌中弱牌（分位 < _WEAK_PCTILE）占比。
+    def bluff_rate(self, uid: str, bucket_key: str | None = None) -> float:
+        """逐对手诈唬率：频率异常下界 + 实测弱牌继续占比收缩混合。
 
-        样本数低于 PRIOR_STRENGTH 回退全局基线 baseline；否则向 baseline 收缩。
-        bucket_key 指定状态桶时只查该桶数据；为 None 查扁平列表。
+        1. 频率分量（_bluff_from_freq）：继续频率 c > 0.5 本身就蕴含诈唬——理性对手
+           最多用最强的 c 分位牌继续，其中弱牌占比下界 (c-0.5)/c；按样本数向 0 收缩。
+           无任何全局基线：没有动作样本的对手诈唬率为 0。
+        2. 实测分量：继续（加注/平跟）后结算手牌分位中弱牌（< _WEAK_PCTILE）占比；
+           样本不足 PRIOR_STRENGTH 时直接返回频率分量，否则向频率分量收缩。
+        bucket_key 指定状态桶时只查该桶数据；为 None 时查聚合数据。
         """
+        freq_bluff = self._bluff_from_freq(uid, bucket_key)
         pcts = self.hand_percentiles(uid, "raise", bucket_key) + self.hand_percentiles(uid, "call", bucket_key)
         if len(pcts) < PRIOR_STRENGTH:
-            return baseline
+            return freq_bluff
         weak = sum(1.0 for p in pcts if p < _WEAK_PCTILE) / len(pcts)
         weight = len(pcts) / (len(pcts) + PRIOR_STRENGTH)
-        return weight * weak + (1 - weight) * baseline
+        return weight * weak + (1 - weight) * freq_bluff
+
+    def _bucket_action_counts(self, uid: str, bucket_key: str | None = None) -> tuple[int, int, int]:
+        """(fold, call, raise) 动作计数：bucket_key 指定时取该桶，None 时聚合全部状态桶。
+
+        动作桶字典含 "fold" 键（由 _EMPTY_ACTIONS 初始化）；raise_freq 桶只有
+        total/raises 键、pcts 桶值为列表，均不会被误认。
+        """
+        uid = self._normalize_uid(uid)
+        profile = self._cache.get(uid)
+        if profile is None:
+            return (0, 0, 0)
+        if bucket_key is not None:
+            bucket = profile.get(bucket_key)
+            if not isinstance(bucket, dict):
+                return (0, 0, 0)
+            return (int(bucket.get("fold", 0)), int(bucket.get("call", 0)), int(bucket.get("raise", 0)))
+        folds = calls = raises = 0
+        for value in profile.values():
+            if isinstance(value, dict) and "fold" in value:
+                folds += int(value.get("fold", 0))
+                calls += int(value.get("call", 0))
+                raises += int(value.get("raise", 0))
+        return (folds, calls, raises)
+
+    def _bluff_from_freq(self, uid: str, bucket_key: str | None = None) -> float:
+        """继续频率隐含的诈唬下界。
+
+        手牌分位近似 Uniform[0,1]：对手以频率 c 继续（call+raise），再理性也只能用
+        最强的 c 分位牌继续（区间 [1-c, 1]），其中弱牌（< _WEAK_PCTILE）占比下界为
+        (c - 0.5) / c（仅 c > 0.5 时为正）；c ≤ 0.5 频率不蕴含诈唬。
+        按样本数向 0 收缩，小样本不激进。
+        """
+        folds, calls, raises = self._bucket_action_counts(uid, bucket_key)
+        total = folds + calls + raises
+        if total <= 0:
+            return 0.0
+        continue_rate = (calls + raises) / total
+        if continue_rate <= _WEAK_PCTILE:
+            return 0.0
+        raw = (continue_rate - _WEAK_PCTILE) / continue_rate
+        return total / (total + PRIOR_STRENGTH) * raw
 
     def raise_threshold_floor(self, uid: str, base_threshold: float, bucket_key: str | None = None) -> float | None:
         """对手加注手牌范围下界：实测加注分位的下四分位（最弱实测加注牌）。
@@ -333,21 +379,6 @@ class ProfileStore:
         floor = _percentile(pcts, 0.25)
         weight = len(pcts) / (len(pcts) + PRIOR_STRENGTH)
         return weight * floor + (1 - weight) * base_threshold
-
-    def call_threshold_ceiling(self, uid: str, base_ceiling: float, bucket_key: str | None = None) -> float | None:
-        """对手平跟手牌范围上界：实测平跟分位的上四分位（最强实测平跟牌）。
-
-        爱拿大牌平跟慢打的对手上四分位高 → 上限高 → 我方胜率低；
-        反之弱牌平跟者上四分位低 → 上限低。按样本数向通用推断 base_ceiling 收缩；
-        无样本返回 None（调用方回退通用推断）。
-        bucket_key 指定状态桶时只查该桶数据；为 None 查扁平列表。
-        """
-        pcts = self.hand_percentiles(uid, "call", bucket_key)
-        if not pcts:
-            return None
-        ceiling = _percentile(pcts, 0.75)
-        weight = len(pcts) / (len(pcts) + PRIOR_STRENGTH)
-        return weight * ceiling + (1 - weight) * base_ceiling
 
     # ── 持久化 ──
 
@@ -410,11 +441,17 @@ def feed_last_result(
     """从牌局结算 game.lastResult 回填对手真实手牌分位。
 
     lastResult.players 无 id，需用调用方提供的 displayName→id 映射关联。
-    仅对非弃牌动作回填（已弃牌者没有加注/平跟的终局手牌意义）。
+
+    弃牌玩家处理（实测 2026-08-04）：摊牌/比牌结束的局，lastResult 连已弃牌玩家
+    也给出完整牌面（handType 为「牌面 → 牌型」组合文本）；全员弃牌直接分 pot 的局
+    则无人亮牌（handType 为空）。因此弃牌玩家有牌面时同样回填——「加注后弃牌」
+    的手牌正是校准加注下限/诈唬率的关键样本；无牌面则不回填，绝不虚构。
+    弃牌者只在 round_action 有其动作记录（本轮 call/raise 过）时回填对应桶，
+    仅报名后弃牌的没有可归属的动作桶，跳过。
 
     round_action：本轮各对手最激进动作 bucket 信息 {uid: (action, op_seen, seen_count, blind_count)}，
     由轮询跟踪得到。提供时按对手实际动作只回填对应桶（区分「加注的牌」与「平跟的牌」），
-    且按当时牌局状态分桶；为 None 时保持旧行为保守回填到两者。
+    且按当时牌局状态分桶；为 None 时保持旧行为保守回填到两者（仅限非弃牌玩家）。
     """
     last = game.get("lastResult") or (game.get("game") or {}).get("lastResult")
     if not isinstance(last, dict):
@@ -427,25 +464,49 @@ def feed_last_result(
             continue
         if p.get("isSelf"):
             continue
-        if p.get("result") == "已弃牌":
-            continue
+        folded = p.get("result") == "已弃牌"
         display = p.get("displayName")
         uid = uid_by_display.get(display)
         if not uid:
             continue
         hand_text = p.get("hand") or ""
         hand_type = p.get("handType") or ""
+        # 实测：摊牌局 handType 为「牌面 → 牌型」组合文本（弃牌玩家也给牌面），
+        # hand 字段本身为空——从组合文本拆出牌面走精确分位
+        if not hand_text and "→" in hand_type:
+            hand_text = hand_type.split("→", 1)[0].strip()
         pctile = _hand_pctile_from_result(hand_text, hand_type)
         if pctile is None:
             continue
         if round_action is not None:
-            # 按对手本轮实际动作及当时牌局状态分桶；未知动作保守归入平跟
-            bucket = round_action.get(uid, ("call", False, 0, 0))
+            bucket = round_action.get(uid)
+            if bucket is None:
+                # 未观测到 call/raise（报名后弃牌、或弃牌者无动作记录）：无可归属桶
+                continue
             store.record_hand_pctile(uid, bucket[0], pctile, bucket[1], bucket[2], bucket[3])
+            continue
+        if folded:
+            # 旧模式（无动作跟踪）无法判断弃牌者动作归属，不回填
             continue
         # 无动作跟踪时保守回填到两者；供统计时自行取用
         store.record_hand_pctile(uid, "raise", pctile)
         store.record_hand_pctile(uid, "call", pctile)
+
+
+def record_round_raise_freq(
+    store: ProfileStore,
+    round_action: dict[str, tuple[str, bool, int, int]] | None,
+) -> None:
+    """结算时按本轮最激进动作记录 hand-level 加注频率。
+
+    round_action 条目恰好覆盖「本局自愿继续（call/raise 过）」的对手，
+    每条记一次 total，最激进动作为 raise 才计 raises——修复旧版「首次动作
+    变化时记录」导致 call 后 raise 被记成非加注的低估问题。
+    """
+    if not round_action:
+        return
+    for uid, (action, op_seen, seen_count, blind_count) in round_action.items():
+        store.record_raise_freq(uid, op_seen, seen_count, blind_count, action == "raise")
 
 
 # 模块级单例（进程内全局画像缓存），供 zhajinhua 轮询与决策使用

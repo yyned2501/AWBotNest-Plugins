@@ -103,6 +103,8 @@ class _Choice:
 class _SeenRange:
     """一个已看牌对手被建模的牌力区间 [lower, upper] 及门槛是否实测反推。
 
+    平跟/仅看牌对手 upper 恒 1.0（对手可能慢打坚果牌，call 永不封顶）；
+    加注对手 lower 由画像实测加注分位/频率推断（无画像时为推断门槛）。
     profile/uid/action 可选：提供时用画像实测分位做胜率收缩混合与逐对手诈唬率，
     缺失则逐值回退纯范围模型（向后兼容、便于 A/B）。
     bucket_key 指定状态桶时只查该桶数据；为 None 查扁平列表（兼容旧数据）。
@@ -115,35 +117,6 @@ class _SeenRange:
     uid: str | None = None
     action: str = "call"
     bucket_key: str | None = None
-
-
-@dataclass(frozen=True)
-class _RangeModel:
-    """范围上限 + 反诈唬基线的可调参数（均为 0~1 分数）。
-
-    - call_cap：平跟/仅看牌对手牌力上界（扣除顶级强牌慢打概率），下界为推断门槛。
-    - raise_floor：加注对手牌力下界（加注信号至少这么强），上界恒为 1.0。
-    - bluff：任一跟注被视为纯空气牌诈唬的概率，避免把对手范围锁太死而吃诈唬亏。
-
-    中性配置 `(1.0, 0.0, 0.0)` 精确还原旧的单门槛均匀分布模型（v1.12.0 行为）。
-    """
-
-    call_cap: float = 1.0
-    raise_floor: float = 0.0
-    bluff: float = 0.0
-
-    @classmethod
-    def from_config(cls, cfg: dict[str, Any]) -> _RangeModel:
-        """从插件配置（百分比）解析；非法/缺失值回退中性（关闭）。"""
-        return cls(
-            call_cap=float(cfg.get("zjh_call_range_cap", 100)) / 100,
-            raise_floor=float(cfg.get("zjh_raise_range_floor", 0)) / 100,
-            bluff=float(cfg.get("zjh_bluff_rate", 0)) / 100,
-        )
-
-
-# 中性范围模型：上界 1.0、无加注下限、无诈唬 —— 逐值等价旧的 _actual_win_probability。
-_NEUTRAL_RANGE_MODEL = _RangeModel()
 
 
 def _actual_win_probability(hand_threshold: float, blind_opponents: int, seen_thresholds: tuple[float, ...]) -> float:
@@ -438,11 +411,11 @@ def _range_factor(hand_threshold: float, lower: float, upper: float) -> float:
     return (hand_threshold - lower) / (upper - lower)
 
 
-def _seen_factor(hand_threshold: float, seen_range: _SeenRange, bluff: float) -> float:
+def _seen_factor(hand_threshold: float, seen_range: _SeenRange) -> float:
     """对单个已看牌对手的胜率：范围胜率 blended 反诈唬，再与画像实测胜率收缩混合。
 
-    1. 逐对手诈唬率：画像有该对手数据时用 `profile.bluff_rate(uid, bluff, bucket_key)`
-       （其弱牌继续占比向全局基线收缩），否则回退全局基线 bluff。
+    1. 逐对手诈唬率：画像有该对手数据时用 `profile.bluff_rate(uid, bucket_key)`
+       （继续频率异常下界 + 实测弱牌继续占比），无画像 → 0（不反诈唬）。
     2. model_win = (1-bluff_opp)*范围胜率 + bluff_opp*单挑胜率 t（空气牌近似）。
     3. 画像有该对手该动作实测分位时，用 `empirical_win_factor`（我击败其实测手牌的
        比例，按样本数向 model_win 收缩）替代；无画像/无样本逐值返回 model_win。
@@ -453,9 +426,9 @@ def _seen_factor(hand_threshold: float, seen_range: _SeenRange, bluff: float) ->
     uid = seen_range.uid
     bucket_key = seen_range.bucket_key
     if profile is not None and uid:
-        bluff_opp = profile.bluff_rate(uid, bluff, bucket_key)
+        bluff_opp = profile.bluff_rate(uid, bucket_key)
     else:
-        bluff_opp = bluff
+        bluff_opp = 0.0
     model_win = (1 - bluff_opp) * range_win + bluff_opp * hand_threshold
     if profile is not None and uid:
         return profile.empirical_win_factor(uid, seen_range.action, hand_threshold, model_win, bucket_key)
@@ -466,16 +439,16 @@ def _seen_opponent_ranges(
     game: dict[str, Any],
     tracker: _RoundTracker,
     fallback_threshold: float,
-    range_model: _RangeModel,
     profile: Any = None,
 ) -> tuple[int, list[_SeenRange]]:
     """统计蒙牌对手数，并按动作类型为每个已看牌对手构造牌力区间。
 
-    加注对手：[max(推断门槛, raise_floor), 1.0]；平跟/仅看牌：[推断门槛, call_cap]。
-    门槛实测反推优先，缺失才用回退分位；observed 标记来源。
-    profile 非空时，把画像引用、对手 uid 与动作类型填入 _SeenRange，并
-    用画像的 raise_threshold_floor 调整加注下限、call_threshold_ceiling 调整
-    平跟上界——诈唬型对手（常拿弱牌加注）下限被拉低 → 范围扩大 → 我方胜率更高。
+    加注对手：[画像加注下限, 1.0]——实测加注分位下四分位优先，无分位回退加注频率
+    推断，两者皆无则用推断门槛；平跟/仅看牌：[推断门槛, 1.0]，call 永不封顶
+    （对手可能慢打坚果牌）。门槛实测反推优先，缺失才用回退分位；observed 标记来源。
+    profile 非空时，把画像引用、对手 uid 与动作类型填入 _SeenRange，并用画像的
+    raise_threshold_floor 调整加注下限——诈唬型对手（常拿弱牌加注）下限被拉低
+    → 范围扩大 → 我方胜率更高。
     bucket_key 让画像查询只取对应状态桶（如 "s_s1b1"）的数据。
     """
     blind, _ = _opponent_counts(game)
@@ -496,7 +469,7 @@ def _seen_opponent_ranges(
         adj_blind = blind_count - (0 if op_seen else 1)
         bucket_key = f"{'s' if op_seen else 'b'}_s{adj_seen}b{adj_blind}"
         if is_raise:
-            base_floor = max(lower, range_model.raise_floor)
+            base_floor = lower
             if profile is not None and key:
                 floor = profile.raise_threshold_floor(key, base_floor, bucket_key)
                 if floor is not None:
@@ -508,24 +481,21 @@ def _seen_opponent_ranges(
                         base_floor = freq_floor
             ranges.append(_SeenRange(base_floor, 1.0, observed, profile, key, action, bucket_key))
         else:
-            base_cap = range_model.call_cap
-            if profile is not None and key:
-                ceiling = profile.call_threshold_ceiling(key, base_cap, bucket_key)
-                if ceiling is not None:
-                    base_cap = ceiling
-            ranges.append(_SeenRange(lower, base_cap, observed, profile, key, action, bucket_key))
+            ranges.append(_SeenRange(lower, 1.0, observed, profile, key, action, bucket_key))
     return blind, ranges
 
 
-def _ranged_win_probability(
-    hand_threshold: float, blind_opponents: int, seen_ranges: list[_SeenRange], bluff: float
-) -> float:
-    """带范围上限与反诈唬基线的实际胜率：蒙牌对手 t^B，已看牌对手连乘各自 seen_factor。"""
+def _ranged_win_probability(hand_threshold: float, blind_opponents: int, seen_ranges: list[_SeenRange]) -> float:
+    """画像驱动范围的实际胜率：蒙牌对手 t^B，已看牌对手连乘各自 seen_factor。
+
+    反诈唬完全由逐对手画像（频率异常下界 + 实测弱牌占比）提供，无全局基线：
+    无画像对手 bluff=0，seen_factor 退化为纯范围胜率。
+    """
     if not 0 < hand_threshold <= 1 or blind_opponents < 0:
         return 0.0
     probability = hand_threshold**blind_opponents
     for seen_range in seen_ranges:
-        probability *= _seen_factor(hand_threshold, seen_range, bluff)
+        probability *= _seen_factor(hand_threshold, seen_range)
     return probability
 
 
@@ -535,14 +505,13 @@ def _call_decision(
     game: dict[str, Any],
     fallback_threshold: float,
     tracker: _RoundTracker,
-    range_model: _RangeModel | None = None,
     profile: Any = None,
 ) -> _CallDecision | None:
     """按对手看牌状态及其最近正 EV 行为计算本次跟注的增量 EV。
 
-    range_model 为空时用中性模型（平跟上限 1.0、加注下限 0.0、诈唬率 0），
+    对手范围全画像驱动：加注对手下限取实测加注分位/频率推断，平跟对手永不封顶；
+    反诈唬由逐对手画像（频率异常下界 + 实测弱牌占比）提供，无画像对手 bluff=0，
     此时胜率逐值等于旧的 `_actual_win_probability`，便于回退与 A/B。
-    profile 非空时接入对手画像：实测胜率收缩混合 + 逐对手诈唬率。
     """
     if hand_value is None or not 0 <= fallback_threshold < 1:
         return None
@@ -558,11 +527,10 @@ def _call_decision(
     if one_vs_one <= 0:
         return None
 
-    model = range_model if range_model is not None else _NEUTRAL_RANGE_MODEL
-    blind, ranges = _seen_opponent_ranges(game, tracker, fallback_threshold, model, profile)
+    blind, ranges = _seen_opponent_ranges(game, tracker, fallback_threshold, profile)
     seen = len(ranges)
 
-    win_probability = _ranged_win_probability(one_vs_one, blind, ranges, model.bluff)
+    win_probability = _ranged_win_probability(one_vs_one, blind, ranges)
 
     expected_value = win_probability * (pot + call_bet) - call_bet
     seen_thresholds = tuple((rng.lower, rng.upper, rng.observed) for rng in ranges)
@@ -1358,7 +1326,6 @@ def _choose(
     game: dict[str, Any],
     fallback_threshold: float,
     tracker: _RoundTracker,
-    range_model: _RangeModel | None = None,
     fold_ev_tolerance_pct: float = 0.0,
     profile: Any = None,
 ) -> _Choice:
@@ -1369,7 +1336,7 @@ def _choose(
     保持旧行为；配置 zjh_fold_ev_tolerance 打开（推荐 5，即 −5%×callBet 内不弃）。
     profile：对手画像（ProfileStore），非空时已看牌胜率接入实测收缩混合 + 逐对手诈唬率。
     """
-    decision = _call_decision(hand_type, hand_value, game, fallback_threshold, tracker, range_model, profile)
+    decision = _call_decision(hand_type, hand_value, game, fallback_threshold, tracker, profile)
     if decision is None:
         return _Choice(False, "牌局数据不完整，保守弃牌", None)
     call_bet = float(game.get("callBet", 0) or 0)
