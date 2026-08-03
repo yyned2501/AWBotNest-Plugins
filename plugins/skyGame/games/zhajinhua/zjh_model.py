@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import itertools
 import math
 import random
 from collections.abc import Callable
@@ -152,7 +153,9 @@ def _actual_win_probability(hand_threshold: float, blind_opponents: int, seen_th
     return probability
 
 
-def _blind_win_probability(blind_opponents: int, seen_thresholds: tuple[float, ...]) -> float:
+def _blind_win_probability(
+    blind_opponents: int, seen_thresholds: tuple[float, ...], lower: float | None = None
+) -> float:
     """蒙牌（手牌未知）时对蒙牌与已看牌对手的实际胜率——对未知手牌强度精确积分。
 
     手牌未知时不能把平均单挑胜率 0.5 当固定手牌代进 `t^B`，那会低估：「赢对手A」
@@ -163,6 +166,9 @@ def _blind_win_probability(blind_opponents: int, seen_thresholds: tuple[float, .
 
     展开为多项式后逐项精确积分（闭式、无近似）。全蒙牌无看牌对手退化为 1/(B+1)，
     单挑纯蒙牌为 1/2；已看牌对手按其门槛 Tᵢ 进入条件胜率因子。
+
+    lower 指定积分下界（如看牌分支「我方手牌 t≥threshold」的条件胜率），缺省从
+    max(门槛) 积到 1（因子在该区间恒非负）。
     """
     if blind_opponents < 0 or any(not 0 <= threshold < 1 for threshold in seen_thresholds):
         return 0.0
@@ -174,7 +180,12 @@ def _blind_win_probability(blind_opponents: int, seen_thresholds: tuple[float, .
         poly = [-threshold * poly[0]] + [poly[i - 1] - threshold * poly[i] for i in range(1, len(poly))] + [poly[-1]]
         denominator *= 1.0 - threshold
 
-    lower = max(seen_thresholds, default=0.0)
+    if lower is None:
+        lower = max(seen_thresholds, default=0.0)
+    else:
+        lower = max(lower, max(seen_thresholds, default=0.0))
+    if lower >= 1:
+        return 0.0
     integral = sum(coefficient * (1.0 - lower ** (power + 1)) / (power + 1) for power, coefficient in enumerate(poly))
     return max(integral / denominator, 0.0)
 
@@ -618,6 +629,198 @@ class _TerminalDecision:
         return self.branches[0].win_probability if self.branches else 0.0
 
 
+@dataclass(frozen=True)
+class _BlindOpponent:
+    """蒙牌决策树中的一个存活对手节点。
+
+    action_probs 为 (P_fold, P_call, P_raise)；op_seen 标记是否已看牌（加注时才上调
+    门槛）；threshold 为该对手当前门槛（已看牌），连续加注时逐级递增。
+    """
+
+    uid: str
+    op_seen: bool
+    action_probs: tuple[float, float, float]
+    threshold: float = 0.0
+
+
+def _opponents_win_probability(opponents: list[_BlindOpponent]) -> float:
+    """蒙牌对存活对手集合的精确积分胜率：蒙牌对手计数 + 已看牌对手门槛列表。"""
+    blind = sum(1 for opp in opponents if not opp.op_seen)
+    seen_thresholds = tuple(opp.threshold for opp in opponents if opp.op_seen)
+    return _blind_win_probability(blind, seen_thresholds)
+
+
+def _bucket_key_for(opponents: list[_BlindOpponent], target: _BlindOpponent) -> str:
+    """按当前存活对手集合计算某对手的状态分桶键（加注频率画像查询用）。"""
+    seen = sum(1 for opp in opponents if opp.op_seen)
+    blind = len(opponents) - seen
+    op_seen = target.op_seen
+    adj_seen = seen - (1 if op_seen else 0)
+    adj_blind = blind - (0 if op_seen else 1)
+    return f"{'s' if op_seen else 'b'}_s{adj_seen}b{adj_blind}"
+
+
+def _iter_action_choices(
+    opponents: list[_BlindOpponent],
+) -> itertools.product[tuple[tuple[str, float], ...]]:
+    """为每个对手生成非零概率动作列表（剪枝：P=0 的动作不进决策树）。"""
+    choices: list[list[tuple[str, float]]] = []
+    for opp in opponents:
+        p_fold, p_call, p_raise = opp.action_probs
+        opp_choices: list[tuple[str, float]] = []
+        if p_fold > 0:
+            opp_choices.append(("fold", p_fold))
+        if p_call > 0:
+            opp_choices.append(("call", p_call))
+        if p_raise > 0:
+            opp_choices.append(("raise", p_raise))
+        if not opp_choices:
+            opp_choices = [("fold", 1.0)]  # 防御：全零概率视为必弃
+        choices.append(opp_choices)
+    for combo in itertools.product(*choices):
+        joint = 1.0
+        for _, prob in combo:
+            joint *= prob
+        if joint <= 0:
+            continue
+        yield combo, joint
+
+
+def _apply_opponent_actions(
+    game: dict[str, Any],
+    profile: Any,
+    opponents: list[_BlindOpponent],
+    combo: tuple[tuple[str, float], ...],
+    pot: float,
+    current_call_bet: float,
+) -> tuple[list[_BlindOpponent], float, float]:
+    """应用一轮对手动作：弃牌移出、跟注/加注更新底池与 callBet、看牌加注上调门槛。
+
+    返回 (存活对手列表, 新底池, 新 callBet)。
+    """
+    new_opponents: list[_BlindOpponent] = []
+    new_pot = pot
+    new_call_bet = current_call_bet
+    for opp, (action, _) in zip(opponents, combo):
+        if action == "fold":
+            continue
+        if action == "call":
+            new_pot += current_call_bet
+        else:  # raise
+            new_pot += current_call_bet * 1.5
+            new_call_bet = current_call_bet * 1.5
+            if opp.op_seen:
+                bucket = _bucket_key_for(opponents, opp)
+                new_threshold = _opponent_raise_threshold(opp.threshold, 1, profile, opp.uid, game, bucket)
+                opp = replace(opp, threshold=new_threshold)
+        new_opponents.append(opp)
+    return new_opponents, new_pot, new_call_bet
+
+
+def _terminal_ev_call_multi(
+    game: dict[str, Any],
+    fallback_threshold: float,
+    tracker: _RoundTracker,
+    depth: int,
+    profile: Any = None,
+    opponents: list[_BlindOpponent] | None = None,
+    pot: float | None = None,
+    cost: float | None = None,
+    current_call_bet: float | None = None,
+) -> float:
+    """多人蒙牌盲跟终局 EV：每个深度枚举所有存活对手的动作组合（笛卡尔积）。
+
+    - opponents：存活对手节点列表（含各自动作概率与门槛），至少 1 人。
+    - 每轮所有存活对手各行动一次（弃牌/平跟/加注），联合概率 = 各动作概率之积；
+      弃牌者移出，胜率按剩余对手重算（_opponents_win_probability）。
+    - 已看牌对手加注上调其门槛（贝叶斯衰减），蒙牌加注视为诈唬不上调。
+    - 全部弃牌 → 我方独赢当前底池；深度耗尽 → 截断（枚举一轮后摊牌）。
+    - 我方每轮盲跟半价（_blind_call_cost），底池按对手动作增长。
+    """
+    if pot is None:
+        pot = float(game.get("pot", 0) or 0)
+    if cost is None:
+        cost = 0.0
+    if current_call_bet is None:
+        current_call_bet = float(game.get("callBet", 0) or 0)
+    if not opponents:
+        return pot - cost  # 无人存活 → 我方独赢（防御）
+
+    if depth <= 0:
+        # 截断：枚举一轮，全部弃牌独赢，否则按剩余对手胜率摊牌
+        ev = 0.0
+        for combo, joint in _iter_action_choices(opponents):
+            new_opponents, new_pot, new_call_bet = _apply_opponent_actions(
+                game, profile, opponents, combo, pot, current_call_bet
+            )
+            if not new_opponents:
+                ev += joint * (pot - cost)
+                continue
+            next_cost = cost + _blind_call_cost(new_call_bet)
+            win = _opponents_win_probability(new_opponents)
+            ev += joint * (win * new_pot - next_cost)
+        return ev
+
+    ev = 0.0
+    for combo, joint in _iter_action_choices(opponents):
+        new_opponents, new_pot, new_call_bet = _apply_opponent_actions(
+            game, profile, opponents, combo, pot, current_call_bet
+        )
+        if not new_opponents:
+            ev += joint * (pot - cost)
+            continue
+        next_cost = cost + _blind_call_cost(new_call_bet)
+        ev += joint * _terminal_ev_call_multi(
+            game,
+            fallback_threshold,
+            tracker,
+            depth - 1,
+            profile,
+            new_opponents,
+            new_pot,
+            next_cost,
+            new_call_bet,
+        )
+    return ev
+
+
+def _terminal_ev_peek_multi(
+    game: dict[str, Any],
+    fallback_threshold: float,
+    tracker: _RoundTracker,
+    depth: int,
+    profile: Any = None,
+    opponents: list[_BlindOpponent] | None = None,
+) -> float:
+    """多人看牌分支终局期望：peek 免费，弱牌止损、强牌全价跟注。
+
+    看牌后 t~U[0,1]，对手门槛 T：t<T 弃牌（概率 T，净收益 0）；t≥T 强牌全价跟注
+    call_bet，再枚举所有存活对手一轮动作——全部弃牌白赢底池，否则按强牌条件胜率
+    （t∈[T,1] 对剩余对手精确积分）摊牌。
+    """
+    threshold = fallback_threshold if 0 <= fallback_threshold < 1 else 0.5
+    if not opponents:
+        return 0.0
+    pot = float(game.get("pot", 0) or 0)
+    call_bet = float(game.get("callBet", 0) or 0)
+
+    weak_prob = threshold
+    strong_prob = 1.0 - threshold
+    branch_ev = 0.0
+    for combo, joint in _iter_action_choices(opponents):
+        new_opponents, new_pot, new_call_bet = _apply_opponent_actions(game, profile, opponents, combo, pot, call_bet)
+        if not new_opponents:
+            branch_ev += joint * pot  # 全弃 → 白赢当前底池（无需再投入）
+            continue
+        # 强牌条件胜率：我方 t∈[T,1] 对剩余对手
+        blind = sum(1 for opp in new_opponents if not opp.op_seen)
+        seen_thresholds = tuple(opp.threshold for opp in new_opponents if opp.op_seen)
+        strong_win = _blind_win_probability(blind, seen_thresholds, lower=threshold)
+        branch_ev += joint * (strong_win * new_pot - call_bet)
+
+    return weak_prob * 0 + strong_prob * branch_ev
+
+
 def _opponent_raise_threshold(
     base_threshold: float,
     raise_count: int,
@@ -865,48 +1068,67 @@ def _terminal_ev_decision(
     profile: Any = None,
     action_probs: tuple[float, float, float] | None = None,
     opponent_uid: str | None = None,
+    opponents: list[_BlindOpponent] | None = None,
 ) -> _TerminalDecision:
     """蒙牌「盲跟 / 看牌 / 弃牌」三候选的 Terminal EV，取最优。
 
-    - 盲跟：决策树递归推演 depth 轮，对手动作概率来自 action_probs（画像查询）。
+    - 盲跟：决策树递归推演 depth 轮。多人局传入 opponents（各存活对手的动作概率与
+      门槛）时用 _terminal_ev_call_multi 枚举全对手动作组合；否则退化为单对手树
+      （action_probs 画像查询）。
     - 看牌：peek 免费，弱牌止损 + 强牌开牌。
     - 弃牌：立即止损，净收益 0。
     profile 用于对手连续 raise 时的门槛上调（画像加注牌力分位）。
-    action_probs 为 (P_fold, P_call, P_raise)，来自对手画像；缺省用均等先验。
     depth=1 且无画像时，盲跟分支退化为旧单步 EV（半价成本），便于回退。
     """
     pot = float(game.get("pot", 0) or 0)
     call_bet = float(game.get("callBet", 0) or 0)
 
-    # 蒙牌精确积分胜率：按对手蒙/看状态（含门槛）计算，已看牌强对手会自然衰减。
-    # 作为盲跟决策树的初始胜率，保证截断/递归对强对手场景反映门槛衰减。
-    seen_threshold_list = _seen_opponent_thresholds(game, tracker, fallback_threshold)[1]
-    blind_win_rate = _blind_win_probability(
-        _opponent_counts(game)[0],
-        tuple(th for th, _ in seen_threshold_list),
-    )
-    # 对手是否已看牌：有任一已看牌对手即视为看牌对手建模（其加注才是强牌信号）。
-    opponent_seen = len(seen_threshold_list) >= 1
-    # 盲跟候选
-    call_ev = _terminal_ev_call(
-        game,
-        fallback_threshold,
-        tracker,
-        depth,
-        profile,
-        action_probs,
-        None,
-        None,
-        blind_win_rate,
-        0,
-        None,
-        opponent_seen,
-        opponent_uid,
-    )
-    # 看牌候选
-    peek_ev = _terminal_ev_peek(game, fallback_threshold, tracker, depth, profile, action_probs)
-    # 弃牌候选
-    fold_ev = 0.0
+    if opponents is not None and len(opponents) >= 1:
+        # 多人决策树：全存活对手的动作组合枚举
+        blind_win_rate = _opponents_win_probability(opponents)
+        call_ev = _terminal_ev_call_multi(
+            game,
+            fallback_threshold,
+            tracker,
+            depth,
+            profile,
+            list(opponents),
+            None,
+            None,
+            float(call_bet),
+        )
+        peek_ev = _terminal_ev_peek_multi(game, fallback_threshold, tracker, depth, profile, list(opponents))
+        fold_ev = 0.0
+    else:
+        # 蒙牌精确积分胜率：按对手蒙/看状态（含门槛）计算，已看牌强对手会自然衰减。
+        # 作为盲跟决策树的初始胜率，保证截断/递归对强对手场景反映门槛衰减。
+        seen_threshold_list = _seen_opponent_thresholds(game, tracker, fallback_threshold)[1]
+        blind_win_rate = _blind_win_probability(
+            _opponent_counts(game)[0],
+            tuple(th for th, _ in seen_threshold_list),
+        )
+        # 对手是否已看牌：有任一已看牌对手即视为看牌对手建模（其加注才是强牌信号）。
+        opponent_seen = len(seen_threshold_list) >= 1
+        # 盲跟候选
+        call_ev = _terminal_ev_call(
+            game,
+            fallback_threshold,
+            tracker,
+            depth,
+            profile,
+            action_probs,
+            None,
+            None,
+            blind_win_rate,
+            0,
+            None,
+            opponent_seen,
+            opponent_uid,
+        )
+        # 看牌候选
+        peek_ev = _terminal_ev_peek(game, fallback_threshold, tracker, depth, profile, action_probs)
+        # 弃牌候选
+        fold_ev = 0.0
 
     # 单步 EV 对照（旧行为，深度 1、无画像）：蒙牌精确积分胜率 × 半价成本
     single_step_ev = blind_win_rate * (pot + _blind_call_cost(call_bet)) - _blind_call_cost(call_bet)
@@ -978,6 +1200,7 @@ def _blind_peek_or_call(
     blind_calls_so_far: int = 0,
     action_probs: tuple[float, float, float] | None = None,
     opponent_uid: str | None = None,
+    opponents: list[_BlindOpponent] | None = None,
 ) -> tuple[str | None, _TerminalDecision | _CallDecision | None]:
     """多人蒙牌时按 Terminal EV 决定「盲跟」「看牌」「弃牌」或直接比牌。
 
@@ -986,14 +1209,16 @@ def _blind_peek_or_call(
       （避免盲跟后对手加注导致后续投入翻倍）；都不开放才盲跟。
     - 看牌最优，或连续盲跟次数达到上限（max_blind_calls）→ 看牌买信息。
     - 弃牌最优 → 弃牌。
-    action_probs 为对手本轮 (P_fold, P_call, P_raise)（画像查询），透传给决策树。
+    opponents 为存活对手节点列表（多人决策树用）；缺省用 action_probs（单对手）。
     门户不给看牌才退回盲跟保底；两者都不给返回 None。
 
     兼容旧行为：depth=1 且 profile=None 时等价旧 _blind_peek_or_call
     （纯单步 EV 决策蒙还是看）。
     """
     blind_choice = _blind_decision(game, fallback_threshold, tracker)
-    terminal = _terminal_ev_decision(game, fallback_threshold, tracker, depth, profile, action_probs, opponent_uid)
+    terminal = _terminal_ev_decision(
+        game, fallback_threshold, tracker, depth, profile, action_probs, opponent_uid, opponents
+    )
 
     # 1. 连续盲跟达上限 → 强制看牌（避免「蒙牌闭眼跟」被对手 raise 套牢）
     if max_blind_calls > 0 and blind_calls_so_far >= max_blind_calls:

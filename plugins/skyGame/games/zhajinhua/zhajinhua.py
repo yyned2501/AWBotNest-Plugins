@@ -43,6 +43,7 @@ from .zjh_model import (
     _blind_peek_reason,
     _blind_vs_seen_win,
     _blind_win_probability,
+    _BlindOpponent,
     _call_decision,
     _Choice,
     _choose,
@@ -54,6 +55,7 @@ from .zjh_model import (
     _opponent_hand_threshold,
     _opponent_raise_threshold,
     _opponent_threshold,
+    _opponents_win_probability,
     _OpponentSnapshot,
     _PendingFold,
     _range_factor,
@@ -66,7 +68,9 @@ from .zjh_model import (
     _SeenRange,
     _snapshot_for_actor,
     _terminal_ev_call,
+    _terminal_ev_call_multi,
     _terminal_ev_decision,
+    _terminal_ev_peek_multi,
     _TerminalBranch,
     _TerminalDecision,
     _update_round_tracker,
@@ -121,6 +125,7 @@ __all__ = [
     "_opponent_hand_threshold",
     "_opponent_raise_threshold",
     "_opponent_threshold",
+    "_opponents_win_probability",
     "_parse_hand",
     "_range_factor",
     "_ranged_win_probability",
@@ -129,7 +134,9 @@ __all__ = [
     "_self_hand",
     "_snapshot_for_actor",
     "_terminal_ev_call",
+    "_terminal_ev_call_multi",
     "_terminal_ev_decision",
+    "_terminal_ev_peek_multi",
     "_train_opponent_actions",
     "_update_round_tracker",
     "feed_last_result",
@@ -504,20 +511,12 @@ async def _poll_loop(ctx: object) -> None:
                     else:
                         # 蒙牌：用 Terminal EV 决策树决定「盲跟 / 看牌 / 弃牌」。
                         # 连续盲跟达上限强制看牌；对手动作概率来自画像。
-                        # 取第一个存活对手 uid 作为画像键（单挑即为唯一对手，多人取首个）
-                        opponent_uid: str | None = None
-                        for index, player in enumerate(_players(g)):
-                            if _is_self(player):
-                                continue
-                            if player.get("alive") or player.get("active", False):
-                                opponent_uid = _player_key(player, index)
-                                break
-                        # 画像动作概率：遍历所有存活对手，分别查画像然后取平均
-                        # 多人局中各对手动作倾向不同，仅取第一个对手的代表性不足
-                        action_probs: tuple[float, float, float] | None = None
-                        if cfg.get("zjh_profile_enabled", True):
+                        # 遍历所有存活对手，分别查画像构建决策树节点（每人独立动作概率），
+                        # 而非旧版「取平均当单对手」——多人局各对手动作倾向不同。
+                        blind_opponents: list[_BlindOpponent] = []
+                        profile_enabled = cfg.get("zjh_profile_enabled", True)
+                        if profile_enabled:
                             blind_count, seen_count = _opponent_counts(g)
-                            collected: list[tuple[float, float, float]] = []
                             for index, player in enumerate(_players(g)):
                                 if _is_self(player):
                                     continue
@@ -527,23 +526,28 @@ async def _poll_loop(ctx: object) -> None:
                                 op_seen = bool(player.get("seen", False))
                                 adj_seen = seen_count - (1 if op_seen else 0)
                                 adj_blind = blind_count - (0 if op_seen else 1)
-                                collected.append(profile_store.action_probabilities(uid, op_seen, adj_seen, adj_blind))
-                            if collected:
-                                avg_fold = sum(p[0] for p in collected) / len(collected)
-                                avg_call = sum(p[1] for p in collected) / len(collected)
-                                avg_raise = sum(p[2] for p in collected) / len(collected)
-                                action_probs = (avg_fold, avg_call, avg_raise)
+                                probs = profile_store.action_probabilities(uid, op_seen, adj_seen, adj_blind)
+                                threshold = _combined_opponent_threshold(
+                                    tracker.peek_snapshots.get(uid), tracker.snapshots.get(uid)
+                                )
+                                blind_opponents.append(
+                                    _BlindOpponent(
+                                        uid,
+                                        op_seen,
+                                        probs,
+                                        threshold if threshold is not None else seen_threshold,
+                                    )
+                                )
                         blind_action, blind_choice = _blind_peek_or_call(
                             g,
                             actions,
                             seen_threshold,
                             tracker,
-                            profile=profile_store if cfg.get("zjh_profile_enabled", True) else None,
+                            profile=profile_store if profile_enabled else None,
                             depth=int(cfg.get("zjh_terminal_depth", 2) or 2),
                             max_blind_calls=int(cfg.get("zjh_blind_max_calls", 0) or 0),
                             blind_calls_so_far=blind_calls_so_far,
-                            action_probs=action_probs,
-                            opponent_uid=opponent_uid,
+                            opponents=blind_opponents or None,
                         )
                         if blind_choice is not None:
                             _action_label = {
@@ -557,15 +561,20 @@ async def _poll_loop(ctx: object) -> None:
                                 ev_val = blind_choice.terminal_ev
                                 ctx.log.info(
                                     "蒙牌决策[%s]: 终局EV=%+.2f（盲跟%+.2f · 看牌%+.2f · 弃牌0）"
-                                    " 底池=%.0f 半价成本=%.0f 对手动作概率=%s",
+                                    " 底池=%.0f 半价成本=%.0f 存活对手=%d 动作概率=%s",
                                     _action_label,
                                     ev_val,
                                     blind_choice.call_ev,
                                     blind_choice.peek_ev,
                                     g.get("pot", 0),
                                     _blind_call_cost(float(g.get("callBet", 0))),
-                                    f"{action_probs[0]:.2f}/{action_probs[1]:.2f}/{action_probs[2]:.2f}"
-                                    if action_probs
+                                    len(blind_opponents),
+                                    " | ".join(
+                                        f"{o.uid.split(':')[-1]}={o.action_probs[0]:.2f}/"
+                                        f"{o.action_probs[1]:.2f}/{o.action_probs[2]:.2f}"
+                                        for o in blind_opponents
+                                    )
+                                    if blind_opponents
                                     else "先验",
                                 )
                             else:
@@ -603,14 +612,19 @@ async def _poll_loop(ctx: object) -> None:
                             if isinstance(blind_choice, _TerminalDecision):
                                 ctx.log.info(
                                     "蒙牌决策[看牌]: 终局EV=%+.2f（盲跟%+.2f · 看牌%+.2f · 弃牌0）"
-                                    " 底池=%.0f 半价成本=%.0f 对手动作概率=%s",
+                                    " 底池=%.0f 半价成本=%.0f 存活对手=%d 动作概率=%s",
                                     blind_choice.terminal_ev,
                                     blind_choice.call_ev,
                                     blind_choice.peek_ev,
                                     g.get("pot", 0),
                                     _blind_call_cost(float(g.get("callBet", 0))),
-                                    f"{action_probs[0]:.2f}/{action_probs[1]:.2f}/{action_probs[2]:.2f}"
-                                    if action_probs
+                                    len(blind_opponents),
+                                    " | ".join(
+                                        f"{o.uid.split(':')[-1]}={o.action_probs[0]:.2f}/"
+                                        f"{o.action_probs[1]:.2f}/{o.action_probs[2]:.2f}"
+                                        for o in blind_opponents
+                                    )
+                                    if blind_opponents
                                     else "先验",
                                 )
                             elif blind_choice is None:

@@ -19,6 +19,7 @@ from plugins.skyGame.games.zhajinhua.zhajinhua import (
     _blind_peek_reason,
     _blind_vs_seen_win,
     _blind_win_probability,
+    _BlindOpponent,
     _call_decision,
     _Choice,
     _choose,
@@ -37,6 +38,7 @@ from plugins.skyGame.games.zhajinhua.zhajinhua import (
     _opponent_hand_threshold,
     _opponent_raise_threshold,
     _opponent_threshold,
+    _opponents_win_probability,
     _OpponentSnapshot,
     _parse_hand,
     _PendingFold,
@@ -50,7 +52,9 @@ from plugins.skyGame.games.zhajinhua.zhajinhua import (
     _self_hand,
     _snapshot_for_actor,
     _terminal_ev_call,
+    _terminal_ev_call_multi,
     _terminal_ev_decision,
+    _terminal_ev_peek_multi,
     _TerminalBranch,
     _train_opponent_actions,
     _update_round_tracker,
@@ -2387,3 +2391,148 @@ def test_opponent_raise_threshold_freq_fallback() -> None:
     )
     t_freq = _opponent_raise_threshold(base, 1, store, "freq_raiser", game)
     assert t_freq < t_generic  # 对手 raise 频繁 → 门槛低于通用推断
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 多人决策树：_BlindOpponent 列表 + _terminal_ev_call_multi / _terminal_ev_peek_multi
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_blind_opponent_win_probability_matches_integral() -> None:
+    """_opponents_win_probability 对盲/看组合的胜率 = _blind_win_probability 直接积分。"""
+
+    # 1 盲 1 看（门槛 0.5）→ _blind_win_probability(1, (0.5,))
+    opps = [
+        _BlindOpponent("p1", False, (1 / 3, 1 / 3, 1 / 3), 0.0),
+        _BlindOpponent("p2", True, (1 / 3, 1 / 3, 1 / 3), 0.5),
+    ]
+    assert _opponents_win_probability(opps) == pytest.approx(_blind_win_probability(1, (0.5,)))
+    # 全盲 3 人 → 1/4（4 人全蒙，含我方）
+    all_blind = [_BlindOpponent(f"p{i}", False, (1 / 3, 1 / 3, 1 / 3), 0.0) for i in range(3)]
+    assert _opponents_win_probability(all_blind) == pytest.approx(1 / 4)
+
+
+def test_terminal_ev_call_multi_single_opponent_matches_legacy() -> None:
+    """单对手时多人决策树与旧单挑 _terminal_ev_call 逐值一致（向后兼容）。"""
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": False},
+        {"id": "opp", "alive": True, "seen": False},
+        pot=10000,
+        call_bet=100,
+    )
+    probs = (1 / 3, 1 / 3, 1 / 3)
+    # 旧单挑（蒙牌对手，不加注门槛）：显式 opponent_seen=False
+    legacy = _terminal_ev_call(game, 0.5, _RoundTracker(), 1, None, probs, 10000, 0, 0.5, 0, None, False)
+    # 多人树单对手（蒙牌）
+    multi = _terminal_ev_call_multi(
+        game, 0.5, _RoundTracker(), 1, None, [_BlindOpponent("opp", False, probs, 0.0)], 10000, 0, 100
+    )
+    assert multi == pytest.approx(legacy)
+
+
+def test_terminal_ev_call_multi_opponent_fold_removes_and_recomputes() -> None:
+    """多人树：某对手必弃牌时从存活列表移除，胜率按剩余对手重算。
+
+    构造两个对手：p1 必弃（P_fold=1），p2 平跟/加注。p1 弃牌分支的胜率应只对
+    p2 计算（_opponents_win_probability([p2])），而非含 p1。用深度 0 截断验证：
+    全部弃牌独赢底池，p2 继续时按对 p2 单挑胜率摊牌。
+    """
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": False},
+        {"id": "p1", "alive": True, "seen": False},
+        {"id": "p2", "alive": True, "seen": False},
+        pot=10000,
+        call_bet=100,
+    )
+    # p1 必弃，p2 必平跟
+    opps = [
+        _BlindOpponent("p1", False, (1.0, 0.0, 0.0), 0.0),
+        _BlindOpponent("p2", False, (0.0, 1.0, 0.0), 0.0),
+    ]
+    # 深度 0 截断：p1 弃 → 存活剩 p2；p2 平跟 → 我方盲跟半价 50，池 10100，
+    # 对 p2 单挑胜率 0.5 → EV = 0.5*10100 - 50 = 5000
+    ev = _terminal_ev_call_multi(game, 0.5, _RoundTracker(), 0, None, opps, 10000, 0, 100)
+    # p1 必弃概率 1，无其他分支；p2 必跟概率 1
+    assert ev == pytest.approx(0.5 * 10100 - 50)
+
+
+def test_terminal_ev_call_multi_joint_probability_matrix() -> None:
+    """多人树按动作组合的联合概率加权：两个对手各 2 种可能动作 → 4 个组合。
+
+    构造 p1/p2 各半概率弃/跟，深度 0 截断按组合概率加权（每轮我方只付一次盲跟半价）：
+      - 双弃 → 独赢 10000
+      - p1弃 p2跟 → 对 p2 单挑摊牌：0.5*10100-50
+      - p1跟 p2弃 → 对 p1 单挑摊牌：0.5*10100-50（p2 弃牌不等于白赢，仍与 p1 比牌）
+      - 双跟 → 三人全蒙胜率 1/3，池 10200，成本 50：1/3*10200-50
+    """
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": False},
+        {"id": "p1", "alive": True, "seen": False},
+        {"id": "p2", "alive": True, "seen": False},
+        pot=10000,
+        call_bet=100,
+    )
+    # 用两个「各半概率弃/跟」的对手 → 4 组合各 1/4
+    half = (0.5, 0.5, 0.0)
+    opps = [
+        _BlindOpponent("p1", False, half, 0.0),
+        _BlindOpponent("p2", False, half, 0.0),
+    ]
+    ev = _terminal_ev_call_multi(game, 0.5, _RoundTracker(), 0, None, opps, 10000, 0, 100)
+    combo1 = 10000  # 双弃
+    combo2 = 0.5 * 10100 - 50  # p1弃 p2跟
+    combo3 = 0.5 * 10100 - 50  # p1跟 p2弃
+    combo4 = (1 / 3) * 10200 - 50  # 双跟
+    assert ev == pytest.approx(0.25 * (combo1 + combo2 + combo3 + combo4))
+
+
+def test_terminal_ev_decision_routes_multi_opponents() -> None:
+    """_terminal_ev_decision 传入 opponents 时走多人树，且各对手画像独立生效。
+
+    三人局两个存活对手：一个必弃（白送弃牌权益）、一个必跟。盲跟 EV 应为正；
+    换成一个必加注的看牌强对手后，盲跟 EV 显著下降（门槛衰减）。
+    """
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": False},
+        {"id": "p1", "alive": True, "seen": False},
+        {"id": "p2", "alive": True, "seen": False},
+        pot=50000,
+        call_bet=100,
+    )
+    # p1 必弃、p2 必平跟 → 弃牌权益大，盲跟 EV 高
+    fold_heavy = [
+        _BlindOpponent("p1", False, (1.0, 0.0, 0.0), 0.0),
+        _BlindOpponent("p2", False, (0.0, 1.0, 0.0), 0.0),
+    ]
+    dec = _terminal_ev_decision(game, 0.5, _RoundTracker(), depth=2, opponents=fold_heavy)
+    assert dec.action == "call"
+    assert dec.call_ev > 0
+    # p1 必弃、p2 为看牌强加注（门槛 0.9）→ 盲跟 EV 应显著低于前者
+    strong_raiser = [
+        _BlindOpponent("p1", False, (1.0, 0.0, 0.0), 0.0),
+        _BlindOpponent("p2", True, (0.0, 0.0, 1.0), 0.9),
+    ]
+    dec2 = _terminal_ev_decision(game, 0.5, _RoundTracker(), depth=2, opponents=strong_raiser)
+    assert dec2.call_ev < dec.call_ev
+
+
+def test_terminal_ev_peek_multi_uses_all_opponents() -> None:
+    """多人看牌分支：强牌条件胜率对全部存活对手积分，弃牌分支白赢底池。"""
+
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": False},
+        {"id": "p1", "alive": True, "seen": False},
+        {"id": "p2", "alive": True, "seen": True},
+        pot=10000,
+        call_bet=1000,
+    )
+    # p1 必弃、p2 必平跟：强牌分支只有 p2 继续，强牌条件胜率对 p2（门槛 0.5）积分
+    opps = [
+        _BlindOpponent("p1", False, (1.0, 0.0, 0.0), 0.0),
+        _BlindOpponent("p2", True, (0.0, 1.0, 0.0), 0.5),
+    ]
+    peek_ev = _terminal_ev_peek_multi(game, 0.5, _RoundTracker(), 2, None, opps)
+    # 手算：threshold=0.5 → strong_prob=0.5。强牌分支 p2 必跟：
+    #   池 = 10000+1000=11000，成本 1000，强牌胜率 = ∫₀.₅¹ (t-0.5)/(0.5) dt = 0.25
+    #   branch_ev = 0.25*11000 - 1000 = 1750；peek_ev = 0.5*1750 = 875
+    assert peek_ev == pytest.approx(0.5 * (0.25 * 11000 - 1000))
