@@ -512,20 +512,27 @@ async def _poll_loop(ctx: object) -> None:
                             if player.get("alive") or player.get("active", False):
                                 opponent_uid = _player_key(player, index)
                                 break
-                        # 画像动作概率（按对手视角分桶）
+                        # 画像动作概率：遍历所有存活对手，分别查画像然后取平均
+                        # 多人局中各对手动作倾向不同，仅取第一个对手的代表性不足
                         action_probs: tuple[float, float, float] | None = None
-                        if opponent_uid and cfg.get("zjh_profile_enabled", True):
-                            op_seen = False
-                            for index, player in enumerate(_players(g)):
-                                if not _is_self(player) and _player_key(player, index) == opponent_uid:
-                                    op_seen = bool(player.get("seen", False))
-                                    break
+                        if cfg.get("zjh_profile_enabled", True):
                             blind_count, seen_count = _opponent_counts(g)
-                            adj_seen = seen_count - (1 if op_seen else 0)
-                            adj_blind = blind_count - (0 if op_seen else 1)
-                            action_probs = profile_store.action_probabilities(
-                                opponent_uid, op_seen, adj_seen, adj_blind
-                            )
+                            collected: list[tuple[float, float, float]] = []
+                            for index, player in enumerate(_players(g)):
+                                if _is_self(player):
+                                    continue
+                                if not (player.get("alive") or player.get("active", False)):
+                                    continue
+                                uid = _player_key(player, index)
+                                op_seen = bool(player.get("seen", False))
+                                adj_seen = seen_count - (1 if op_seen else 0)
+                                adj_blind = blind_count - (0 if op_seen else 1)
+                                collected.append(profile_store.action_probabilities(uid, op_seen, adj_seen, adj_blind))
+                            if collected:
+                                avg_fold = sum(p[0] for p in collected) / len(collected)
+                                avg_call = sum(p[1] for p in collected) / len(collected)
+                                avg_raise = sum(p[2] for p in collected) / len(collected)
+                                action_probs = (avg_fold, avg_call, avg_raise)
                         blind_action, blind_choice = _blind_peek_or_call(
                             g,
                             actions,
