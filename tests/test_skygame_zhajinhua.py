@@ -1411,7 +1411,9 @@ def test_blind_notification_renders_terminal_decision() -> None:
     assert lines[0] == "🃏 炸金花 · 看牌买信息"
     assert "牌桌 #5012 · 未看牌" in notification
     assert "终局期望" in notification
-    assert "单步EV对照" in notification
+    assert "盲跟" in notification
+    assert "看牌" in notification
+    assert "弃牌 0" in notification
     assert "原因：" in notification
 
 
@@ -1992,7 +1994,8 @@ def test_call_decision_profile_integration_raises_win_for_weak_opponent() -> Non
     base = _call_decision("对子", (14, 13), game, 0.1, tracker, model)
     store = ProfileStore()
     for _ in range(10):
-        store.record_hand_pctile("opp", "raise", 0.2)  # 弱牌加注（诈唬型）
+        store.record_hand_pctile("opp", "raise", 0.2, op_seen=True, seen_count=0, blind_count=0)
+        # 弱牌加注（诈唬型），桶键 s_s0b0
     with_profile = _call_decision("对子", (14, 13), game, 0.1, tracker, model, store)
     assert base is not None and with_profile is not None
     assert base.win_probability == pytest.approx(0.0)  # 我方牌力 < 0.99 下界
@@ -2013,9 +2016,9 @@ def test_feed_last_result_round_action_bucketing() -> None:
             ],
         }
     }
-    # 本局加注 → 只进 raise_pcts
+    # 本局加注（单挑，对手看到并加注，桶键 s_s0b0）
     store = ProfileStore()
-    feed_last_result(store, game, {"Damon": "account:1"}, {"account:1": "raise"})
+    feed_last_result(store, game, {"Damon": "account:1"}, {"account:1": ("raise", True, 0, 0)})
     dump = store.debug_dump()
     assert dump["account:1"].get("raise_pcts")
     assert not dump["account:1"].get("call_pcts")

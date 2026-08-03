@@ -316,15 +316,16 @@ def _train_opponent_actions(
             action = "fold"
         if action is None:
             continue  # 报名等非决策动作不计入（但已更新签名，避免反复尝试）
-        if round_action is not None and action in ("raise", "call"):
-            # 最激进动作优先：加注覆盖平跟（结算回填据此区分加注/平跟手牌分位）
-            if action == "raise" or round_action.get(uid) != "raise":
-                round_action[uid] = action
         op_seen = bool(player.get("seen", False))
         blind_count, seen_count = _opponent_counts(game)  # (蒙牌数, 看牌数)
         # 排除当前对手自身
         adj_seen = seen_count - (1 if op_seen else 0)
         adj_blind = blind_count - (0 if op_seen else 1)
+        if round_action is not None and action in ("raise", "call"):
+            # 最激进动作优先：加注覆盖平跟（结算回填据此区分加注/平跟手牌分位）
+            # 同时存储当时牌局状态桶参数 (action, op_seen, adj_seen, adj_blind)
+            if action == "raise" or round_action.get(uid) is None or round_action[uid][0] != "raise":  # type: ignore[index]
+                round_action[uid] = (action, op_seen, adj_seen, adj_blind)
         store.record_action(
             uid,
             action,
@@ -363,13 +364,13 @@ async def _poll_loop(ctx: object) -> None:
     uid_by_display: dict[str, str] = {}
     # 对手动作去重签名：uid → (lastAction, bet)，跨局重置
     last_opponent_seen: dict[str, tuple[str, float]] = {}
-    # 本轮各对手最激进动作 uid → "raise"|"call"（结算回填按实际动作分桶用）
-    round_opponent_action: dict[str, str] = {}
+    # 本轮各对手最激进动作 uid → (action, op_seen, seen_count, blind_count)（结算回填分桶用）
+    round_opponent_action: dict[str, tuple[str, bool, int, int]] = {}
     # 本轮已记录加注频率的对手 uid（同局只记一次，避免重复计）
     round_raise_freq_recorded: set[str] = set()
     # 刚结束那局（lastResult 待回填）的对手动作快照：lastResult 滞后一局，
     # roundId 切换时把当前轮动作移入此变量，供随后到达的 lastResult 回填取用
-    settled_round_action: dict[str, str] = {}
+    settled_round_action: dict[str, tuple[str, bool, int, int]] = {}
     # 已回填的结算局 roundId（同一局 lastResult 每轮重复出现，只回填一次）
     last_fed_result_rid: Any = None
 
@@ -538,10 +539,6 @@ async def _poll_loop(ctx: object) -> None:
                             opponent_uid=opponent_uid,
                         )
                         if blind_choice is not None:
-                            if isinstance(blind_choice, _TerminalDecision):
-                                ev_val = blind_choice.terminal_ev
-                            else:
-                                ev_val = blind_choice.expected_value
                             _action_label = {
                                 "call": "盲跟",
                                 "peek": "看牌",
@@ -549,17 +546,23 @@ async def _poll_loop(ctx: object) -> None:
                                 "open": "主动开牌",
                                 "fold": "弃牌",
                             }.get(blind_action or "", "无可执行动作")
-                            ctx.log.info(
-                                "蒙牌决策[%s]: 终局EV=%+.2f 单步EV对照=%+.2f 底池=%.0f 半价成本=%.0f 对手动作概率=%s",
-                                _action_label,
-                                ev_val,
-                                blind_choice.single_step_ev if isinstance(blind_choice, _TerminalDecision) else ev_val,
-                                g.get("pot", 0),
-                                _blind_call_cost(float(g.get("callBet", 0))),
-                                f"{action_probs[0]:.2f}/{action_probs[1]:.2f}/{action_probs[2]:.2f}"
-                                if action_probs
-                                else "先验",
-                            )
+                            if isinstance(blind_choice, _TerminalDecision):
+                                ev_val = blind_choice.terminal_ev
+                                ctx.log.info(
+                                    "蒙牌决策[%s]: 终局EV=%+.2f（盲跟%+.2f · 看牌%+.2f · 弃牌0）"
+                                    " 底池=%.0f 半价成本=%.0f 对手动作概率=%s",
+                                    _action_label,
+                                    ev_val,
+                                    blind_choice.call_ev,
+                                    blind_choice.peek_ev,
+                                    g.get("pot", 0),
+                                    _blind_call_cost(float(g.get("callBet", 0))),
+                                    f"{action_probs[0]:.2f}/{action_probs[1]:.2f}/{action_probs[2]:.2f}"
+                                    if action_probs
+                                    else "先验",
+                                )
+                            else:
+                                ev_val = blind_choice.expected_value
                         if blind_action in ("showdown", "open"):
                             await client.post("/api/portal/zhajinhua/action", {"action": blind_action})
                             turns_taken += 1
@@ -590,7 +593,20 @@ async def _poll_loop(ctx: object) -> None:
                                     )
                                 )
                         elif blind_action == "peek":
-                            if blind_choice is None:
+                            if isinstance(blind_choice, _TerminalDecision):
+                                ctx.log.info(
+                                    "蒙牌决策[看牌]: 终局EV=%+.2f（盲跟%+.2f · 看牌%+.2f · 弃牌0）"
+                                    " 底池=%.0f 半价成本=%.0f 对手动作概率=%s",
+                                    blind_choice.terminal_ev,
+                                    blind_choice.call_ev,
+                                    blind_choice.peek_ev,
+                                    g.get("pot", 0),
+                                    _blind_call_cost(float(g.get("callBet", 0))),
+                                    f"{action_probs[0]:.2f}/{action_probs[1]:.2f}/{action_probs[2]:.2f}"
+                                    if action_probs
+                                    else "先验",
+                                )
+                            elif blind_choice is None:
                                 ctx.log.info("牌局数据不完整，看牌后按实际手牌决策")
                             if cfg.get("zjh_notify_hand", True):
                                 peek_reason = _blind_peek_reason(blind_choice, actions)

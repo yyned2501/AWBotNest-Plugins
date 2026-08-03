@@ -99,6 +99,7 @@ class _SeenRange:
 
     profile/uid/action 可选：提供时用画像实测分位做胜率收缩混合与逐对手诈唬率，
     缺失则逐值回退纯范围模型（向后兼容、便于 A/B）。
+    bucket_key 指定状态桶时只查该桶数据；为 None 查扁平列表（兼容旧数据）。
     """
 
     lower: float
@@ -107,6 +108,7 @@ class _SeenRange:
     profile: Any = None
     uid: str | None = None
     action: str = "call"
+    bucket_key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -423,22 +425,24 @@ def _range_factor(hand_threshold: float, lower: float, upper: float) -> float:
 def _seen_factor(hand_threshold: float, seen_range: _SeenRange, bluff: float) -> float:
     """对单个已看牌对手的胜率：范围胜率 blended 反诈唬，再与画像实测胜率收缩混合。
 
-    1. 逐对手诈唬率：画像有该对手数据时用 `profile.bluff_rate(uid, bluff)`（其弱牌
-       继续占比向全局基线收缩），否则回退全局基线 bluff。
+    1. 逐对手诈唬率：画像有该对手数据时用 `profile.bluff_rate(uid, bluff, bucket_key)`
+       （其弱牌继续占比向全局基线收缩），否则回退全局基线 bluff。
     2. model_win = (1-bluff_opp)*范围胜率 + bluff_opp*单挑胜率 t（空气牌近似）。
     3. 画像有该对手该动作实测分位时，用 `empirical_win_factor`（我击败其实测手牌的
        比例，按样本数向 model_win 收缩）替代；无画像/无样本逐值返回 model_win。
+    bucket_key 让画像查询只取对应状态桶（如 "s_s1b1"）的数据。
     """
     range_win = _range_factor(hand_threshold, seen_range.lower, seen_range.upper)
     profile = seen_range.profile
     uid = seen_range.uid
+    bucket_key = seen_range.bucket_key
     if profile is not None and uid:
-        bluff_opp = profile.bluff_rate(uid, bluff)
+        bluff_opp = profile.bluff_rate(uid, bluff, bucket_key)
     else:
         bluff_opp = bluff
     model_win = (1 - bluff_opp) * range_win + bluff_opp * hand_threshold
     if profile is not None and uid:
-        return profile.empirical_win_factor(uid, seen_range.action, hand_threshold, model_win)
+        return profile.empirical_win_factor(uid, seen_range.action, hand_threshold, model_win, bucket_key)
     return model_win
 
 
@@ -456,6 +460,7 @@ def _seen_opponent_ranges(
     profile 非空时，把画像引用、对手 uid 与动作类型填入 _SeenRange，并
     用画像的 raise_threshold_floor 调整加注下限、call_threshold_ceiling 调整
     平跟上界——诈唬型对手（常拿弱牌加注）下限被拉低 → 范围扩大 → 我方胜率更高。
+    bucket_key 让画像查询只取对应状态桶（如 "s_s1b1"）的数据。
     """
     blind, _ = _opponent_counts(game)
     ranges: list[_SeenRange] = []
@@ -468,29 +473,31 @@ def _seen_opponent_ranges(
         continue_snapshot = tracker.snapshots.get(key)
         is_raise = bool(continue_snapshot.is_raise) if continue_snapshot is not None else False
         action = "raise" if is_raise else "call"
+        # 计算状态桶键（与 _freq_bucket 同方案：op_seen + 其他看牌人数 + 其他蒙牌人数）
+        blind_count, seen_count = _opponent_counts(game)
+        op_seen = bool(player.get("seen", False))
+        adj_seen = seen_count - (1 if op_seen else 0)
+        adj_blind = blind_count - (0 if op_seen else 1)
+        bucket_key = f"{'s' if op_seen else 'b'}_s{adj_seen}b{adj_blind}"
         if is_raise:
             base_floor = max(lower, range_model.raise_floor)
             if profile is not None and key:
-                floor = profile.raise_threshold_floor(key, base_floor)
+                floor = profile.raise_threshold_floor(key, base_floor, bucket_key)
                 if floor is not None:
                     base_floor = floor
                 else:
                     # 无实测手牌分位时回退加注频率推断
-                    blind_count, seen_count = _opponent_counts(game)
-                    op_seen = bool(player.get("seen", False))
-                    adj_seen = seen_count - (1 if op_seen else 0)
-                    adj_blind = blind_count - (0 if op_seen else 1)
                     freq_floor = profile.raise_floor_from_freq_bucket(key, op_seen, adj_seen, adj_blind, base_floor)
                     if freq_floor is not None:
                         base_floor = freq_floor
-            ranges.append(_SeenRange(base_floor, 1.0, observed, profile, key, action))
+            ranges.append(_SeenRange(base_floor, 1.0, observed, profile, key, action, bucket_key))
         else:
             base_cap = range_model.call_cap
             if profile is not None and key:
-                ceiling = profile.call_threshold_ceiling(key, base_cap)
+                ceiling = profile.call_threshold_ceiling(key, base_cap, bucket_key)
                 if ceiling is not None:
                     base_cap = ceiling
-            ranges.append(_SeenRange(lower, base_cap, observed, profile, key, action))
+            ranges.append(_SeenRange(lower, base_cap, observed, profile, key, action, bucket_key))
     return blind, ranges
 
 
@@ -584,7 +591,7 @@ class _TerminalBranch:
 
 @dataclass(frozen=True)
 class _TerminalDecision:
-    """Terminal EV 决策结果：候选动作、加权终局 EV、链路明细、单步 EV 对照。
+    """Terminal EV 决策结果：候选动作、各候选 EV 明细、链路明细、单步 EV 对照。
 
     `expected_value` 别名指向 `terminal_ev`（最优候选的终局期望），保持与
     `_CallDecision.expected_value` 的字段形状一致，便于通知/日志复用。
@@ -594,6 +601,9 @@ class _TerminalDecision:
     action: str  # "call" / "peek" / "fold"
     terminal_ev: float
     single_step_ev: float
+    call_ev: float  # 盲跟候选 EV
+    peek_ev: float  # 看牌候选 EV
+    fold_ev: float  # 弃牌候选 EV（恒为 0）
     branches: tuple[_TerminalBranch, ...]
     reason: str
 
@@ -614,6 +624,7 @@ def _opponent_raise_threshold(
     profile: Any = None,
     opponent_uid: str | None = None,
     game: dict[str, Any] | None = None,
+    bucket_key: str | None = None,
 ) -> float:
     """对手连续 raise 后其手牌门槛的上调。
 
@@ -622,6 +633,7 @@ def _opponent_raise_threshold(
     门槛：诈唬型对手（弱牌加注多）门槛被拉低 → 我方胜率更高。profile 需为
     ProfileStore（提供 raise_threshold_floor），配合 opponent_uid 定位对手。
 
+    bucket_key 指定状态桶（如 "s_s1b1"）时只查该桶数据；为 None 查扁平列表。
     无实测手牌分位时，回退加注频率推断（raise_floor_from_freq_bucket）：对手加注
     频率高 → 最小牌力低 → 胜率更高。双方都无数据则用通用推断。
     """
@@ -630,7 +642,19 @@ def _opponent_raise_threshold(
         threshold = threshold + (1.0 - threshold) * 0.25
     # 画像加注分位下界（duck-typed）：有数据则收缩混合，无数据回退通用推断
     if profile is not None and opponent_uid:
-        floor = profile.raise_threshold_floor(opponent_uid, threshold)
+        # 未指定 bucket_key 时从 game 反推
+        resolved_bucket = bucket_key
+        if resolved_bucket is None and game is not None:
+            blind_count, seen_count = _opponent_counts(game)
+            op_seen = False
+            for key, player in _opponent_entries(game):
+                if key == opponent_uid:
+                    op_seen = bool(player.get("seen", False))
+                    break
+            adj_seen = seen_count - (1 if op_seen else 0)
+            adj_blind = blind_count - (0 if op_seen else 1)
+            resolved_bucket = f"{'s' if op_seen else 'b'}_s{adj_seen}b{adj_blind}"
+        floor = profile.raise_threshold_floor(opponent_uid, threshold, resolved_bucket)
         if floor is not None:
             threshold = floor
         elif game is not None:
@@ -900,7 +924,16 @@ def _terminal_ev_decision(
     else:
         action = "fold"
         reason = f"蒙牌弃牌 Terminal EV 0 ≥ 盲跟 {call_ev:+.0f} / 看牌 {peek_ev:+.0f}"
-    return _TerminalDecision(action, max(call_ev, peek_ev, fold_ev), single_step_ev, tuple(branches), reason)
+    return _TerminalDecision(
+        action,
+        max(call_ev, peek_ev, fold_ev),
+        single_step_ev,
+        call_ev,
+        peek_ev,
+        fold_ev,
+        tuple(branches),
+        reason,
+    )
 
 
 def _blind_decision(game: dict[str, Any], fallback_threshold: float, tracker: _RoundTracker) -> _CallDecision | None:

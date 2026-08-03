@@ -152,8 +152,11 @@ def _blind_notification(
     if decision is not None:
         lines.append(f"底池 {pot:.0f} · 半价成本 {_blind_call_cost(call_bet):.0f}")
         if isinstance(decision, _TerminalDecision):
-            # Terminal EV 决策：展示终局 EV 与单步 EV 对照
-            lines.append(f"终局期望 {decision.terminal_ev:+.0f} · 单步EV对照 {decision.single_step_ev:+.0f}")
+            # Terminal EV 决策：展示各候选 EV 分解
+            lines.append(
+                f"终局期望 {decision.terminal_ev:+.0f} （盲跟 {decision.call_ev:+.0f} "
+                f"· 看牌 {decision.peek_ev:+.0f} · 弃牌 0）"
+            )
         else:
             # 旧单步 EV 决策：展示胜率与对手构成
             lines.append(f"平均单挑 {decision.one_vs_one:.1%} · 对手 {_opponent_brief(decision)}")

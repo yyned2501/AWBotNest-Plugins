@@ -23,7 +23,7 @@ from .games import hdsky_auth
 __plugin__ = {
     "name": "天空游戏",
     "id": "skyGame",
-    "version": "1.14.8",
+    "version": "1.14.9",
     "author": "Yy",
     "description": "天空系列游戏统一入口：炸金花自动参与、养马自动养护，左侧按游戏分组配置。",
     "scope": "user",

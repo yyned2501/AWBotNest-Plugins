@@ -22,8 +22,10 @@ from .zjh_state import _player_key, _players
 _KV_PREFIX = "zjh:profile:"
 
 # 画像字典键
-_RAISE_PCTS = "raise_pcts"  # 加注后最终真实手牌分位（结算回填）
-_CALL_PCTS = "call_pcts"  # 平跟后最终真实手牌分位
+_RAISE_PCTS = "raise_pcts"  # 加注后最终真实手牌分位（结算回填，扁平，旧数据兼容）
+_CALL_PCTS = "call_pcts"  # 平跟后最终真实手牌分位（扁平，旧数据兼容）
+_RAISE_PCTS_BUCKET = "raise_pcts_by_bucket"  # 按 _freq_bucket 分桶的加注手牌分位
+_CALL_PCTS_BUCKET = "call_pcts_by_bucket"  # 按 _freq_bucket 分桶的平跟手牌分位
 _TOTAL_HANDS = "total_hands"
 _DISPLAY = "display_name"
 _UPDATED = "updated_ms"
@@ -113,12 +115,29 @@ class ProfileStore:
             bucket[action] += 1
             self._dirty.add(uid)
 
-    def record_hand_pctile(self, uid: str, action: str, pctile: float) -> None:
-        """结算回填：记录对手本局最终手牌分位（按加注/平跟动作分桶）。"""
+    def record_hand_pctile(
+        self,
+        uid: str,
+        action: str,
+        pctile: float,
+        op_seen: bool = False,
+        seen_count: int = 0,
+        blind_count: int = 0,
+    ) -> None:
+        """结算回填：记录对手本局最终手牌分位（按加注/平跟动作分桶）。
+
+        同时写入扁平列表（旧数据兼容）和按 _freq_bucket 分桶的字典，
+        以便查询方法按需取用对应状态桶的数据。
+        """
         uid = self._normalize_uid(uid)
         profile = self._ensure(uid)
         key = _RAISE_PCTS if action == "raise" else _CALL_PCTS
         profile.setdefault(key, []).append(pctile)
+        # 分桶存储
+        bucket_key = _freq_bucket(op_seen, seen_count, blind_count)
+        bucket_storage = _RAISE_PCTS_BUCKET if action == "raise" else _CALL_PCTS_BUCKET
+        bucket_data = profile.setdefault(bucket_storage, {})
+        bucket_data.setdefault(bucket_key, []).append(pctile)
         self._dirty.add(uid)
 
     # ── 训练：记录对手加注频率（按对手状态+剩余人数分桶）──
@@ -247,63 +266,83 @@ class ProfileStore:
 
     # ── 查询：对手实测手牌分位 / 诈唬率 ──
 
-    def hand_percentiles(self, uid: str, action: str) -> list[float]:
-        """返回该对手加注/平跟后结算回填的真实手牌分位列表（可能为空）。"""
+    def hand_percentiles(self, uid: str, action: str, bucket_key: str | None = None) -> list[float]:
+        """返回该对手加注/平跟后结算回填的真实手牌分位列表（可能为空）。
+
+        bucket_key 指定状态桶（如 "s_s1b1"）时只返回该桶的数据；
+        为 None 时返回扁平列表（兼容旧数据，无分桶时也能工作）。
+        """
         uid = self._normalize_uid(uid)
         profile = self._cache.get(uid)
         if profile is None:
             return []
+        if bucket_key is not None:
+            bucket_storage = _RAISE_PCTS_BUCKET if action == "raise" else _CALL_PCTS_BUCKET
+            bucket_data = profile.get(bucket_storage, {})
+            values = bucket_data.get(bucket_key)
+            return list(values) if isinstance(values, list) else []
         key = _RAISE_PCTS if action == "raise" else _CALL_PCTS
         values = profile.get(key)
         return list(values) if isinstance(values, list) else []
 
-    def empirical_win_factor(self, uid: str, action: str, my_threshold: float, model_baseline: float) -> float:
+    def empirical_win_factor(
+        self,
+        uid: str,
+        action: str,
+        my_threshold: float,
+        model_baseline: float,
+        bucket_key: str | None = None,
+    ) -> float:
         """实测胜率收缩混合：我方牌力击败对手该动作实测手牌的比例。
 
         wins = mean(p < my_threshold for p in pcts)，按 n/(n+PRIOR_STRENGTH) 与
         model_baseline（现有范围模型胜率）收缩；无样本返回 model_baseline。
+        bucket_key 指定状态桶时只查该桶数据；为 None 查扁平列表。
         """
-        pcts = self.hand_percentiles(uid, action)
+        pcts = self.hand_percentiles(uid, action, bucket_key)
         if not pcts:
             return model_baseline
         wins = sum(1.0 for p in pcts if p < my_threshold) / len(pcts)
         weight = len(pcts) / (len(pcts) + PRIOR_STRENGTH)
         return weight * wins + (1 - weight) * model_baseline
 
-    def bluff_rate(self, uid: str, baseline: float) -> float:
+    def bluff_rate(self, uid: str, baseline: float, bucket_key: str | None = None) -> float:
         """逐对手诈唬率：其实测继续手牌中弱牌（分位 < _WEAK_PCTILE）占比。
 
         样本数低于 PRIOR_STRENGTH 回退全局基线 baseline；否则向 baseline 收缩。
+        bucket_key 指定状态桶时只查该桶数据；为 None 查扁平列表。
         """
-        pcts = self.hand_percentiles(uid, "raise") + self.hand_percentiles(uid, "call")
+        pcts = self.hand_percentiles(uid, "raise", bucket_key) + self.hand_percentiles(uid, "call", bucket_key)
         if len(pcts) < PRIOR_STRENGTH:
             return baseline
         weak = sum(1.0 for p in pcts if p < _WEAK_PCTILE) / len(pcts)
         weight = len(pcts) / (len(pcts) + PRIOR_STRENGTH)
         return weight * weak + (1 - weight) * baseline
 
-    def raise_threshold_floor(self, uid: str, base_threshold: float) -> float | None:
+    def raise_threshold_floor(self, uid: str, base_threshold: float, bucket_key: str | None = None) -> float | None:
         """对手加注手牌范围下界：实测加注分位的下四分位（最弱实测加注牌）。
 
         爱拿弱牌加注（诈唬型）的对手下四分位低 → 门槛低 → 我方蒙牌胜率高；
         紧手加注者下四分位高 → 门槛高。按样本数向通用推断 base_threshold 收缩；
         无样本返回 None（调用方回退通用推断）。
+        bucket_key 指定状态桶时只查该桶数据；为 None 查扁平列表。
         """
-        pcts = self.hand_percentiles(uid, "raise")
+        pcts = self.hand_percentiles(uid, "raise", bucket_key)
         if not pcts:
             return None
         floor = _percentile(pcts, 0.25)
         weight = len(pcts) / (len(pcts) + PRIOR_STRENGTH)
         return weight * floor + (1 - weight) * base_threshold
 
-    def call_threshold_ceiling(self, uid: str, base_ceiling: float) -> float | None:
+    def call_threshold_ceiling(self, uid: str, base_ceiling: float, bucket_key: str | None = None) -> float | None:
         """对手平跟手牌范围上界：实测平跟分位的上四分位（最强实测平跟牌）。
 
         爱拿大牌平跟慢打的对手上四分位高 → 上限高 → 我方胜率低；
         反之弱牌平跟者上四分位低 → 上限低。按样本数向通用推断 base_ceiling 收缩；
         无样本返回 None（调用方回退通用推断）。
+        bucket_key 指定状态桶时只查该桶数据；为 None 查扁平列表。
         """
-        pcts = self.hand_percentiles(uid, "call")
+        pcts = self.hand_percentiles(uid, "call", bucket_key)
         if not pcts:
             return None
         ceiling = _percentile(pcts, 0.75)
@@ -366,16 +405,16 @@ def feed_last_result(
     store: ProfileStore,
     game: dict[str, Any],
     uid_by_display: dict[str, str],
-    round_action: dict[str, str] | None = None,
+    round_action: dict[str, tuple[str, bool, int, int]] | None = None,
 ) -> None:
     """从牌局结算 game.lastResult 回填对手真实手牌分位。
 
     lastResult.players 无 id，需用调用方提供的 displayName→id 映射关联。
     仅对非弃牌动作回填（已弃牌者没有加注/平跟的终局手牌意义）。
 
-    round_action：本轮各对手最激进动作 {uid: "raise"|"call"}，由轮询跟踪得到。
-    提供时按对手实际动作只回填对应桶（区分「加注的牌」与「平跟的牌」）；
-    为 None 时保持旧行为保守回填到两者。
+    round_action：本轮各对手最激进动作 bucket 信息 {uid: (action, op_seen, seen_count, blind_count)}，
+    由轮询跟踪得到。提供时按对手实际动作只回填对应桶（区分「加注的牌」与「平跟的牌」），
+    且按当时牌局状态分桶；为 None 时保持旧行为保守回填到两者。
     """
     last = game.get("lastResult") or (game.get("game") or {}).get("lastResult")
     if not isinstance(last, dict):
@@ -400,8 +439,9 @@ def feed_last_result(
         if pctile is None:
             continue
         if round_action is not None:
-            # 按对手本轮实际动作分桶；未知动作保守归入平跟
-            store.record_hand_pctile(uid, round_action.get(uid, "call"), pctile)
+            # 按对手本轮实际动作及当时牌局状态分桶；未知动作保守归入平跟
+            bucket = round_action.get(uid, ("call", False, 0, 0))
+            store.record_hand_pctile(uid, bucket[0], pctile, bucket[1], bucket[2], bucket[3])
             continue
         # 无动作跟踪时保守回填到两者；供统计时自行取用
         store.record_hand_pctile(uid, "raise", pctile)
