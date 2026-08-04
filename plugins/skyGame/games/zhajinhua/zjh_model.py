@@ -1246,6 +1246,11 @@ def _blind_peek_or_call(
             return "showdown", terminal
         if "open" in actions:
             return "open", terminal
+        if blind_calls_so_far >= 1:
+            # 第二手起连续蒙牌不盲跟——必须 open/showdown 结束本轮，否则看牌买信息
+            if "peek" in actions:
+                return "peek", terminal
+            return None, terminal
         if "call" in actions:
             return "call", terminal
         if "peek" in actions:

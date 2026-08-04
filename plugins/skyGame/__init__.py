@@ -1,5 +1,5 @@
 # =============================================================================
-# AWBotNest 插件：天空游戏 (skyGame) v1.16.2
+# AWBotNest 插件：天空游戏 (skyGame) v1.16.3
 #
 # 天空系列游戏的统一入口：Vue 配置界面左侧按游戏分组，各游戏逻辑拆到
 # games/ 子模块，互不干扰。当前收录：
@@ -23,7 +23,7 @@ from .games import hdsky_auth
 __plugin__ = {
     "name": "天空游戏",
     "id": "skyGame",
-    "version": "1.16.2",
+    "version": "1.16.3",
     "author": "Yy",
     "description": "天空系列游戏统一入口：炸金花自动参与、养马自动养护，左侧按游戏分组配置。",
     "scope": "user",
@@ -381,13 +381,11 @@ __plugin__ = {
         },
     },
     "changelog": (
+        "v1.16.3 更新：\n"
+        "- 第二手起连续蒙牌不盲跟：EV 判定盲跟时强制走 showdown/open 结束本轮，"
+        "两者都不开放则看牌买信息，避免纯盲跟被对手加注套牢\n"
         "v1.16.2 更新：\n"
-        "- 修复 showdown 循环 CSRF 失效：is_csrf_error 检测\"安全校验\"字符串，"
-        "CSRF 重试不再依赖 HTTP 403（门户返回 200+ok:false 时也触发）；"
-        "同轮终局动作（showdown/open）加去重防止空转；"
-        "失败时主动 reset_csrf\n"
-        "v1.16.2 更新：\n"
-        "- 修复 showdown 循环 CSRF 失效：is_csrf_error 检测\"安全校验\"字符串，"
+        '- 修复 showdown 循环 CSRF 失效：is_csrf_error 检测"安全校验"字符串，'
         "CSRF 重试不再依赖 HTTP 403（门户返回 200+ok:false 时也触发）；"
         "同轮终局动作（showdown/open）加去重防止空转；"
         "失败时主动 reset_csrf\n"
