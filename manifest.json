@@ -46,5 +46,13 @@
     "description": "天空系列游戏统一入口：炸金花自动参与（Terminal EV 多人决策树 + 对手画像）、养马自动养护、门户 Cookie 自动续期，Vue 左侧按游戏分组配置。",
     "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/skyGame.svg",
     "path": "plugins/skyGame/"
+  },
+  "juai_checkin": {
+    "name": "JUAI 自动签到",
+    "version": "1.0.0",
+    "author": "Yy",
+    "description": "每日自动签到 juai 平台，纯 API 签到无需浏览器。",
+    "icon": "https://www.juaiapi.com/favicon.ico",
+    "path": "plugins/juai_checkin.py"
   }
 }
