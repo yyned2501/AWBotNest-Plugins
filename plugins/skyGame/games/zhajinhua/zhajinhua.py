@@ -314,6 +314,7 @@ async def _act_on_hand(
             game.get("self", {}),
             actions,
         )
+        client.reset_csrf()
         return False
     if cfg.get("zjh_notify_hand", True) and decision is not None:
         await ctx.notify(
@@ -617,23 +618,43 @@ async def _poll_loop(ctx: object) -> None:
                             else:
                                 ev_val = blind_choice.expected_value
                         if blind_action in ("showdown", "open"):
-                            await client.post("/api/portal/zhajinhua/action", {"action": blind_action})
-                            turns_taken += 1
-                            if cfg.get("zjh_notify_hand", True):
-                                await ctx.notify(
-                                    _blind_notification(
-                                        blind_action,
-                                        rid,
-                                        blind_choice,
-                                        float(g.get("pot", 0) or 0),
-                                        float(g.get("callBet", 0) or 0),
-                                        "蒙牌终局EV≥0，直接开牌结束本轮避免对手加注后投入翻倍",
-                                    )
+                            # 去重：同一轮相同终局动作已发送过(CSRF失效后循环)则跳过
+                            if tracker.last_terminal_action == blind_action:
+                                ctx.log.warning(
+                                    "终局动作[%s]已在本轮发送过(可能CSRF失效)，跳过重复请求",
+                                    blind_action,
                                 )
+                            else:
+                                r = await client.post("/api/portal/zhajinhua/action", {"action": blind_action})
+                                if r.get("ok"):
+                                    tracker.last_terminal_action = blind_action
+                                    turns_taken += 1
+                                else:
+                                    ctx.log.warning(
+                                        "终局动作[%s]请求失败: %s, 重置CSRF",
+                                        blind_action,
+                                        r.get("error") or r.get("_error", "未知错误"),
+                                    )
+                                    client.reset_csrf()
+                                if cfg.get("zjh_notify_hand", True):
+                                    await ctx.notify(
+                                        _blind_notification(
+                                            blind_action,
+                                            rid,
+                                            blind_choice,
+                                            float(g.get("pot", 0) or 0),
+                                            float(g.get("callBet", 0) or 0),
+                                            "蒙牌终局EV≥0，直接开牌结束本轮避免对手加注后投入翻倍",
+                                        )
+                                    )
                         elif blind_action == "call":
-                            await client.post("/api/portal/zhajinhua/action", {"action": "call"})
-                            turns_taken += 1
-                            blind_calls_so_far += 1
+                            r = await client.post("/api/portal/zhajinhua/action", {"action": "call"})
+                            if not r.get("ok"):
+                                ctx.log.warning("盲跟请求失败: %s, 重置CSRF", r.get("error"))
+                                client.reset_csrf()
+                            else:
+                                turns_taken += 1
+                                blind_calls_so_far += 1
                             if cfg.get("zjh_notify_hand", True):
                                 await ctx.notify(
                                     _blind_notification(

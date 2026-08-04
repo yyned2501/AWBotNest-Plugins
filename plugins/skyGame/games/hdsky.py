@@ -42,7 +42,7 @@ def request_key() -> str:
 def is_csrf_error(data: dict[str, Any]) -> bool:
     """403 响应是否为 CSRF / 请求来源校验失败（重取 CSRF 后可恢复）。"""
     err = str(data.get("error", "") or "")
-    return "请求来源" in err or "csrf" in err.lower()
+    return "请求来源" in err or "csrf" in err.lower() or "安全校验" in err
 
 
 def read_portal_session(path: str) -> str | None:
@@ -218,10 +218,12 @@ class HdskyClient:
             if resp.status_code == 401 and not _retry:
                 return await self._handle_expired(method, path, body)
             data = resp.json()
-            # CSRF 失效（403「请求来源无效」）：作废缓存重取一次后重试，避免持续失败
-            if resp.status_code == 403 and not _csrf_retry and is_csrf_error(data):
+            # CSRF 失效：作废缓存重取一次后重试，避免持续失败。
+            # 门户可能用 403 或 200+ok:false 两种方式返回 CSRF 错误，
+            # 前者 ("请求来源无效") 已被 403 覆盖，后者 ("页面安全校验已失效") 需要额外判断。
+            if not _csrf_retry and (resp.status_code == 403 or is_csrf_error(data)):
                 if self._log:
-                    self._log.debug("CSRF 校验失败，刷新后重试: %s", path)
+                    self._log.debug("CSRF 校验失败(HTTP %s)，刷新后重试: %s", resp.status_code, path)
                 self.reset_csrf()
                 return await self._request(method, path, body, _retry=_retry, _csrf_retry=True)
             self._trace(method, path, body, data)

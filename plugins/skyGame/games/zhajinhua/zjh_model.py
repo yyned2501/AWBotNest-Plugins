@@ -72,6 +72,8 @@ class _RoundTracker:
     pending_fold: _PendingFold | None = None
     # 本局我方是否已做过「已看牌」决策：首次看牌慢打不加注用（每局随 tracker 重建而重置）
     seen_acted: bool = False
+    # 本局已发送的终局动作（去重：同一轮同动作不重复发送，避免 CSRF 失效后无限循环）
+    last_terminal_action: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1342,7 +1344,11 @@ def _choose(
     call_bet = float(game.get("callBet", 0) or 0)
     tolerance = abs(fold_ev_tolerance_pct) / 100.0 * call_bet
     if decision.expected_value < -tolerance:
-        return _Choice(False, f"跟注期望收益{decision.expected_value:+.0f}低于弃牌容差{-tolerance:.0f}", decision)
+        return _Choice(
+            False,
+            f"跟注期望收益{decision.expected_value:+.0f}低于弃牌容差{-tolerance:.0f}",
+            decision,
+        )
     return _Choice(True, "期望收益在弃牌容差内", decision)
 
 
@@ -1401,5 +1407,8 @@ def _choose_action(
     if "call" in actions:
         return "call", choice.reason
     if "showdown" in actions:
-        return "showdown", f"强制摊牌阶段无 call 授权，EV 支持继续，应战开牌（胜率{win_probability:.1%}）"
+        return (
+            "showdown",
+            f"强制摊牌阶段无 call 授权，EV 支持继续，应战开牌（胜率{win_probability:.1%}）",
+        )
     return "call", choice.reason
