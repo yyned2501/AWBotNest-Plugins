@@ -114,18 +114,21 @@ async def test_csrf_retry_only_once() -> None:
 
 
 @pytest.mark.asyncio
-async def test_non_csrf_403_not_retried() -> None:
-    """非 CSRF 的 403（如权限不足）不应触发 CSRF 刷新重试。"""
+async def test_non_csrf_403_retried_once() -> None:
+    """v1.16.2 起任何 403 都按疑似 CSRF 失效处理：刷新 CSRF 重试一次（无法单靠
+    状态码区分 CSRF 403 与权限 403，防御性重试一次），重试仍 403 才返回错误。"""
     client = _make_client(
         [
             _FakeResp(200, {"ok": True, "csrfToken": "tok1"}),
             _FakeResp(403, {"ok": False, "error": "权限不足"}),
+            _FakeResp(200, {"ok": True, "csrfToken": "tok2"}),  # 刷新后重取 CSRF
+            _FakeResp(403, {"ok": False, "error": "权限不足"}),  # 重试仍是权限 403
         ]
     )
     result = await client.post("/api/portal/horse/action", {"action": "walk"})
     assert result == {"ok": False, "error": "权限不足"}
     posts = [c for c in client._http.calls if c["method"] == "POST"]
-    assert len(posts) == 1  # 未重试
+    assert len(posts) == 2  # 原始 + 一次重试，不再继续
 
 
 # ── 调试记录：脱敏 / 追加 / 轮转 / 静默失败 ──
