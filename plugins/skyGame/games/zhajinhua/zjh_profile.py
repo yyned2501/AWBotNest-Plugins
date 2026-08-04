@@ -309,9 +309,11 @@ class ProfileStore:
     def bluff_rate(self, uid: str, bucket_key: str | None = None) -> float:
         """逐对手诈唬率：频率异常下界 + 实测弱牌继续占比收缩混合。
 
-        1. 频率分量（_bluff_from_freq）：继续频率 c > 0.5 本身就蕴含诈唬——理性对手
-           最多用最强的 c 分位牌继续，其中弱牌占比下界 (c-0.5)/c；按样本数向 0 收缩。
-           无任何全局基线：没有动作样本的对手诈唬率为 0。
+        1. 频率分量（_bluff_from_freq）：hand-level 继续频率 c > 0.5 本身就蕴含诈唬
+           ——理性对手最多用最强的 c 分位牌继续，其中弱牌占比下界 (c-0.5)/c；
+           按 hand-level 手数向 0 收缩。无任何全局基线：没有样本的对手诈唬率为 0。
+           继续率用 hand-level 口径（结算时每局记一次）；实例级动作计数会把
+           「一手牌多次跟注」的分子撑大、导致诈唬率高估与可信度虚高，已弃用。
         2. 实测分量：继续（加注/平跟）后结算手牌分位中弱牌（< _WEAK_PCTILE）占比；
            样本不足 PRIOR_STRENGTH 时直接返回频率分量，否则向频率分量收缩。
         bucket_key 指定状态桶时只查该桶数据；为 None 时查聚合数据。
@@ -347,23 +349,49 @@ class ProfileStore:
                 raises += int(value.get("raise", 0))
         return (folds, calls, raises)
 
-    def _bluff_from_freq(self, uid: str, bucket_key: str | None = None) -> float:
-        """继续频率隐含的诈唬下界。
+    def _raise_freq_total(self, uid: str, bucket_key: str | None = None) -> int:
+        """hand-level 继续手数：结算时每局自愿继续（call/raise）过的对手记一次。
 
-        手牌分位近似 Uniform[0,1]：对手以频率 c 继续（call+raise），再理性也只能用
+        与动作桶同用 _freq_bucket 桶键；bucket_key 指定时取该桶，None 时聚合全部。
+        """
+        uid = self._normalize_uid(uid)
+        profile = self._cache.get(uid)
+        if profile is None:
+            return 0
+        freq_buckets = profile.get(_RAISE_FREQ)
+        if not isinstance(freq_buckets, dict):
+            return 0
+        if bucket_key is not None:
+            bucket = freq_buckets.get(bucket_key)
+            if not isinstance(bucket, dict):
+                return 0
+            return int(bucket.get("total", 0))
+        return sum(int(b.get("total", 0)) for b in freq_buckets.values() if isinstance(b, dict))
+
+    def _bluff_from_freq(self, uid: str, bucket_key: str | None = None) -> float:
+        """继续频率隐含的诈唬下界（hand-level 继续率）。
+
+        分母 = 参与决策的手数 = hand-level 继续手数 + 弃牌手数。继续手数来自
+        raise_freq.total（结算时每局自愿继续过的对手记一次）；弃牌手数用 fold
+        实例计数——每手牌最多弃一次、弃牌即出局，实例数恰等于手数。
+        区别于实例级动作计数：一手牌跟注 3 轮只算 1 手继续，不会把分子撑大，
+        也不会让「跟几轮后弃牌」的对手被误判成高频继续。
+
+        手牌分位近似 Uniform[0,1]：对手以 hand-level 频率 c 继续，再理性也只能用
         最强的 c 分位牌继续（区间 [1-c, 1]），其中弱牌（< _WEAK_PCTILE）占比下界为
         (c - 0.5) / c（仅 c > 0.5 时为正）；c ≤ 0.5 频率不蕴含诈唬。
-        按样本数向 0 收缩，小样本不激进。
+        按 hand-level 手数向 0 收缩，小样本不激进。
         """
-        folds, calls, raises = self._bucket_action_counts(uid, bucket_key)
-        total = folds + calls + raises
-        if total <= 0:
+        folds, _, _ = self._bucket_action_counts(uid, bucket_key)
+        continue_hands = self._raise_freq_total(uid, bucket_key)
+        total_hands = continue_hands + folds
+        if total_hands <= 0:
             return 0.0
-        continue_rate = (calls + raises) / total
+        continue_rate = continue_hands / total_hands
         if continue_rate <= _WEAK_PCTILE:
             return 0.0
         raw = (continue_rate - _WEAK_PCTILE) / continue_rate
-        return total / (total + PRIOR_STRENGTH) * raw
+        return total_hands / (total_hands + PRIOR_STRENGTH) * raw
 
     def raise_threshold_floor(self, uid: str, base_threshold: float, bucket_key: str | None = None) -> float | None:
         """对手加注手牌范围下界：实测加注分位的下四分位（最弱实测加注牌）。

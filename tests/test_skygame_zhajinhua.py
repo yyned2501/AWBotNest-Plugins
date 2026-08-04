@@ -1730,9 +1730,10 @@ def test_seen_factor_without_profile_is_pure_range_win() -> None:
 
 
 def test_seen_factor_profile_bluff_raises_win_probability() -> None:
-    # 画像反诈唬：全 call 跟注站（继续频率 1.0）频率诈唬下界混入单挑胜率 t，抬高胜率。
+    # 画像反诈唬：全 call 跟注站（hand-level 继续频率 1.0）频率诈唬下界混入单挑胜率 t，抬高胜率。
     store = ProfileStore()
     for _ in range(10):
+        store.record_raise_freq("opp", True, 0, 0, False)
         store.record_action("opp", "call", True, 0, 0)
     seen_range = _SeenRange(0.5, 0.85, True, store, "opp", "call", "s_s0b0")
     hand_threshold = 0.7
@@ -2196,7 +2197,7 @@ def test_empirical_win_factor_shrinkage() -> None:
 
 
 def test_bluff_rate_freq_and_hand_pctile_blend() -> None:
-    """逐对手诈唬率（频率异常下界 + 实测弱牌占比收缩，无全局基线）。"""
+    """逐对手诈唬率（hand-level 频率异常下界 + 实测弱牌占比收缩，无全局基线）。"""
     store = ProfileStore()
     # 无数据 → 0（异常路径：陌生对手不反诈唬）
     assert store.bluff_rate("nobody") == 0.0
@@ -2204,18 +2205,22 @@ def test_bluff_rate_freq_and_hand_pctile_blend() -> None:
     for _ in range(6):
         store.record_action("tight", "fold", True, 0, 0)
     assert store.bluff_rate("tight") == 0.0
-    # 紧手 c=0.4（2 call + 3 fold）→ 0
-    store.record_action("semi", "call", True, 0, 0)
-    store.record_action("semi", "call", True, 0, 0)
+    # 紧手 c=0.4（2 手继续 + 3 手弃）→ 0
+    for _ in range(2):
+        store.record_raise_freq("semi", True, 0, 0, False)
+        store.record_action("semi", "call", True, 0, 0)
     for _ in range(3):
         store.record_action("semi", "fold", True, 0, 0)
     assert store.bluff_rate("semi") == 0.0
     # 跟注站 n=10 全 call：c=1.0 → raw=0.5，收缩后 10/13×0.5
     for _ in range(10):
+        store.record_raise_freq("station", True, 0, 0, False)
         store.record_action("station", "call", True, 0, 0)
     freq_bluff = 10 / (10 + PRIOR_STRENGTH) * 0.5
     assert store.bluff_rate("station") == pytest.approx(freq_bluff)
-    # 少样本（n=2 全 call）：2/5×0.5=0.2，向 0 收缩不激进
+    # 少样本（n=2 全继续）：2/5×0.5=0.2，向 0 收缩不激进
+    for _ in range(2):
+        store.record_raise_freq("newbie", True, 0, 0, True)
     store.record_action("newbie", "call", True, 0, 0)
     store.record_action("newbie", "raise", True, 0, 0)
     assert store.bluff_rate("newbie") == pytest.approx(2 / (2 + PRIOR_STRENGTH) * 0.5)
@@ -2228,6 +2233,7 @@ def test_bluff_rate_freq_and_hand_pctile_blend() -> None:
     for _ in range(10):
         store.record_hand_pctile("strong", "raise", 0.9)
     for _ in range(10):
+        store.record_raise_freq("strong", True, 0, 0, True)
         store.record_action("strong", "raise", True, 0, 0)
     assert store.bluff_rate("strong") < store.bluff_rate("station", None)
 
@@ -2235,8 +2241,9 @@ def test_bluff_rate_freq_and_hand_pctile_blend() -> None:
 def test_bluff_rate_bucket_isolation_and_aggregation() -> None:
     """bucket_key 指定时只算该桶；None 时聚合全部桶。"""
     store = ProfileStore()
-    # 桶 s_s1b0：8 次 call（c=1.0）；桶 s_s1b1：2 次 fold（c=0）
+    # 桶 s_s1b0：8 手 continue（c=1.0）；桶 s_s1b1：2 手 fold（c=0）
     for _ in range(8):
+        store.record_raise_freq("a", True, 1, 0, False)
         store.record_action("a", "call", True, 1, 0)
     for _ in range(2):
         store.record_action("a", "fold", True, 1, 1)
@@ -2246,6 +2253,34 @@ def test_bluff_rate_bucket_isolation_and_aggregation() -> None:
     # 聚合：n=10, c=0.8 → raw=(0.8-0.5)/0.8=0.375，收缩 10/13
     agg = 10 / (10 + PRIOR_STRENGTH) * ((0.8 - 0.5) / 0.8)
     assert store.bluff_rate("a") == pytest.approx(agg)
+
+
+def test_bluff_rate_hand_level_not_instance_counts() -> None:
+    """频率分量用 hand-level 继续率：一手牌多次跟注不撑大分子。
+
+    旧版用实例级动作计数 c=(call+raise)/(fold+call+raise)：对手 5 手直接弃、
+    5 手跟到底（每手 3 轮）→ 实例 c=15/20=0.75 误判出诈唬下界；
+    hand-level 口径 c=5/10=0.5 不蕴含诈唬 → 0。
+    """
+    store = ProfileStore()
+    for _ in range(5):
+        store.record_action("opp", "fold", True, 0, 0)
+    for _ in range(5):
+        for _ in range(3):
+            store.record_action("opp", "call", True, 0, 0)
+        store.record_raise_freq("opp", True, 0, 0, False)
+    assert store.bluff_rate("opp") == 0.0
+
+
+def test_bluff_rate_call_then_fold_single_hand() -> None:
+    """同一手牌 call 后 fold：hand-level 计 1 手继续 + 1 手弃 → c=0.5 无诈唬。"""
+    store = ProfileStore()
+    # 一手牌：2 次跟注（实例级），最后弃牌
+    store.record_action("opp", "call", True, 0, 0)
+    store.record_action("opp", "call", True, 0, 0)
+    store.record_action("opp", "fold", True, 0, 0)
+    store.record_raise_freq("opp", True, 0, 0, False)  # 结算时记 1 手继续
+    assert store.bluff_rate("opp") == 0.0
 
 
 def test_raise_threshold_floor_none_and_shrink() -> None:
