@@ -49,10 +49,10 @@
   },
   "juai_checkin": {
     "name": "JUAI 自动签到",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "author": "Yy",
-    "description": "每日自动签到 juai 平台，纯 API 签到无需浏览器。",
-    "icon": "https://www.juaiapi.com/favicon.ico",
+    "description": "每日自动签到 juai 平台（多账号），纯 REST API 签到无需浏览器。",
+    "icon": "https://www.juaiapi.com/favicon.png",
     "path": "plugins/juai_checkin.py"
   }
 }
