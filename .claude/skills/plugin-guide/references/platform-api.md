@@ -30,7 +30,7 @@
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/plugins/{id}/config` | 读配置 `{plugin_id, config}` |
-| PUT | `/plugins/{id}/config` | 改配置，body `{"config": {...}}`，返回 `{ok, message, reloaded}`（更新并重载） |
+| PUT | `/plugins/{id}/config` | 改配置，body `{"config": {...}}`，返回 `{ok, message, reloaded}`（更新并重载）。**整体替换非合并**：缺省的键会被重置为 schema 默认值，改单个字段也要带上全部现有配置（含密码等敏感项），否则会把 accounts/历史记录等清空 |
 
 ### 插件 KV 存储
 | 方法 | 路径 | 说明 |
