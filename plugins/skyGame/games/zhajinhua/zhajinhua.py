@@ -35,6 +35,7 @@ from .zjh_hand import (
 )
 from .zjh_model import (
     _FOLD_CONFIRM_MAX_RETRIES,
+    _TERMINAL_RESEND_MAX,
     _actual_win_probability,
     _blind_call_cost,
     _blind_decision,
@@ -87,6 +88,7 @@ from .zjh_state import _in_hand, _is_self, _opponent_counts, _player_key, _playe
 
 __all__ = [
     "_FOLD_CONFIRM_MAX_RETRIES",
+    "_TERMINAL_RESEND_MAX",
     "_OpponentSnapshot",
     "_PendingFold",
     "_RoundTracker",
@@ -132,6 +134,8 @@ __all__ = [
     "_seen_opponent_ranges",
     "_self_hand",
     "_snapshot_for_actor",
+    "_terminal_action_ineffective",
+    "_terminal_action_or_fallback",
     "_terminal_ev_call",
     "_terminal_ev_call_multi",
     "_terminal_ev_decision",
@@ -391,6 +395,33 @@ def _train_opponent_actions(
         )
 
 
+def _terminal_action_ineffective(
+    last_terminal_action: str | None, alive: bool, is_turn: bool, actions: list[Any]
+) -> bool:
+    """上一轮发送的终局动作（showdown/open）是否未生效。
+
+    判据：仍是我方回合、仍存活、且该动作仍在可用列表里——说明门户没有执行
+    （如多人局不支持 open、或响应 ok 但状态未推进）。此时应清除去重标记允许重发，
+    否则会一直被「已发送过」拦截、卡死到门户行动超时（线上 #6109 连续 9 轮判应战全被跳过）。
+    真正生效后 roundId 变化会重建 tracker、或不再 isTurn，不会误判。
+    """
+    return bool(last_terminal_action and alive and is_turn and last_terminal_action in actions)
+
+
+def _terminal_action_or_fallback(blind_action: str | None, terminal_resent: int, actions: list[Any]) -> str | None:
+    """终局动作重发超限（_TERMINAL_RESEND_MAX）时回退看牌/盲跟。
+
+    门户持续不执行 showdown/open（多人局常不开放）时，继续重发只会空转到行动超时；
+    看牌免费、信息永不亏，是安全回退；无看牌才退盲跟。未超限或非终局动作原样返回。
+    """
+    if blind_action in ("showdown", "open") and terminal_resent >= _TERMINAL_RESEND_MAX:
+        if "peek" in actions:
+            return "peek"
+        if "call" in actions:
+            return "call"
+    return blind_action
+
+
 async def _poll_loop(ctx: object) -> None:
     """轮询牌局状态并执行操作。"""
     cfg = ctx.config
@@ -407,6 +438,8 @@ async def _poll_loop(ctx: object) -> None:
     profile_store = get_store(ctx.kv)
     # 连续盲跟计数：同一 roundId 内累计，达上限强制看牌
     blind_calls_so_far = 0
+    # 终局动作（showdown/open）未生效重发计数：达上限回退看牌，防门户持续不执行时无限重发
+    terminal_resent = 0
     # 本局 displayName→id 映射（结算回填画像用）
     uid_by_display: dict[str, str] = {}
     # 对手动作去重签名：uid → (lastAction, bet)，跨局重置
@@ -459,6 +492,7 @@ async def _poll_loop(ctx: object) -> None:
                     tracker = _RoundTracker()
                     round_joined = False
                     blind_calls_so_far = 0
+                    terminal_resent = 0
                     last_round_hand = ""
                     last_round_hand_type = ""
                     uid_by_display = {}
@@ -504,6 +538,20 @@ async def _poll_loop(ctx: object) -> None:
                 alive = s.get("alive", False)
                 hand = s.get("hand", "")
                 hand_type = _normalize_hand_type(s.get("handType", ""))
+
+                # 终局动作（showdown/open）未生效检测：上一轮已发送过，但本局仍是我方回合
+                # 且该动作仍在可用列表里——说明门户未执行（如多人局不支持 open、或响应 ok
+                # 但状态未推进）。此时清除去重标记允许重发，否则会一直被「已发送过」拦截、
+                # 卡死到门户行动超时（线上 #6109：连续 9 轮判应战全被跳过）。真正生效后
+                # roundId 变化会重建 tracker、或不再 isTurn，不会误重发。
+                if _terminal_action_ineffective(tracker.last_terminal_action, alive, is_turn, actions):
+                    terminal_resent += 1
+                    ctx.log.info(
+                        "终局动作[%s]上轮已发但未生效（仍是我方回合且动作仍可用），清除去重允许重发（第%d次）",
+                        tracker.last_terminal_action,
+                        terminal_resent,
+                    )
+                    tracker.last_terminal_action = None
 
                 # 没加入且可加入 → 加入
                 if not joined and "join" in actions:
@@ -617,6 +665,17 @@ async def _poll_loop(ctx: object) -> None:
                                 )
                             else:
                                 ev_val = blind_choice.expected_value
+                        # 终局动作重发超限：门户可能不支持该动作（多人局 open 不可用/未执行），
+                        # 继续重发只会空转到行动超时——回退看牌买信息（看牌免费、永不亏）。
+                        fallback_action = _terminal_action_or_fallback(blind_action, terminal_resent, actions)
+                        if fallback_action != blind_action:
+                            ctx.log.warning(
+                                "终局动作[%s]重发 %d 次仍未生效，回退[%s]",
+                                blind_action,
+                                terminal_resent,
+                                fallback_action,
+                            )
+                            blind_action = fallback_action
                         if blind_action in ("showdown", "open"):
                             # 去重：同一轮相同终局动作已发送过(CSRF失效后循环)则跳过
                             if tracker.last_terminal_action == blind_action:

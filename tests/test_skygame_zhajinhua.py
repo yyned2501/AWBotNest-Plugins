@@ -8,6 +8,7 @@ import pytest
 from plugins.skyGame.games.zhajinhua import gen_zjh_prob, zjh_prob
 from plugins.skyGame.games.zhajinhua.zhajinhua import (
     _FOLD_CONFIRM_MAX_RETRIES,
+    _TERMINAL_RESEND_MAX,
     _acquire_hand_after_peek,
     _act_on_hand,
     _actual_win_probability,
@@ -51,6 +52,8 @@ from plugins.skyGame.games.zhajinhua.zhajinhua import (
     _SeenRange,
     _self_hand,
     _snapshot_for_actor,
+    _terminal_action_ineffective,
+    _terminal_action_or_fallback,
     _terminal_ev_call,
     _terminal_ev_call_multi,
     _terminal_ev_decision,
@@ -1935,17 +1938,43 @@ def test_opponent_raise_threshold_escalates() -> None:
 
 
 def test_terminal_ev_call_opponent_fold_wins_pot() -> None:
-    """对手弃牌分支：我方独赢当前底池，净收益 = pot − 已投入。"""
-    # 纯弃牌（P_fold=1）深度 1：直接终局
+    """蒙牌对手弃牌分支：我方独赢当前底池，净收益 = pot − 已投入。
+
+    v1.16.6 起看牌对手（opponent_seen=True）不进入 fold 分支（门槛由继续下注反推，
+    已推断强牌不会对我方跟注弃牌），fold-win 只对蒙牌对手适用。
+    """
+    # 纯弃牌（P_fold=1）深度 1：蒙牌对手直接终局，我独赢底池
     game = _game(
         {"id": "self", "alive": True, "isSelf": True, "seen": False},
         {"id": "opp", "alive": True, "seen": False},
         pot=10000,
         call_bet=100,
     )
-    ev = _terminal_ev_call(game, 0.5, _RoundTracker(), 1, None, (1.0, 0.0, 0.0), 10000, 0, 0.5)
-    # 对手弃牌 → 我独赢 10000，成本 0
+    ev = _terminal_ev_call(game, 0.5, _RoundTracker(), 1, None, (1.0, 0.0, 0.0), 10000, 0, 0.5, 0, None, False)
+    # 蒙牌对手弃牌 → 我独赢 10000，成本 0
     assert ev == pytest.approx(10000)
+
+
+def test_terminal_ev_call_seen_opponent_never_folds() -> None:
+    """回归（线上 #6109）：看牌对手不按历史弃牌率弃牌，fold-win 不虚高盲跟 EV。
+
+    三个看牌对手门槛 0.94+（真实胜率≈1%）时，旧实现把画像历史弃牌率（如 62%）
+    当成「会对我方跟注弃牌」，白赢底池分支把盲跟 EV 虚高到 +45725 误开牌。
+    修复后看牌对手 fold 清零、按 call/raise 重归一化：同样纯弃牌画像，看牌对手
+    被视为必跟（fold 清零后 call 归一为 1），EV 落到负值（胜率≈1% 不该跟）。
+    """
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": False},
+        {"id": "opp", "alive": True, "seen": True},
+        pot=84000,
+        call_bet=3000,
+        ante=3000,
+    )
+    # 纯弃牌画像 (1.0, 0.0, 0.0)：看牌对手 fold 清零后归一为必跟，不再是白赢底池
+    ev_seen = _terminal_ev_call(game, 0.95, _RoundTracker(), 1, None, (1.0, 0.0, 0.0), 84000, 0, 0.01, 0, 3000, True)
+    # 看牌对手必跟 → 摊牌按 1% 胜率：0.01×(84000+1500+3000)−1500 ≈ −595，绝非白赢 84000
+    assert ev_seen < 0
+    assert ev_seen == pytest.approx(0.01 * (84000 + 1500 + 3000) - 1500)
 
 
 def test_terminal_ev_call_depth_cutoff_showdown() -> None:
@@ -2909,6 +2938,66 @@ def test_terminal_ev_call_multi_three_blind_never_fold_not_inflated() -> None:
     assert ev1 < ev2 < ev3
     assert ev3 < 0.6 * 20000
     assert ev3 - ev1 < 0.3 * ev3
+
+
+def test_terminal_ev_call_multi_seen_opponents_no_fold_win() -> None:
+    """回归（线上 #6109 多人版）：三个看牌对手门槛 0.94+ 时盲跟 EV 必须为负。
+
+    旧实现 EV 被看牌对手的画像历史弃牌率虚高到 +45725（白赢底池分支），误判应战开牌。
+    修复后看牌对手 fold 清零，EV 收敛到「胜率×底池−成本」量级（胜率≈1.3% → 负值），
+    决策树不会再输出盲跟/应战，改为看牌或弃牌。
+    """
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": False},
+        {"id": "45", "alive": True, "seen": True},
+        {"id": "272", "alive": True, "seen": True},
+        {"id": "612", "alive": True, "seen": True},
+        pot=84000,
+        call_bet=3000,
+        ante=3000,
+    )
+    opps = [
+        _BlindOpponent("45", True, (0.43, 0.57, 0.00), 0.948),
+        _BlindOpponent("272", True, (0.30, 0.43, 0.27), 0.956),
+        _BlindOpponent("612", True, (0.62, 0.29, 0.08), 0.938),
+    ]
+    win = _opponents_win_probability(opps)
+    assert win < 0.05  # 三看牌强对手，真实胜率极低
+    for depth in (1, 2, 3):
+        ev = _terminal_ev_call_multi(game, 0.5, _RoundTracker(), depth, None, opps, 84000, 0, 3000)
+        assert ev < 0, f"depth={depth} 盲跟 EV 应为负，实际 {ev}"
+
+
+def test_terminal_action_ineffective_detects_unexecuted_action() -> None:
+    """回归（线上 #6109）：终局动作已发但仍是我方回合且动作仍可用 → 判定未生效。
+
+    旧实现用 last_terminal_action 永久去重，门户未执行 showdown/open（多人局常不开放）
+    时每轮都被「已发送过」拦截、卡死到行动超时。判定未生效后调用方清除标记允许重发。
+    """
+    # 未生效：仍是己方回合、存活、动作仍在可用列表
+    assert _terminal_action_ineffective("showdown", True, True, ["fold", "showdown"]) is True
+    assert _terminal_action_ineffective("open", True, True, ["fold", "open"]) is True
+    # 已生效或无需重发的情形 → False
+    assert _terminal_action_ineffective(None, True, True, ["fold", "showdown"]) is False  # 没发过
+    assert _terminal_action_ineffective("showdown", True, False, ["fold", "showdown"]) is False  # 非己方回合
+    assert _terminal_action_ineffective("showdown", False, True, ["fold", "showdown"]) is False  # 已出局
+    assert _terminal_action_ineffective("showdown", True, True, ["fold", "call"]) is False  # 动作已不可用
+
+
+def test_terminal_action_or_fallback_caps_resend_then_peeks() -> None:
+    """回归：终局动作重发达到 _TERMINAL_RESEND_MAX 后回退看牌（无看牌退盲跟），防无限重发。"""
+    actions = ["fold", "call", "peek", "showdown"]
+    # 未超限 → 原样返回终局动作
+    assert _terminal_action_or_fallback("showdown", 0, actions) == "showdown"
+    assert _terminal_action_or_fallback("open", _TERMINAL_RESEND_MAX - 1, actions) == "open"
+    # 超限 → 回退看牌
+    assert _terminal_action_or_fallback("showdown", _TERMINAL_RESEND_MAX, actions) == "peek"
+    assert _terminal_action_or_fallback("open", _TERMINAL_RESEND_MAX + 2, actions) == "peek"
+    # 超限但无看牌 → 退盲跟
+    assert _terminal_action_or_fallback("showdown", _TERMINAL_RESEND_MAX, ["fold", "call", "showdown"]) == "call"
+    # 非终局动作不受影响
+    assert _terminal_action_or_fallback("call", _TERMINAL_RESEND_MAX + 5, actions) == "call"
+    assert _terminal_action_or_fallback("peek", _TERMINAL_RESEND_MAX + 5, actions) == "peek"
 
 
 def test_terminal_ev_decision_routes_multi_opponents() -> None:
