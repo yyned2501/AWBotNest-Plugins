@@ -11,11 +11,13 @@
 #       可遛 且未达上限 → 遛马（赚银元+经验）
 #       官方赛可报名 →（可选）免费报名
 #   - 结果通知用服务端返回的 result.message
+#   - 遛马连续失败熔断按「天」自动重置（kv 带日期），避免历史失败永久禁用遛马
 
 from __future__ import annotations
 
 import asyncio
 import datetime
+import json
 
 from . import hdsky_auth
 from .hdsky import HdskyClient, request_key
@@ -43,6 +45,31 @@ async def _notify_result(ctx: object, cfg: dict, payload: dict, fallback: str) -
         await ctx.notify(f"🐴 {msg}")
     else:
         await ctx.notify(f"🐴 {msg}", level="warning")
+
+
+def _walk_fail_count(kv: object, key: str, today: str) -> int:
+    """读取遛马连续失败计数，跨天自动重置为 0。
+
+    kv 存 JSON 字符串 ``{"count": N, "date": "YYYY-MM-DD"}``；兼容旧版纯数字
+    （无日期，历史遗留熔断）——视为跨天自动重置。否则熔断后只能在成功遛马时
+    清零，而计数到 3 就不再发 walk，形成永久死锁（线上 08-01 遗留 count=3，
+    之后遛马永不执行、体力一直满）。
+    """
+    raw = kv.get(key, None)
+    count, date = 0, ""
+    if isinstance(raw, dict):
+        count = int(raw.get("count", 0) or 0)
+        date = str(raw.get("date", "") or "")
+    elif isinstance(raw, str) and raw.lstrip().startswith("{"):
+        try:
+            parsed = json.loads(raw)
+            count = int(parsed.get("count", 0) or 0)
+            date = str(parsed.get("date", "") or "")
+        except (ValueError, TypeError):
+            count, date = 0, ""
+    elif raw:
+        count = int(raw)
+    return 0 if date != today else count
 
 
 async def _care_once(ctx: object, cfg: dict, client: HdskyClient) -> None:
@@ -98,9 +125,10 @@ async def _care_once(ctx: object, cfg: dict, client: HdskyClient) -> None:
     walk_max = int(stats.get("walkMax", 0) or 0)
     if cfg.get("horse_auto_walk", True) and st.get("canWalk") and walk_count < walk_max:
         walk_fail_key = "horse:walk_consecutive_failures"
-        walk_fail_count = int(ctx.kv.get(walk_fail_key, 0) or 0)
+        today = datetime.date.today().isoformat()
+        walk_fail_count = _walk_fail_count(ctx.kv, walk_fail_key, today)
         if walk_fail_count >= 3:
-            ctx.log.debug("遛马连续失败 %d 次，跳过本轮", walk_fail_count)
+            ctx.log.debug("遛马今日连续失败 %d 次，跳过本轮（次日自动恢复）", walk_fail_count)
             return
         # 门户遛马冷却约 45 分钟，冷却期间 canWalk 仍为 true；靠上次响应的 remainMs 退避，
         # 避免每轮轮询都撞冷却、刷出大量看似失败的「遛马」日志
@@ -118,11 +146,11 @@ async def _care_once(ctx: object, cfg: dict, client: HdskyClient) -> None:
                 ctx.kv.set(cooldown_until_key, now_ms + remain_ms)
             ctx.log.debug("遛马冷却中，不计数: %s", result.get("message", ""))
         elif result.get("ok", r.get("ok", False)):
-            ctx.kv.set(walk_fail_key, 0)
+            ctx.kv.set(walk_fail_key, json.dumps({"count": 0, "date": today}))
             ctx.kv.delete(cooldown_until_key)
             ctx.log.info("遛马成功（今日 %d/%d）", walk_count + 1, walk_max)
         else:
-            ctx.kv.set(walk_fail_key, walk_fail_count + 1)
+            ctx.kv.set(walk_fail_key, json.dumps({"count": walk_fail_count + 1, "date": today}))
             ctx.log.warning("遛马失败: %s", result.get("message") or result.get("code") or "未知")
         await _notify_result(ctx, cfg, r, "遛马失败")
         return
