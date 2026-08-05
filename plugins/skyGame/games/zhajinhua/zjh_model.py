@@ -31,6 +31,10 @@ from .zjh_state import (
 # 双击确认弃牌的最大连续重试次数：超过即放弃本局确认，避免门户持续拒绝时无限重发。
 _FOLD_CONFIRM_MAX_RETRIES = 3
 
+# 终局动作（showdown/open）未生效时的最大重发次数：超过即回退看牌，
+# 防门户持续不执行（如多人局不支持 open）时无限重发。
+_TERMINAL_RESEND_MAX = 3
+
 
 @dataclass(frozen=True)
 class _OpponentSnapshot:
@@ -642,6 +646,18 @@ def _iter_action_choices(
     choices: list[list[tuple[str, float]]] = []
     for opp in opponents:
         p_fold, p_call, p_raise = opp.action_probs
+        if opp.op_seen:
+            # 看牌对手不进入 fold 分支：其门槛由「继续下注」反推，既然继续就意味着
+            # 牌力 ≥ 门槛（强牌），面对我方跟注不会弃牌。画像历史弃牌率含「弱牌看牌
+            # 后弃」样本，不适用于已推断强牌的当前局面——照用会把「对手弃牌白赢底池」
+            # 分支计入盲跟 EV，胜率≈1% 也算出正 EV 误开牌（线上 #6109）。清零 fold
+            # 后按 call/raise 重归一化，保持对手动作概率和为 1。
+            p_fold = 0.0
+            cont = p_call + p_raise
+            if cont > 0:
+                p_call, p_raise = p_call / cont, p_raise / cont
+            else:
+                p_call, p_raise = 1.0, 0.0  # 防御：看牌且继续的对手至少会跟注
         opp_choices: list[tuple[str, float]] = []
         if p_fold > 0:
             opp_choices.append(("fold", p_fold))
@@ -1010,6 +1026,15 @@ def _terminal_ev_call(
         return 0.0
     # 归一化，防御配置/画像脏数据
     p_fold, p_call, p_raise = p_fold / total_p, p_call / total_p, p_raise / total_p
+    if opponent_seen:
+        # 看牌对手不进入 fold 分支（同 _iter_action_choices）：门槛由继续下注反推，
+        # 已推断强牌不会对我方跟注弃牌；画像历史弃牌率会虚高「白赢底池」分支。
+        p_fold = 0.0
+        cont = p_call + p_raise
+        if cont > 0:
+            p_call, p_raise = p_call / cont, p_raise / cont
+        else:
+            p_call, p_raise = 1.0, 0.0
 
     if depth <= 0:
         # 截断 = 强制摊牌（showdown）：不再下注，按当前胜率摊牌。
