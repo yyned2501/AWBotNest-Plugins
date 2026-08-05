@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 # juai_checkin 单元测试
 #
-# 覆盖：多账号配置解析（含旧版兼容）、邮箱打码、单账号签到全流程
-# （未签到→成功 / 状态已签到 / POST 返回已签到 / 登录失败 / 签到失败 /
-# 站点未启用签到 / 非 JSON 响应）、_run 多账号汇总与网络异常收敛
-# （正向 + 异常路径）。签到契约见 docs/juai-api.md。
+# 覆盖：多账号配置解析（含旧版兼容）、邮箱打码、额度单位换算展示、
+# 单账号签到全流程（未签到→成功 / 状态已签到 / POST 返回已签到 / 登录失败 /
+# 签到失败 / 站点未启用签到 / 非 JSON 响应 / 余额读取失败降级）、
+# _run 多账号汇总（含剩余额度合计）与网络异常收敛（正向 + 异常路径）。
+# 签到契约见 docs/juai-api.md。
 
 from __future__ import annotations
 
@@ -18,6 +19,8 @@ from plugins.juai_checkin import (
     _bounded_int,
     _checkin_one,
     _configured_accounts,
+    _fetch_quota_unit,
+    _format_quota,
     _masked_email,
     _run,
 )
@@ -74,9 +77,13 @@ _STATUS_ALREADY = {
     "data": {"enabled": True, "stats": {"checked_in_today": True, "total_checkins": 5}},
 }
 _STATUS_DISABLED = {"success": True, "message": None, "data": {"enabled": False, "stats": {}}}
-_CHECKIN_OK = {"success": True, "message": None, "data": {"quota_awarded": 1234567}}
+_CHECKIN_OK = {"success": True, "message": None, "data": {"quota_awarded": 1183945}}
 _CHECKIN_ALREADY = {"success": False, "message": "今日已签到"}
 _CHECKIN_FAIL = {"success": False, "message": "签到间隔过短"}
+_SELF_OK = {"success": True, "data": {"quota": 9514057}}
+# 实测单位：quota_per_unit=500000，quota_display_type=USD（50 万额度 = $1）
+PER_UNIT = 500000.0
+DISPLAY_TYPE = "USD"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -128,6 +135,27 @@ def test_bounded_int() -> None:
     assert _bounded_int(None, 7, 0, 59) == 7
 
 
+def test_format_quota_by_unit() -> None:
+    # 平台实际单位：500000 额度 = $1
+    assert _format_quota(1183945, PER_UNIT, DISPLAY_TYPE) == "$2.37"
+    assert _format_quota(500000, PER_UNIT, DISPLAY_TYPE) == "$1.00"
+    assert _format_quota(1116266403, PER_UNIT, DISPLAY_TYPE) == "$2,232.53"
+    assert _format_quota(100000, PER_UNIT, "CNY") == "¥0.20"
+    # 换算系数未知 → 退回原始值
+    assert _format_quota(1183945, 0.0, "") == "1,183,945 额度"
+
+
+async def test_fetch_quota_unit_success_and_fallback() -> None:
+    status_ok = {"success": True, "data": {"quota_per_unit": 500000, "quota_display_type": "USD"}}
+    ok = _FakeClient([("GET", "/api/status", status_ok)])
+    assert await _fetch_quota_unit(ok) == (PER_UNIT, DISPLAY_TYPE)  # type: ignore[arg-type]
+    # 缺字段 / 网络错误 → (0, "") 由调用方退回原始额度展示
+    empty = _FakeClient([("GET", "/api/status", {"success": True, "data": {}})])
+    assert await _fetch_quota_unit(empty) == (0.0, "")  # type: ignore[arg-type]
+    broken = _FakeClient([("GET", "/api/status", httpx.ConnectError("boom"))])
+    assert await _fetch_quota_unit(broken) == (0.0, "")  # type: ignore[arg-type]
+
+
 # ─────────────────────────────────────────────────────────────
 # 单账号签到流程（正向 + 异常）
 # ─────────────────────────────────────────────────────────────
@@ -139,17 +167,20 @@ async def test_checkin_one_success() -> None:
             ("POST", "/api/user/login", _LOGIN_OK),
             ("GET", "/api/user/checkin", _STATUS_NOT_YET),
             ("POST", "/api/user/checkin", _CHECKIN_OK),
+            ("GET", "/api/user/self", _SELF_OK),
         ]
     )
-    result = await _checkin_one(client, "a@x.com", "pw")  # type: ignore[arg-type]
+    result = await _checkin_one(client, "a@x.com", "pw", PER_UNIT, DISPLAY_TYPE)  # type: ignore[arg-type]
     assert result["ok"] is True
     assert result["already"] is False
-    assert "1,234,567" in result["message"]
-    assert result["quota"] == 1234567
-    # 鉴权契约：登录用 username/password；checkin 带 New-Api-User 头（登录返回的 id）
+    assert "签到成功，获得 $2.37" in result["message"]  # 按平台单位展示，不是原始额度值
+    assert "剩余 $19.03" in result["message"]
+    assert result["quota"] == 1183945
+    assert result["balance"] == 9514057
+    # 鉴权契约：登录用 username/password；checkin/self 带 New-Api-User 头
     assert client.calls[0]["json"] == {"username": "a@x.com", "password": "pw"}
     assert client.calls[1]["headers"]["New-Api-User"] == "u-123"
-    assert client.calls[2]["headers"]["New-Api-User"] == "u-123"
+    assert client.calls[3]["headers"]["New-Api-User"] == "u-123"
 
 
 async def test_checkin_one_already_in_status_skips_post() -> None:
@@ -157,13 +188,16 @@ async def test_checkin_one_already_in_status_skips_post() -> None:
         [
             ("POST", "/api/user/login", _LOGIN_OK),
             ("GET", "/api/user/checkin", _STATUS_ALREADY),
+            ("GET", "/api/user/self", _SELF_OK),
         ]
     )
-    result = await _checkin_one(client, "a@x.com", "pw")  # type: ignore[arg-type]
+    result = await _checkin_one(client, "a@x.com", "pw", PER_UNIT, DISPLAY_TYPE)  # type: ignore[arg-type]
     assert result["ok"] is True
     assert result["already"] is True
     assert "累计签到 5 次" in result["message"]
-    assert len(client.calls) == 2  # 状态已签到则不再 POST
+    assert "剩余 $19.03" in result["message"]
+    # 状态已签到则不再 POST，但仍读余额
+    assert [c["method"] for c in client.calls] == ["POST", "GET", "GET"]
 
 
 async def test_checkin_one_post_returns_already() -> None:
@@ -173,16 +207,17 @@ async def test_checkin_one_post_returns_already() -> None:
             ("POST", "/api/user/login", _LOGIN_OK),
             ("GET", "/api/user/checkin", _STATUS_NOT_YET),
             ("POST", "/api/user/checkin", _CHECKIN_ALREADY),
+            ("GET", "/api/user/self", _SELF_OK),
         ]
     )
-    result = await _checkin_one(client, "a@x.com", "pw")  # type: ignore[arg-type]
+    result = await _checkin_one(client, "a@x.com", "pw", PER_UNIT, DISPLAY_TYPE)  # type: ignore[arg-type]
     assert result["ok"] is True
     assert result["already"] is True
 
 
 async def test_checkin_one_login_failed() -> None:
     client = _FakeClient([("POST", "/api/user/login", _LOGIN_FAIL)])
-    result = await _checkin_one(client, "a@x.com", "bad")  # type: ignore[arg-type]
+    result = await _checkin_one(client, "a@x.com", "bad", PER_UNIT, DISPLAY_TYPE)  # type: ignore[arg-type]
     assert result["ok"] is False
     assert "登录失败" in result["message"]
     assert "用户名或密码错误" in result["message"]
@@ -202,12 +237,14 @@ async def test_checkin_one_checkin_failed() -> None:
             ("POST", "/api/user/login", _LOGIN_OK),
             ("GET", "/api/user/checkin", _STATUS_NOT_YET),
             ("POST", "/api/user/checkin", _CHECKIN_FAIL),
+            ("GET", "/api/user/self", _SELF_OK),
         ]
     )
-    result = await _checkin_one(client, "a@x.com", "pw")  # type: ignore[arg-type]
+    result = await _checkin_one(client, "a@x.com", "pw", PER_UNIT, DISPLAY_TYPE)  # type: ignore[arg-type]
     assert result["ok"] is False
     assert "签到失败" in result["message"]
     assert "签到间隔过短" in result["message"]
+    assert "剩余 $19.03" in result["message"]  # 签到失败也统计余额
 
 
 async def test_checkin_one_site_disabled() -> None:
@@ -220,6 +257,21 @@ async def test_checkin_one_site_disabled() -> None:
     result = await _checkin_one(client, "a@x.com", "pw")  # type: ignore[arg-type]
     assert result["ok"] is False
     assert "未启用签到" in result["message"]
+
+
+async def test_checkin_one_balance_fetch_failed_degrades() -> None:
+    # 余额接口失败不影响签到结果，只是文案里没有「剩余」
+    client = _FakeClient(
+        [
+            ("POST", "/api/user/login", _LOGIN_OK),
+            ("GET", "/api/user/checkin", _STATUS_ALREADY),
+            ("GET", "/api/user/self", {"success": False, "message": "Unauthorized"}),
+        ]
+    )
+    result = await _checkin_one(client, "a@x.com", "pw", PER_UNIT, DISPLAY_TYPE)  # type: ignore[arg-type]
+    assert result["ok"] is True
+    assert "剩余" not in result["message"]
+    assert "balance" not in result
 
 
 async def test_checkin_one_non_json_response() -> None:
@@ -271,7 +323,17 @@ class _FakeCtx:
         self.notifications.append((level, message))
 
 
-async def test_run_multi_account_summary(monkeypatch: pytest.MonkeyPatch) -> None:
+def _patch_run_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """替换 _run_lock 与单位查询，避免真实网络请求。"""
+    monkeypatch.setattr("plugins.juai_checkin._run_lock", None)
+
+    async def fake_fetch_unit(client: Any) -> tuple[float, str]:
+        return PER_UNIT, DISPLAY_TYPE
+
+    monkeypatch.setattr("plugins.juai_checkin._fetch_quota_unit", fake_fetch_unit)
+
+
+async def test_run_multi_account_summary_with_balance(monkeypatch: pytest.MonkeyPatch) -> None:
     ctx = _FakeCtx(
         {
             "accounts": [{"email": "a@x.com", "password": "p1"}, {"email": "b@x.com", "password": "p2"}],
@@ -279,13 +341,17 @@ async def test_run_multi_account_summary(monkeypatch: pytest.MonkeyPatch) -> Non
         }
     )
 
-    async def fake_checkin_one(client: Any, email: str, password: str) -> dict[str, Any]:
+    async def fake_checkin_one(
+        client: Any, email: str, password: str, per_unit: float = 0.0, display_type: str = ""
+    ) -> dict[str, Any]:
+        assert per_unit == PER_UNIT  # 单位信息已透传
         if email == "a@x.com":
-            return {"ok": True, "already": False, "message": "签到成功，获得 100 额度"}
-        return {"ok": False, "already": False, "message": "签到失败：网络异常"}
+            return {"ok": True, "already": False, "message": "签到成功 · 剩余 $2.00", "balance": 1000000}
+        # 签到失败但登录成功 → 仍有余额统计
+        return {"ok": False, "already": False, "message": "签到失败：网络异常 · 剩余 $1.00", "balance": 500000}
 
     monkeypatch.setattr("plugins.juai_checkin._checkin_one", fake_checkin_one)
-    monkeypatch.setattr("plugins.juai_checkin._run_lock", None)
+    _patch_run_env(monkeypatch)
 
     result = await _run(ctx, "测试")
     assert result["ok"] is False
@@ -293,6 +359,8 @@ async def test_run_multi_account_summary(monkeypatch: pytest.MonkeyPatch) -> Non
     assert "成功 1，失败 1" in result["message"]
     assert "[a***@x.com]" in result["message"]
     assert "[b***@x.com]" in result["message"]
+    # 多账号剩余额度合计（$2.00 + $1.00）
+    assert "账号剩余额度合计：$3.00" in result["message"]
     # 部分成功 → warning 级通知
     assert ctx.notifications and ctx.notifications[0][0] == "warning"
     # 历史与状态落盘
@@ -302,9 +370,25 @@ async def test_run_multi_account_summary(monkeypatch: pytest.MonkeyPatch) -> Non
     assert ctx.updated["checkin_history"]
 
 
+async def test_run_single_account_no_total_line(monkeypatch: pytest.MonkeyPatch) -> None:
+    ctx = _FakeCtx({"accounts": [{"email": "a@x.com", "password": "p1"}]})
+
+    async def fake_checkin_one(
+        client: Any, email: str, password: str, per_unit: float = 0.0, display_type: str = ""
+    ) -> dict[str, Any]:
+        return {"ok": True, "already": True, "message": "今日已签到 · 剩余 $3.00", "balance": 1500000}
+
+    monkeypatch.setattr("plugins.juai_checkin._checkin_one", fake_checkin_one)
+    _patch_run_env(monkeypatch)
+
+    result = await _run(ctx, "测试")
+    assert result["ok"] is True
+    assert "账号剩余额度合计" not in result["message"]  # 单账号不重复合计
+
+
 async def test_run_no_accounts(monkeypatch: pytest.MonkeyPatch) -> None:
     ctx = _FakeCtx({"accounts": []})
-    monkeypatch.setattr("plugins.juai_checkin._run_lock", None)
+    _patch_run_env(monkeypatch)
     result = await _run(ctx, "测试")
     assert result["ok"] is False
     assert "添加至少一个" in result["message"]
@@ -314,12 +398,14 @@ async def test_run_no_accounts(monkeypatch: pytest.MonkeyPatch) -> None:
 
 async def test_run_network_error_isolated(monkeypatch: pytest.MonkeyPatch) -> None:
     ctx = _FakeCtx({"accounts": [{"email": "a@x.com", "password": "p1"}], "notify": False})
-    monkeypatch.setattr("plugins.juai_checkin._run_lock", None)
 
-    async def fake_checkin_one(client: Any, email: str, password: str) -> dict[str, Any]:
+    async def fake_checkin_one(
+        client: Any, email: str, password: str, per_unit: float = 0.0, display_type: str = ""
+    ) -> dict[str, Any]:
         raise httpx.ConnectError("boom")
 
     monkeypatch.setattr("plugins.juai_checkin._checkin_one", fake_checkin_one)
+    _patch_run_env(monkeypatch)
     result = await _run(ctx, "测试")
     assert result["ok"] is False
     assert "网络请求失败" in result["accounts"][0]["message"]

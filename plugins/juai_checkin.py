@@ -6,7 +6,9 @@
 #   1. POST /api/user/login 登录，Set-Cookie: session（30 天）
 #   2. GET  /api/user/checkin 查签到状态（需 session cookie + New-Api-User 头）
 #   3. POST /api/user/checkin 执行签到；「今日已签到」错误视为已完成
-# 支持多账号列表、定时签到、手动触发、结果汇总通知。
+#   4. GET  /api/user/self 读剩余额度；GET /api/status 读额度单位换算
+#      （quota_per_unit=500000，quota_display_type=USD，即 50 万额度 = $1）
+# 支持多账号列表、定时签到、手动触发、结果汇总（含每账号剩余额度）通知。
 # =============================================================================
 
 from __future__ import annotations
@@ -20,10 +22,15 @@ import httpx
 __plugin__ = {
     "name": "JUAI 自动签到",
     "id": "juai_checkin",
-    "version": "1.1.0",
+    "version": "1.2.0",
     "author": "Yy",
     "description": "每日自动签到 juai 平台（多账号），纯 REST API 签到无需浏览器。",
     "changelog": (
+        "v1.2.0 更新：\n"
+        "- 额度按平台实际单位显示：从 /api/status 读换算系数（quota_per_unit），"
+        "签到所得不再显示内部原始值（如 1183945 额度），改按美元显示（$2.37）\n"
+        "- 新增每账号剩余额度统计：签到后读 /api/user/self 的 quota，"
+        "每个账号结果附「剩余 $X」，汇总行给出所有账号合计\n"
         "v1.1.0 更新：\n"
         "- 支持多账号签到：账号改为列表配置，逐个登录签到并汇总结果\n"
         "- 移除代码内硬编码账号密码，一律从配置读取（安全红线）；"
@@ -180,8 +187,57 @@ def _safe_json(resp: httpx.Response) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-async def _checkin_one(client: httpx.AsyncClient, email: str, password: str) -> dict[str, Any]:
-    """单账号签到：登录 → 查状态 → 未签到才 POST。返回 {ok, already, message}。"""
+_QUOTA_SYMBOLS = {"USD": "$", "CNY": "¥"}
+
+
+def _format_quota(quota: int | float, per_unit: float, display_type: str) -> str:
+    """内部额度值 → 平台实际单位的展示文本；换算系数未知时退回原始值。"""
+    if per_unit > 0:
+        symbol = _QUOTA_SYMBOLS.get(display_type, "")
+        return f"{symbol}{quota / per_unit:,.2f}"
+    return f"{quota:,.0f} 额度"
+
+
+async def _fetch_quota_unit(client: httpx.AsyncClient) -> tuple[float, str]:
+    """读 /api/status 的 quota_per_unit / quota_display_type（公开接口无需鉴权）。
+
+    失败返回 (0, "")，调用方退回原始额度值展示。
+    """
+    try:
+        data = _safe_json(await client.get("/api/status"))
+    except httpx.HTTPError:
+        return 0.0, ""
+    status = data.get("data") or {}
+    per_unit = status.get("quota_per_unit")
+    display_type = str(status.get("quota_display_type") or "")
+    if isinstance(per_unit, (int, float)) and per_unit > 0:
+        return float(per_unit), display_type
+    return 0.0, ""
+
+
+async def _fetch_balance(client: httpx.AsyncClient, user_id: str) -> int | float | None:
+    """读 /api/user/self 的剩余额度（quota）；失败返回 None，不阻断签到流程。"""
+    try:
+        data = _safe_json(await client.get("/api/user/self", headers={"New-Api-User": user_id}))
+    except httpx.HTTPError:
+        return None
+    if not data.get("success"):
+        return None
+    quota = (data.get("data") or {}).get("quota")
+    return quota if isinstance(quota, (int, float)) else None
+
+
+async def _checkin_one(
+    client: httpx.AsyncClient,
+    email: str,
+    password: str,
+    per_unit: float = 0.0,
+    display_type: str = "",
+) -> dict[str, Any]:
+    """单账号签到：登录 → 查状态 → 未签到才 POST → 读剩余额度。
+
+    返回 {ok, already, message}，登录成功的账号另附 balance（剩余额度原始值）。
+    """
     login_resp = await client.post("/api/user/login", json={"username": email, "password": password})
     login_data = _safe_json(login_resp)
     if not login_data.get("success"):
@@ -192,8 +248,10 @@ async def _checkin_one(client: httpx.AsyncClient, email: str, password: str) -> 
         return {"ok": False, "already": False, "message": "登录成功但未返回用户 ID，接口可能已变更"}
     headers = {"New-Api-User": user_id}
 
+    item: dict[str, Any]
     status_resp = await client.get("/api/user/checkin", headers=headers)
     status_data = _safe_json(status_resp)
+    already = False
     if status_data.get("success"):
         checkin_data = status_data.get("data") or {}
         if not checkin_data.get("enabled", True):
@@ -202,23 +260,35 @@ async def _checkin_one(client: httpx.AsyncClient, email: str, password: str) -> 
         if stats.get("checked_in_today"):
             total = stats.get("total_checkins")
             suffix = f"，累计签到 {total} 次" if isinstance(total, int) else ""
-            return {"ok": True, "already": True, "message": f"今日已签到{suffix}"}
+            item = {"ok": True, "already": True, "message": f"今日已签到{suffix}"}
+            already = True
+    if not already:
+        checkin_resp = await client.post("/api/user/checkin", headers=headers, json={})
+        checkin_data = _safe_json(checkin_resp)
+        if checkin_data.get("success"):
+            awarded = (checkin_data.get("data") or {}).get("quota_awarded")
+            if isinstance(awarded, (int, float)):
+                awarded_text = _format_quota(awarded, per_unit, display_type)
+                item = {"ok": True, "already": False, "message": f"签到成功，获得 {awarded_text}", "quota": awarded}
+            else:
+                item = {"ok": True, "already": False, "message": "签到成功"}
+        else:
+            message = str(checkin_data.get("message") or "签到失败")
+            if "已签到" in message:
+                item = {"ok": True, "already": True, "message": f"今日已签到（{message}）"}
+            else:
+                item = {"ok": False, "already": False, "message": f"签到失败：{message}"}
 
-    checkin_resp = await client.post("/api/user/checkin", headers=headers, json={})
-    checkin_data = _safe_json(checkin_resp)
-    if checkin_data.get("success"):
-        awarded = (checkin_data.get("data") or {}).get("quota_awarded")
-        if isinstance(awarded, int):
-            return {"ok": True, "already": False, "message": f"签到成功，获得 {awarded:,} 额度", "quota": awarded}
-        return {"ok": True, "already": False, "message": "签到成功"}
-    message = str(checkin_data.get("message") or "签到失败")
-    if "已签到" in message:
-        return {"ok": True, "already": True, "message": f"今日已签到（{message}）"}
-    return {"ok": False, "already": False, "message": f"签到失败：{message}"}
+    # 登录成功的账号都统计剩余额度（含签到失败/已签到），追加到结果文案
+    balance = await _fetch_balance(client, user_id)
+    if isinstance(balance, (int, float)):
+        item["balance"] = balance
+        item["message"] += f" · 剩余 {_format_quota(balance, per_unit, display_type)}"
+    return item
 
 
 async def _run(ctx: Any, source: str) -> dict[str, Any]:
-    """完整签到流程：逐账号签到、记录历史、汇总通知。"""
+    """完整签到流程：逐账号签到、记录历史、汇总通知（含每账号剩余额度）。"""
     global _run_lock
     if _run_lock is None:
         _run_lock = asyncio.Lock()
@@ -231,6 +301,8 @@ async def _run(ctx: Any, source: str) -> dict[str, Any]:
             result: dict[str, Any] = {"ok": False, "message": "请先添加至少一个 juai 签到账号"}
         else:
             ctx.log.info("开始%s签到，共 %s 个账号", source, len(accounts))
+            async with httpx.AsyncClient(base_url=BASE_URL, timeout=REQUEST_TIMEOUT) as client:
+                per_unit, display_type = await _fetch_quota_unit(client)
             account_results: list[dict[str, Any]] = []
             for index, account in enumerate(accounts, 1):
                 email = account["email"]
@@ -238,7 +310,7 @@ async def _run(ctx: Any, source: str) -> dict[str, Any]:
                 ctx.log.info("[签到][%s/%s][%s] 开始", index, len(accounts), masked)
                 try:
                     async with httpx.AsyncClient(base_url=BASE_URL, timeout=REQUEST_TIMEOUT) as client:
-                        item = await _checkin_one(client, email, account["password"])
+                        item = await _checkin_one(client, email, account["password"], per_unit, display_type)
                 except httpx.HTTPError as exc:
                     item = {"ok": False, "already": False, "message": f"网络请求失败：{exc}"}
                     ctx.log.error("[签到][%s] 请求异常：%r", masked, exc)
@@ -252,10 +324,14 @@ async def _run(ctx: Any, source: str) -> dict[str, Any]:
                 f"[{_masked_email(account['email'])}] {item['message']}"
                 for account, item in zip(accounts, account_results, strict=True)
             )
+            message = f"{summary}\n{details}"
+            balances = [item["balance"] for item in account_results if isinstance(item.get("balance"), (int, float))]
+            if len(balances) >= 2:
+                message += f"\n账号剩余额度合计：{_format_quota(sum(balances), per_unit, display_type)}"
             result = {
                 "ok": failed_count == 0,
                 "partial": success_count > 0 and failed_count > 0,
-                "message": f"{summary}\n{details}",
+                "message": message,
                 "accounts": account_results,
             }
 
