@@ -72,6 +72,24 @@
   字段名来自初版插件代码，当日签到已由其他途径完成、未能实测完整成功响应体；
   间接证据：状态接口 records 中当日 `quota_awarded` 已入账。插件对该字段做了缺失兜底。
 
+## 额度单位换算（已确认）
+
+`GET /api/status`（公开接口，无需鉴权）：
+
+```json
+{"success": true, "data": {"quota_per_unit": 500000, "quota_display_type": "USD"}}
+```
+
+- 内部额度值 ÷ `quota_per_unit` = 平台展示金额；本站 50 万额度 = $1（USD）。
+- 插件每次运行读一次该接口，金额按 `$X.XX` 展示；接口异常时退回原始额度值。
+
+## 用户信息与剩余额度（已确认）
+
+`GET /api/user/self`，带 session Cookie + `New-Api-User` 头。
+
+返回完整用户对象（40+ 字段），插件只读 `data.quota`（剩余额度，内部单位）与 `data.used_quota`（累计已用）。
+实测样例：`quota=9514057`（≈$19.03）、`used_quota=1116266403`（≈$2232.53）、`request_count=6873`。
+
 ## 其他
 
 - 站点无 Cloudflare 拦截（直接 nginx 响应）；登录接口未观测到频率限制，多账号串行登录即可。
