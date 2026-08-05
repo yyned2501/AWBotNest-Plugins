@@ -680,16 +680,63 @@ def _apply_opponent_actions(
         if action == "fold":
             continue
         if action == "call":
-            new_pot += current_call_bet
+            # 追平当前 callBet：同轮更早的对手若已加注，new_call_bet 已被抬升，
+            # 后续跟注者须追平新值（实测 callBet=3200 时 149 加注后其余追平 6400）。
+            # 蒙牌对手（op_seen=False）下注半价（用户规则「蒙的话就是上一半」，
+            # 实测 callBet=3000 时蒙牌 +1500）——旧实现把蒙牌对手投入按全价算，
+            # 池子虚大、且伪造了「我方半价 vs 对手全价」的伪优势，3 人全蒙公平局
+            # 被算成正 EV 接近满池。
+            unit = new_call_bet if opp.op_seen else new_call_bet / 2
+            new_pot += unit
         else:  # raise
-            new_pot += current_call_bet * 1.5
-            new_call_bet = current_call_bet * 1.5
+            # 实测（hdsky_debug.jsonl + 用户确认）：加注 = 追平当前注 + 加一注底注，
+            # callBet 随 raise 次数线性增长（ante 3000 → raise1 6000 → raise2 9000
+            # → raise3 12000），即 raise_count = callBet/ante − 1，再 raise 一次 +1。
+            # 不是 ×1.5/×2 复利——复利会让 callBet/底池指数膨胀、盲跟 EV 虚高。
+            # 「当前注」指被同轮更早加注抬升后的值：多人同轮连 raise 时从 new_call_bet
+            # 起算（旧实现用本轮初值 current_call_bet，同轮第二个 raise 起点偏低）。
+            ante = float(game.get("ante", 0) or 0)
+            new_call_bet = new_call_bet + (ante if ante > 0 else new_call_bet)
+            unit = new_call_bet if opp.op_seen else new_call_bet / 2
+            new_pot += unit
             if opp.op_seen:
                 bucket = _bucket_key_for(opponents, opp)
                 new_threshold = _opponent_raise_threshold(opp.threshold, 1, profile, opp.uid, game, bucket)
                 opp = replace(opp, threshold=new_threshold)
         new_opponents.append(opp)
     return new_opponents, new_pot, new_call_bet
+
+
+# 对手继续意愿衰减（已弃用，恒等）：v1.16.4 前为让「fold=0 外推成永续」的 EV 收敛，
+# 每层把条件继续率乘 (1−_FOLD_DECAY_PER_ROUND)。实测发现真正的虚高源不是「外推永续」
+# 而是三处建模错误：①蒙牌对手下注按全价算（伪造「我方半价 vs 对手全价」伪优势）；
+# ②我方盲跟未计入底池；③加注后同轮追平未抬升。修正后公平局 EV 数学自然随深度收敛
+# （蒙特卡洛对照：3 全蒙场景 depth1-4 EV 3829→5415，无界增长已消除），衰减反而引入
+# 「深层弃牌白赢大池」的虚高（depth3 从 4886 抬到 10658）。保留函数签名与调用点，
+# 置 0 即恒等，避免破坏外部引用。
+_FOLD_DECAY_PER_ROUND = 0.0
+
+
+def _decayed_action_probs(probs: tuple[float, float, float], layer: int) -> tuple[float, float, float]:
+    """第 layer 层（0-based）对手动作概率（当前恒等，见 _FOLD_DECAY_PER_ROUND 说明）。
+
+    观测的 action_probs 是「对手活到当前轮时的条件动作分布」。当 _FOLD_DECAY_PER_ROUND
+    >0 时，把条件继续率 (1−fold) 每层乘 (1−decay)，折牌率随层抬升；置 0 时原样返回。
+    """
+    if layer <= 0 or _FOLD_DECAY_PER_ROUND <= 0:
+        return probs
+    fold, call, raise_ = probs
+    continue_k = (1.0 - fold) * ((1.0 - _FOLD_DECAY_PER_ROUND) ** layer)
+    fold_k = max(fold, 1.0 - continue_k)
+    live = 1.0 - fold
+    if live <= 0.0:
+        return (fold_k, 0.0, 1.0 - fold_k)
+    scale = (1.0 - fold_k) / live
+    # raise 概率同速率衰减：深层对手不再连续加注滚 callBet（×2 复利是池子
+    # 膨胀主源，不衰减则继续率衰减压不住 EV 虚高）
+    raise_k = raise_ * ((1.0 - _FOLD_DECAY_PER_ROUND) ** layer)
+    call_k = max(0.0, call * scale + (raise_ * scale - raise_k))
+    return (fold_k, call_k, raise_k)
 
 
 def _terminal_ev_call_multi(
@@ -702,15 +749,21 @@ def _terminal_ev_call_multi(
     pot: float | None = None,
     cost: float | None = None,
     current_call_bet: float | None = None,
+    layer: int = 0,
 ) -> float:
     """多人蒙牌盲跟终局 EV：每个深度枚举所有存活对手的动作组合（笛卡尔积）。
 
     - opponents：存活对手节点列表（含各自动作概率与门槛），至少 1 人。
-    - 每轮所有存活对手各行动一次（弃牌/平跟/加注），联合概率 = 各动作概率之积；
-      弃牌者移出，胜率按剩余对手重算（_opponents_win_probability）。
+    - 每轮时序：我方先盲跟半价（用本轮初 callBet，进入底池），随后存活对手
+      依次行动（弃牌/平跟/加注，联合概率 = 各动作概率之积）；加注把 callBet 抬升
+      一注底注，同轮后续跟注者追平新值；弃牌者移出，胜率按剩余对手重算
+      （_opponents_win_probability）。
     - 已看牌对手加注上调其门槛（贝叶斯衰减），蒙牌加注视为诈唬不上调。
-    - 全部弃牌 → 我方独赢当前底池；深度耗尽 → 截断（枚举一轮后摊牌）。
-    - 我方每轮盲跟半价（_blind_call_cost），底池按对手动作增长。
+    - 全部弃牌 → 我方独赢本轮后底池；深度耗尽 → 强制摊牌（showdown，不再下注），
+      按存活对手胜率分摊。
+    - layer：当前推演轮次（0-based）。各轮对手动作概率沿用画像观测值；
+      _decayed_action_probs 保留调用点但 _FOLD_DECAY_PER_ROUND=0 恒等（v1.16.4 起
+      弃用衰减——修正蒙牌半价/盲跟入池/追平抬升后，公平局 EV 随深度自然收敛）。
     """
     if pot is None:
         pot = float(game.get("pot", 0) or 0)
@@ -720,21 +773,20 @@ def _terminal_ev_call_multi(
         current_call_bet = float(game.get("callBet", 0) or 0)
     if not opponents:
         return pot - cost  # 无人存活 → 我方独赢（防御）
+    if layer > 0:
+        opponents = [replace(o, action_probs=_decayed_action_probs(o.action_probs, layer)) for o in opponents]
 
     if depth <= 0:
-        # 截断：枚举一轮，全部弃牌独赢，否则按剩余对手胜率摊牌
-        ev = 0.0
-        for combo, joint in _iter_action_choices(opponents):
-            new_opponents, new_pot, new_call_bet = _apply_opponent_actions(
-                game, profile, opponents, combo, pot, current_call_bet
-            )
-            if not new_opponents:
-                ev += joint * (pot - cost)
-                continue
-            next_cost = cost + _blind_call_cost(new_call_bet)
-            win = _opponents_win_probability(new_opponents)
-            ev += joint * (win * new_pot - next_cost)
-        return ev
+        # 截断 = 强制摊牌（showdown）：不再下注，按存活对手胜率摊牌。
+        # 旧实现「再枚举一轮，win×new_pot−next_cost」把本轮对手动作重复算一遍，
+        # 且我方盲跟（半价）未计入底池、追平价用初值——多重低估/高估叠加。
+        win = _opponents_win_probability(opponents)
+        return win * pot - cost
+
+    # 本轮时序：我方先盲跟半价（用本轮初 callBet），进入底池；随后对手行动。
+    my_bet = _blind_call_cost(current_call_bet)
+    pot += my_bet
+    cost += my_bet
 
     ev = 0.0
     for combo, joint in _iter_action_choices(opponents):
@@ -742,9 +794,8 @@ def _terminal_ev_call_multi(
             game, profile, opponents, combo, pot, current_call_bet
         )
         if not new_opponents:
-            ev += joint * (pot - cost)
+            ev += joint * (new_pot - cost)
             continue
-        next_cost = cost + _blind_call_cost(new_call_bet)
         ev += joint * _terminal_ev_call_multi(
             game,
             fallback_threshold,
@@ -753,8 +804,9 @@ def _terminal_ev_call_multi(
             profile,
             new_opponents,
             new_pot,
-            next_cost,
+            cost,
             new_call_bet,
+            layer + 1,
         )
     return ev
 
@@ -836,7 +888,8 @@ def _terminal_ev_peek_multi(
             continue
         blind = sum(1 for opp in new_opponents if not opp.op_seen)
         seen_thresholds = tuple(opp.threshold for opp in new_opponents if opp.op_seen)
-        branches.append((joint, blind, seen_thresholds, new_pot, new_call_bet))
+        # 强牌全价跟注 new_call_bet 进入摊牌底池（否则赢池不含我方最终跟注，EV 低估）
+        branches.append((joint, blind, seen_thresholds, new_pot + new_call_bet, new_call_bet))
     return _peek_terminal_ev(branches)
 
 
@@ -923,21 +976,20 @@ def _terminal_ev_call(
     opponent_seen: bool = True,
     opponent_uid: str | None = None,
 ) -> float:
-    """递归计算「盲跟」路径到达终局的期望净收益。
+    """递归计算「盲跟」路径到达终局的期望净收益（单对手/旧路径）。
 
     - action_probs：对手本轮 (P_fold, P_call, P_raise)，来自画像；缺省用均等先验。
     - pot/cost/win_prob：当前递归深度的累计底池、我方累计成本、条件胜率。
     - raise_count：已累计的对手加注次数，用于门槛上调。
-    - current_call_bet：当前轮跟注成本。对手加注时递增（×1.5，实测单挑每轮约 +50%），
-      平跟时不变；真实反映「对手持续加注把成本滚大」对蒙牌盲跟的代价。
+    - current_call_bet：当前轮追平价。对手加注时**线性递增一注底注**（实测 ante
+      3000 → raise1 6000 → raise2 9000 → raise3 12000），不是 ×1.5/×2 复利。
     - opponent_seen：对手是否已看牌。只有看牌后的加注才是强牌信号（上调门槛、胜率
       贝叶斯衰减）；蒙牌加注可能是诈唬/空气牌，不上调门槛、胜率不额外衰减。
+      蒙牌对手（opponent_seen=False）下注半价（用户规则「蒙的话就是上一半」）。
     - opponent_uid：对手画像键。看牌加注上调门槛时用它从画像取实测加注分位下界
       （诈唬型对手门槛更低），缺失则用通用推断。
-    终局节点：
-      对手弃牌 → 我方独赢，净收益 = pot − cost；
-      深度耗尽（截断）→ 按对手动作概率对未来一轮加权（对称期望模型）；
-      继续 → 递归下一轮。
+    每轮时序：我方先盲跟半价（进入底池），再对手行动；深度耗尽 = 强制摊牌
+    （不再下注）。对手弃牌 → 我方独赢本轮后底池。
     """
     if pot is None:
         pot = float(game.get("pot", 0) or 0)
@@ -960,29 +1012,24 @@ def _terminal_ev_call(
     p_fold, p_call, p_raise = p_fold / total_p, p_call / total_p, p_raise / total_p
 
     if depth <= 0:
-        # 截断：按对手动作概率对未来一轮加权（与看牌分支对称的期望模型）
-        #  - 对手弃牌 → 我方独赢当前底池（概率 p_fold）
-        #  - 对手跟/加 → 我方蒙牌半价继续一轮，按当前胜率赢 pot − 累计成本
-        # 不再假设「对手必持续 raise 到强制 showdown」（那是最坏情形，不是期望，
-        # 会把盲跟 EV 系统性压成负，导致 bot 永远弃/看而不盲跟）。
-        ev = 0.0
-        if p_fold > 0:
-            ev += p_fold * (pot - cost)
-        if p_call + p_raise > 0:
-            next_cost = cost + _blind_call_cost(current_call_bet)
-            next_pot = pot + current_call_bet
-            ev += (p_call + p_raise) * (win_prob * next_pot - next_cost)
-        return ev
+        # 截断 = 强制摊牌（showdown）：不再下注，按当前胜率摊牌。
+        # 旧实现「再按对手动作加权一轮」时序错乱且我方盲跟未进池。
+        return win_prob * pot - cost
+
+    # 本轮时序：我方先盲跟半价（用本轮初 callBet），进入底池；随后对手行动。
+    my_bet = _blind_call_cost(current_call_bet)
+    pot += my_bet
+    cost += my_bet
 
     ev = 0.0
-    # 对手弃牌 → 我独赢当前底池
+    # 对手弃牌 → 我独赢本轮后底池
     if p_fold > 0:
         ev += p_fold * (pot - cost)
 
     # 对手平跟 → callBet 不变，下一轮我方继续盲跟（半价）。
     if p_call > 0:
-        next_cost = cost + _blind_call_cost(current_call_bet)
-        next_pot = pot + current_call_bet
+        opp_unit = current_call_bet if opponent_seen else current_call_bet / 2
+        next_pot = pot + opp_unit
         ev += p_call * _terminal_ev_call(
             game,
             fallback_threshold,
@@ -991,7 +1038,7 @@ def _terminal_ev_call(
             profile,
             action_probs,
             next_pot,
-            next_cost,
+            cost,
             win_prob,
             raise_count,
             current_call_bet,
@@ -999,7 +1046,8 @@ def _terminal_ev_call(
             opponent_uid,
         )
 
-    # 对手加注 → callBet 递增。看牌后加注是强牌信号：门槛上调、胜率贝叶斯衰减；
+    # 对手加注 → callBet 线性递增（+一注底注，实测 ante 3000→6000→9000→12000）。
+    # 看牌后加注是强牌信号：门槛上调、胜率贝叶斯衰减；
     # 蒙牌加注视为诈唬/空气：不上调门槛，胜率维持（只承担 callBet 滚大的代价）。
     if p_raise > 0:
         if opponent_seen:
@@ -1007,9 +1055,10 @@ def _terminal_ev_call(
             new_win = _blind_vs_seen_win(new_threshold)
         else:
             new_win = win_prob
-        raised_bet = current_call_bet * 1.5
-        next_cost = cost + _blind_call_cost(raised_bet)
-        next_pot = pot + raised_bet
+        ante = float(game.get("ante", 0) or 0)
+        raised_bet = current_call_bet + (ante if ante > 0 else current_call_bet)
+        opp_unit = raised_bet if opponent_seen else raised_bet / 2
+        next_pot = pot + opp_unit
         ev += p_raise * _terminal_ev_call(
             game,
             fallback_threshold,
@@ -1018,7 +1067,7 @@ def _terminal_ev_call(
             profile,
             action_probs,
             next_pot,
-            next_cost,
+            cost,
             new_win,
             raise_count + 1,
             raised_bet,
@@ -1040,8 +1089,9 @@ def _terminal_ev_peek(
 
     对手按门槛 fallback_threshold 的已看牌建模（与旧行为一致）：弃牌 → 白赢底池；
     跟注 → 摊牌底池 pot+callBet、成本 callBet；加注 → 门槛经 _opponent_raise_threshold
-    上调、摊牌底池 pot+1.5×callBet、成本 1.5×callBet。看牌后是否继续由
-    _peek_terminal_ev 按内盈亏平衡点决策——看牌免费，弱牌弃掉与不看牌弃牌同净 0，
+    上调、摊牌底池 pot+raised_bet、成本 raised_bet（raised_bet = callBet + ante，
+    线性加一注底注，非旧版 ×1.5 复利）。我方看牌后跟注进入摊牌底池。看牌后是否继续
+    由 _peek_terminal_ev 按内盈亏平衡点决策——看牌免费，弱牌弃掉与不看牌弃牌同净 0，
     因此结果永不为负（修复旧外部门槛分界把 EV 拖负、误判「弃牌最优」的问题）。
     """
     if action_probs is None:
@@ -1060,10 +1110,13 @@ def _terminal_ev_peek(
     if p_fold > 0:
         branches.append((p_fold, 0, (), pot, 0.0))
     if p_call > 0:
+        # 摊牌底池 pot+call_bet（我方全价跟注进池），成本 call_bet
         branches.append((p_call, 0, (threshold,), pot + call_bet, call_bet))
     if p_raise > 0:
         raise_threshold = _opponent_raise_threshold(threshold, 1, profile)
-        branches.append((p_raise, 0, (raise_threshold,), pot + call_bet * 1.5, call_bet * 1.5))
+        ante = float(game.get("ante", 0) or 0)
+        raised_bet = call_bet + (ante if ante > 0 else call_bet)
+        branches.append((p_raise, 0, (raise_threshold,), pot + raised_bet, raised_bet))
     return _peek_terminal_ev(branches)
 
 
