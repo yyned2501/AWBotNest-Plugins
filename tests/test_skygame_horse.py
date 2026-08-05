@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import datetime
+import json
 
 import pytest
 
@@ -12,6 +13,19 @@ from plugins.skyGame.games.horse import _care_once
 
 def _now_ms() -> int:
     return int(datetime.datetime.now().timestamp() * 1000)
+
+
+def _today() -> str:
+    return datetime.date.today().isoformat()
+
+
+def _yesterday() -> str:
+    return (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
+
+
+def _fail_state(count: int, date: str) -> str:
+    """构造遛马失败计数 kv 值（JSON 字符串，与生产格式一致）。"""
+    return json.dumps({"count": count, "date": date})
 
 
 def _horse_state(
@@ -138,14 +152,14 @@ async def test_walk_in_cooldown_skips_without_posting() -> None:
 async def test_walk_success_logs_once_and_clears_state() -> None:
     # 正向：真成功才打「遛马成功」，清零失败计数并清除冷却标记
     ctx = _FakeCtx()
-    ctx.kv.set("horse:walk_consecutive_failures", 2)
+    ctx.kv.set("horse:walk_consecutive_failures", _fail_state(2, _today()))
     action = {"ok": True, "result": {"ok": True, "message": "遛马收获 126 银元"}}
     client = _FakeClient(_horse_state(walk_count=3, walk_max=4), action)
 
     await _care_once(ctx, {}, client)
 
     assert any(level == "INFO" and "遛马成功（今日 4/4）" in msg for level, msg in ctx.log.records)
-    assert ctx.kv.get("horse:walk_consecutive_failures") == 0
+    assert ctx.kv.get("horse:walk_consecutive_failures") == _fail_state(0, _today())
     assert "horse:walk_cooldown_until" not in ctx.kv
     assert len(ctx.notifications) == 1
     assert ctx.notifications[0][1] == "info"
@@ -160,22 +174,61 @@ async def test_walk_genuine_failure_warns_and_counts() -> None:
 
     await _care_once(ctx, {}, client)
 
-    assert ctx.kv.get("horse:walk_consecutive_failures") == 1
+    assert ctx.kv.get("horse:walk_consecutive_failures") == _fail_state(1, _today())
     assert any(level == "WARNING" and "遛马失败" in msg for level, msg in ctx.log.records)
     assert ctx.notifications and ctx.notifications[0][1] == "warning"
 
 
 @pytest.mark.asyncio
 async def test_walk_skips_after_three_consecutive_failures() -> None:
-    # 异常路径：连续失败 3 次后停手，不再发请求
+    # 异常路径：当日连续失败 3 次后停手，不再发请求
     ctx = _FakeCtx()
-    ctx.kv.set("horse:walk_consecutive_failures", 3)
+    ctx.kv.set("horse:walk_consecutive_failures", _fail_state(3, _today()))
     client = _FakeClient(_horse_state(), {"ok": True, "result": {"ok": True}})
 
     await _care_once(ctx, {}, client)
 
     assert client.posts == []
     assert any("连续失败" in msg for _, msg in ctx.log.records)
+
+
+@pytest.mark.asyncio
+async def test_walk_legacy_plain_number_failure_resets_and_recovers() -> None:
+    # 回归：旧版纯数字熔断（无日期，线上 08-01 遗留 count=3）视为跨天自动重置，
+    # 今日恢复遛马——否则熔断只在成功时清零、到 3 后又不发请求，形成永久死锁
+    ctx = _FakeCtx()
+    ctx.kv.set("horse:walk_consecutive_failures", 3)
+    action = {"ok": True, "result": {"ok": True, "message": "遛马收获 126 银元"}}
+    client = _FakeClient(_horse_state(), action)
+
+    await _care_once(ctx, {}, client)
+
+    assert len(client.posts) == 1
+    assert client.posts[0][0] == "/api/portal/horse/action"
+    assert ctx.kv.get("horse:walk_consecutive_failures") == _fail_state(0, _today())
+
+
+@pytest.mark.asyncio
+async def test_walk_failure_count_resets_next_day() -> None:
+    # 回归：昨日熔断 count=3 → 今日自动恢复重试；今日熔断仍跳过
+    # 昨日遗留 → 恢复
+    ctx = _FakeCtx()
+    ctx.kv.set("horse:walk_consecutive_failures", _fail_state(3, _yesterday()))
+    client = _FakeClient(_horse_state(), {"ok": True, "result": {"ok": True}})
+
+    await _care_once(ctx, {}, client)
+
+    assert len(client.posts) == 1
+
+    # 今日熔断 → 跳过
+    ctx2 = _FakeCtx()
+    ctx2.kv.set("horse:walk_consecutive_failures", _fail_state(3, _today()))
+    client2 = _FakeClient(_horse_state(), {"ok": True, "result": {"ok": True}})
+
+    await _care_once(ctx2, {}, client2)
+
+    assert client2.posts == []
+    assert any("连续失败" in msg for _, msg in ctx2.log.records)
 
 
 @pytest.mark.asyncio
