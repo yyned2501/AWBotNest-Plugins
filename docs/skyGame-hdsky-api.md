@@ -11,6 +11,7 @@
 - Cookie 文件和门户根地址由插件配置提供；
 - 客户端负责 CSRF / requestKey 获取、请求 JSON 编解码，以及遇到 401 时触发 Cookie 续期后重试；
 - 遇到 403「请求来源无效」（CSRF 失效）时，客户端作废缓存的 CSRF、重取一次并重试原请求（仅一次，不死循环）；非 CSRF 的 403（如权限不足）不重试；
+- **CSRF 实测行为（2026-08-05）**：`GET /api/portal/session` 每次返回**不同的新 csrfToken**，且**新 GET 立即作废旧 token**——门户只认「最近一次 GET 返回的 token」，旧 token 再用于 POST 一律 `403 {"ok":false,"error":"页面安全校验已失效，请刷新后重试"}`。token 本身**非一次性**（同一 token 连续多次 POST 均通过）。因此 CSRF 缓存必须**进程级共享**：养马/炸金花各自独立 `HdskyClient` 若各自缓存 token 会互相作废（A 取 token 后 B 再取作废 A 的，A 的 POST 持续 403，重取又被 B 作废，连续失败直至门户行动超时）。v1.16.5 起 `HdskyClient` 用类变量共享 token，只在判定失效时才刷新；
 - 游戏模块不得自行管理认证头、Cookie 或 CSRF。
 
 ## 已确认接口

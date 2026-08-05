@@ -58,6 +58,13 @@ def _make_client(responses: list[_FakeResp]) -> HdskyClient:
     return client
 
 
+@pytest.fixture(autouse=True)
+def _reset_shared_csrf() -> None:
+    """CSRF 为进程级共享（类变量），每个测试前清空，避免跨测试残留。"""
+    HdskyClient._csrf = None
+    HdskyClient._csrf_at = 0.0
+
+
 # ── is_csrf_error 判定 ──
 
 
@@ -129,6 +136,88 @@ async def test_non_csrf_403_retried_once() -> None:
     assert result == {"ok": False, "error": "权限不足"}
     posts = [c for c in client._http.calls if c["method"] == "POST"]
     assert len(posts) == 2  # 原始 + 一次重试，不再继续
+
+
+@pytest.mark.asyncio
+async def test_shared_csrf_across_instances_no_invalidation() -> None:
+    """回归（用户报障）：CSRF 进程级共享——养马/炸金花两实例不再互相作废 token。
+
+    门户只认「最近一次 GET /api/portal/session 的 token」（实测：新 GET 后旧 token
+    立即 403「安全校验已失效」）。各实例独立缓存时，B 实例取 token 会作废 A 实例的，
+    A 的 POST 全被 CSRF 屏蔽、重取又被作废，连续失败直至门户行动超时。共享缓存后
+    B 复用 A 刚取的 token 不再 GET session，两实例 POST 用同一 token 稳定成功。
+    """
+    client_a = _make_client(
+        [
+            _FakeResp(200, {"ok": True, "csrfToken": "tok1"}),  # A 首次取 CSRF
+            _FakeResp(200, {"ok": True, "result": {"ok": True}}),  # A POST 成功
+        ]
+    )
+    client_b = _make_client(
+        [
+            _FakeResp(200, {"ok": True, "result": {"ok": True}}),  # B POST 成功（复用共享 token）
+        ]
+    )
+    assert await client_a.post("/api/portal/horse/action", {"action": "walk"}) == {
+        "ok": True,
+        "result": {"ok": True},
+    }
+    assert await client_b.post("/api/portal/zhajinhua/action", {"action": "call"}) == {
+        "ok": True,
+        "result": {"ok": True},
+    }
+    # B 全程不再 GET session（预设仅 1 个响应，多 GET 会触发 _FakeHttp 断言）
+    posts_a = [c for c in client_a._http.calls if c["method"] == "POST"]
+    posts_b = [c for c in client_b._http.calls if c["method"] == "POST"]
+    assert [c["csrf"] for c in posts_a] == ["tok1"]
+    assert [c["csrf"] for c in posts_b] == ["tok1"]
+
+
+@pytest.mark.asyncio
+async def test_shared_csrf_reset_propagates_to_other_instance() -> None:
+    """A 实例 CSRF 失效刷新后，B 实例复用新 token（共享 reset 跨实例传播）。"""
+    client_a = _make_client(
+        [
+            _FakeResp(200, {"ok": True, "csrfToken": "tok1"}),  # A 取 CSRF
+            _FakeResp(403, {"ok": False, "error": "请求来源无效"}),  # A POST 被拒
+            _FakeResp(200, {"ok": True, "csrfToken": "tok2"}),  # A 刷新重取
+            _FakeResp(200, {"ok": True, "result": {"ok": True}}),  # A 重试成功
+        ]
+    )
+    assert await client_a.post("/api/portal/horse/action", {"action": "walk"}) == {
+        "ok": True,
+        "result": {"ok": True},
+    }
+    client_b = _make_client([_FakeResp(200, {"ok": True, "result": {"ok": True}})])
+    assert await client_b.post("/api/portal/zhajinhua/action", {"action": "call"}) == {
+        "ok": True,
+        "result": {"ok": True},
+    }
+    posts_b = [c for c in client_b._http.calls if c["method"] == "POST"]
+    assert [c["csrf"] for c in posts_b] == ["tok2"]
+
+
+@pytest.mark.asyncio
+async def test_403_non_json_response_still_triggers_csrf_retry() -> None:
+    """回归：403 返回非 JSON（门户 HTML 错误页）时仍触发 CSRF 刷新重试。
+
+    旧实现 `resp.json()` 在 403 检查前调用，非 JSON 响应直接抛异常落 `_error`，
+    CSRF 恢复要等调用方下一轮 reset——重试被屏蔽一轮。改为解析失败视为空数据，
+    403 状态码本身即疑似 CSRF 失效，照常刷新重试一次。
+    """
+    client = _make_client(
+        [
+            _FakeResp(200, {"ok": True, "csrfToken": "tok1"}),
+            _FakeResp(403, {"ok": False, "error": "请求来源无效"}),  # 首次 POST 被拒
+            _FakeResp(200, {"ok": True, "csrfToken": "tok2"}),  # 刷新后重取
+            _FakeResp(200, {"ok": True, "result": {"ok": True}}),  # 重试成功
+        ]
+    )
+    client._http._responses[1] = _FakeResp(403, "<html>Forbidden</html>")  # 非 JSON 403
+    result = await client.post("/api/portal/horse/action", {"action": "walk"})
+    assert result == {"ok": True, "result": {"ok": True}}
+    posts = [c for c in client._http.calls if c["method"] == "POST"]
+    assert [c["csrf"] for c in posts] == ["tok1", "tok2"]
 
 
 # ── 调试记录：脱敏 / 追加 / 轮转 / 静默失败 ──

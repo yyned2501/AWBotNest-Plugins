@@ -23,7 +23,7 @@ from .games import hdsky_auth
 __plugin__ = {
     "name": "天空游戏",
     "id": "skyGame",
-    "version": "1.16.4",
+    "version": "1.16.5",
     "author": "Yy",
     "description": "天空系列游戏统一入口：炸金花自动参与、养马自动养护，左侧按游戏分组配置。",
     "scope": "user",
@@ -381,6 +381,13 @@ __plugin__ = {
         },
     },
     "changelog": (
+        "v1.16.5 更新：\n"
+        "- 修复指令重试被 CSRF 屏蔽导致门户超时：实测门户的 GET /api/portal/session"
+        "每次返回新 token 且立即作废旧 token（只认最近一次），养马/炸金花各自独立"
+        "客户端缓存 token 会互相作废——A 取后 B 再取就作废 A 的，A 的 POST 持续 403"
+        "「安全校验已失效」，重取又被 B 作废，指令连续失败直至门户行动超时。"
+        "CSRF 缓存改为进程级共享（类变量），各实例复用同一 token、只在失效时刷新；\n"
+        "- 403 返回非 JSON（门户 HTML 错误页）时不再因 json 解析失败漏掉 CSRF 重试\n"
         "v1.16.4 更新：\n"
         "- 修复蒙牌盲跟 Terminal EV 虚高（3 人全蒙公平局曾被算成 EV≈满池）："
         "① 加注改线性建模——每次 raise = 追平当前 callBet + 加一注底注（ante 3000 → "

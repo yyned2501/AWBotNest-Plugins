@@ -129,14 +129,23 @@ class _DebugRecorder:
 
 
 class HdskyClient:
-    """hdsky 门户 API 客户端。长连接复用，支持热更新 cookie 路径与地址。"""
+    """hdsky 门户 API 客户端。长连接复用，支持热更新 cookie 路径与地址。
+
+    CSRF token 为**进程级共享**（类变量）：门户只认「最近一次 GET /api/portal/session
+    返回的 token」，每次 GET 都会作废旧 token（2026-08-05 实测：新 GET 后旧 token 立即
+    403「页面安全校验已失效」）。养马/炸金花各自独立实例若各自缓存 token 会互相作废——
+    A 取 token 后 B 再取就作废 A 的，A 的 POST 全部 403，重取又被 B 作废，连续失败直至
+    门户行动超时（用户报障）。共享同一缓存后，token 只在单个实例判定失效时刷新，
+    各实例 POST 稳定复用同一 token（token 非一次性，可多次使用）。
+    """
+
+    _csrf: str | None = None
+    _csrf_at: float = 0.0
 
     def __init__(self, cookie_file: str = "", base_url: str = "", log: Any = None) -> None:
         self._cookie_file = cookie_file or DEFAULT_COOKIE_FILE
         self._base = (base_url or DEFAULT_BASE_URL).rstrip("/")
         self._log = log
-        self._csrf: str | None = None
-        self._csrf_at: float = 0.0
         self._renewer: Callable[[], Awaitable[bool]] | None = None
         self._debug: _DebugRecorder | None = None
         self._http = httpx.AsyncClient(verify=make_ssl_ctx())
@@ -168,9 +177,9 @@ class HdskyClient:
         self._debug = _DebugRecorder(debug_file or DEFAULT_DEBUG_FILE) if debug_enabled else None
 
     def reset_csrf(self) -> None:
-        """作废缓存的 CSRF（接口报错或换站时调用，下次 POST 自动重取）。"""
-        self._csrf = None
-        self._csrf_at = 0.0
+        """作废共享缓存的 CSRF（接口报错或换站时调用，下次 POST 自动重取）。"""
+        type(self)._csrf = None
+        type(self)._csrf_at = 0.0
 
     def set_renewer(self, renewer: Callable[[], Awaitable[bool]] | None) -> None:
         """注入会话续期回调（无参，异步返回是否成功）。收到 401 时自动调用一次。"""
@@ -182,12 +191,13 @@ class HdskyClient:
             self._debug.record(method, path, body, response)
 
     async def _ensure_csrf(self) -> None:
-        """惰性获取 CSRF；过期自动刷新。"""
-        if self._csrf and time.monotonic() - self._csrf_at < _CSRF_MAX_AGE:
+        """惰性获取 CSRF（共享缓存）；过期自动刷新。"""
+        cls = type(self)
+        if cls._csrf and time.monotonic() - cls._csrf_at < _CSRF_MAX_AGE:
             return
         sess = await self.get("/api/portal/session")
-        self._csrf = sess.get("csrfToken") or None
-        self._csrf_at = time.monotonic()
+        cls._csrf = sess.get("csrfToken") or None
+        cls._csrf_at = time.monotonic()
 
     async def _request(
         self,
@@ -211,13 +221,18 @@ class HdskyClient:
             headers["Content-Type"] = "application/json"
             content = json.dumps(body or {}).encode()
             await self._ensure_csrf()
-            if self._csrf:
-                headers["X-CSRF-Token"] = self._csrf
+            if type(self)._csrf:
+                headers["X-CSRF-Token"] = type(self)._csrf
         try:
             resp = await self._http.request(method, f"{self._base}{path}", headers=headers, content=content, timeout=10)
             if resp.status_code == 401 and not _retry:
                 return await self._handle_expired(method, path, body)
-            data = resp.json()
+            try:
+                data = resp.json()
+            except Exception:
+                # 非 JSON 响应（门户 HTML 错误页/网关 502 等）：403 本身即疑似 CSRF 失效，
+                # 不能因解析失败漏掉重试（旧实现 json() 抛异常直接落 _error，CSRF 恢复要等下一轮）
+                data = {}
             # CSRF 失效：作废缓存重取一次后重试，避免持续失败。
             # 门户可能用 403 或 200+ok:false 两种方式返回 CSRF 错误，
             # 前者 ("请求来源无效") 已被 403 覆盖，后者 ("页面安全校验已失效") 需要额外判断。
