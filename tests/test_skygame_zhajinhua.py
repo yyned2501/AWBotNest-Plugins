@@ -71,8 +71,11 @@ from plugins.skyGame.games.zhajinhua.zjh_profile import (
 )
 
 
-def _game(*players: dict[str, object], pot: float = 1000, call_bet: float = 100) -> dict[str, object]:
-    return {"pot": pot, "callBet": call_bet, "players": list(players)}
+def _game(*players: dict[str, object], pot: float = 1000, call_bet: float = 100, ante: float = 0) -> dict[str, object]:
+    game = {"pot": pot, "callBet": call_bet, "players": list(players)}
+    if ante > 0:
+        game["ante"] = ante
+    return game
 
 
 class _FakeLog:
@@ -1945,12 +1948,12 @@ def test_terminal_ev_call_opponent_fold_wins_pot() -> None:
     assert ev == pytest.approx(10000)
 
 
-def test_terminal_ev_call_depth_cutoff_expectation_weighted() -> None:
-    """深度截断：depth≤0 时按对手动作概率对未来一轮加权（与看牌分支对称）。
+def test_terminal_ev_call_depth_cutoff_showdown() -> None:
+    """深度截断：depth≤0 = 强制摊牌（showdown），不再下注，按当前胜率分摊。
 
-    - 对手弃牌（p_fold）→ 我方独赢当前底池 pot − cost；
-    - 对手跟/加（p_call+p_raise）→ 我方蒙牌半价再跟一轮，win_prob×下轮底池 − 累计成本。
-    不再假设「对手必持续加注到摊牌」（那会把盲跟 EV 系统性压负）。
+    v1.16.4 起截断语义从「再按对手动作加权一轮」改为「摊牌」——旧实现把本轮
+    对手动作重复枚举一遍且我方盲跟未进池，EV 低估/时序错乱。depth=0 直接摊牌：
+    EV = win_prob × pot − cost。
     """
     game = _game(
         {"id": "self", "alive": True, "isSelf": True, "seen": False},
@@ -1959,9 +1962,8 @@ def test_terminal_ev_call_depth_cutoff_expectation_weighted() -> None:
         call_bet=100,
     )
     ev = _terminal_ev_call(game, 0.5, _RoundTracker(), 0, None, (1 / 3, 1 / 3, 1 / 3), 10000, 0, 0.5)
-    # p_fold=1/3 独赢 10000；p_call+p_raise=2/3 半价 50 跟到 10100，胜率 0.5
-    expected = (1 / 3) * 10000 + (2 / 3) * (0.5 * 10100 - 50)
-    assert ev == pytest.approx(expected)
+    # 摊牌：0.5 × 10000 − 0
+    assert ev == pytest.approx(0.5 * 10000)
 
 
 def test_terminal_ev_decision_picks_blind_call_when_cheap_and_fold_heavy() -> None:
@@ -1996,12 +1998,14 @@ def test_terminal_ev_decision_peeks_when_seen_opponent_strong() -> None:
     assert dec.call_ev < 0
 
 
-def test_terminal_ev_decision_peek_better_than_blind_call_when_raise_heavy() -> None:
-    """对手爱加注、几乎不弃牌、门槛偏低：看牌（免费弱牌止损）优于盲跟。
+def test_terminal_ev_decision_blind_call_beats_peek_on_loose_opponent_big_pot() -> None:
+    """对手爱加注、几乎不弃牌、门槛偏低 + 大底池：盲跟（半价）胜于看牌（全价跟注）。
 
-    无弃牌权益 + 加注滚大成本时，盲跟被持续加注撑大不划算；看牌后弱牌（t<T）
-    止损、强牌才投入，终局期望更高。回归：修正 action_probs 透传 + 对称 EV 模型后，
-    看牌分支在此类场景确实能胜过盲跟。
+    真实加注规则下盲跟每轮只付半价、看牌后跟注要付全价 callBet；对手门槛低（0.3）
+    意味着其牌力不强、我方蒙牌胜率不低，初始 pot 已大（10000）时半价盲跟的正 EV
+    超过看牌。回归：修正对称下注模型（对手同轮追平 + 蒙牌对手半价）后，肥羊场景
+    盲跟确实胜出，不再是旧模型（对手全价下注 + ×1.5 复利加注）把盲跟 EV 打负的
+    错误「看牌更优」。
     """
     game = _game(
         {"id": "self", "alive": True, "isSelf": True, "seen": False},
@@ -2010,8 +2014,9 @@ def test_terminal_ev_decision_peek_better_than_blind_call_when_raise_heavy() -> 
         call_bet=3000,
     )
     dec = _terminal_ev_decision(game, 0.3, _RoundTracker(), depth=2, action_probs=(0.0, 0.4, 0.6))
-    assert dec.action == "peek"
-    assert dec.terminal_ev > 0
+    assert dec.action == "call"
+    assert dec.call_ev > dec.peek_ev
+    assert dec.peek_ev > 0
 
 
 def test_terminal_ev_decision_neutral_equals_single_step_at_depth_one() -> None:
@@ -2808,7 +2813,7 @@ def test_terminal_ev_call_multi_opponent_fold_removes_and_recomputes() -> None:
     """多人树：某对手必弃牌时从存活列表移除，胜率按剩余对手重算。
 
     构造两个对手：p1 必弃（P_fold=1），p2 平跟/加注。p1 弃牌分支的胜率应只对
-    p2 计算（_opponents_win_probability([p2])），而非含 p1。用深度 0 截断验证：
+    p2 计算（_opponents_win_probability([p2])），而非含 p1。用深度 1 验证：
     全部弃牌独赢底池，p2 继续时按对 p2 单挑胜率摊牌。
     """
     game = _game(
@@ -2823,9 +2828,9 @@ def test_terminal_ev_call_multi_opponent_fold_removes_and_recomputes() -> None:
         _BlindOpponent("p1", False, (1.0, 0.0, 0.0), 0.0),
         _BlindOpponent("p2", False, (0.0, 1.0, 0.0), 0.0),
     ]
-    # 深度 0 截断：p1 弃 → 存活剩 p2；p2 平跟 → 我方盲跟半价 50，池 10100，
-    # 对 p2 单挑胜率 0.5 → EV = 0.5*10100 - 50 = 5000
-    ev = _terminal_ev_call_multi(game, 0.5, _RoundTracker(), 0, None, opps, 10000, 0, 100)
+    # 深度 1：我方盲跟半价 50（池 10050）→ p1 弃（移出）→ p2 蒙牌平跟半价 50
+    # （池 10100）→ 摊牌对 p2 单挑胜率 0.5 → EV = 0.5*10100 - 50 = 5000
+    ev = _terminal_ev_call_multi(game, 0.5, _RoundTracker(), 1, None, opps, 10000, 0, 100)
     # p1 必弃概率 1，无其他分支；p2 必跟概率 1
     assert ev == pytest.approx(0.5 * 10100 - 50)
 
@@ -2833,11 +2838,11 @@ def test_terminal_ev_call_multi_opponent_fold_removes_and_recomputes() -> None:
 def test_terminal_ev_call_multi_joint_probability_matrix() -> None:
     """多人树按动作组合的联合概率加权：两个对手各 2 种可能动作 → 4 个组合。
 
-    构造 p1/p2 各半概率弃/跟，深度 0 截断按组合概率加权（每轮我方只付一次盲跟半价）：
-      - 双弃 → 独赢 10000
+    构造 p1/p2 各半概率弃/跟，深度 1 按组合概率加权（每轮我方只付一次盲跟半价）：
+      - 双弃 → 独赢 10000（我方盲跟 50 已付，白赢回）
       - p1弃 p2跟 → 对 p2 单挑摊牌：0.5*10100-50
       - p1跟 p2弃 → 对 p1 单挑摊牌：0.5*10100-50（p2 弃牌不等于白赢，仍与 p1 比牌）
-      - 双跟 → 三人全蒙胜率 1/3，池 10200，成本 50：1/3*10200-50
+      - 双跟 → 我方 50 + 两蒙牌对手各半价 50 = 池 10150，三人全蒙胜率 1/3，成本 50
     """
     game = _game(
         {"id": "self", "alive": True, "isSelf": True, "seen": False},
@@ -2852,12 +2857,58 @@ def test_terminal_ev_call_multi_joint_probability_matrix() -> None:
         _BlindOpponent("p1", False, half, 0.0),
         _BlindOpponent("p2", False, half, 0.0),
     ]
-    ev = _terminal_ev_call_multi(game, 0.5, _RoundTracker(), 0, None, opps, 10000, 0, 100)
+    ev = _terminal_ev_call_multi(game, 0.5, _RoundTracker(), 1, None, opps, 10000, 0, 100)
     combo1 = 10000  # 双弃
-    combo2 = 0.5 * 10100 - 50  # p1弃 p2跟
+    combo2 = 0.5 * 10100 - 50  # p1弃 p2跟（我方 50 + p2 蒙牌半价 50）
     combo3 = 0.5 * 10100 - 50  # p1跟 p2弃
-    combo4 = (1 / 3) * 10200 - 50  # 双跟
+    combo4 = (1 / 3) * 10150 - 50  # 双跟（我方 50 + 两蒙牌对手各 50）
     assert ev == pytest.approx(0.25 * (combo1 + combo2 + combo3 + combo4))
+
+
+def test_terminal_ev_call_multi_three_blind_never_fold_not_inflated() -> None:
+    """回归（用户报障）：3 人全蒙、对手永不弃牌时，盲跟 EV 不再接近满池。
+
+    旧实现把蒙牌对手下注按全价算、加注用 ×1.5/×2 复利、且我方盲跟半价未计入
+    底池，3 人全蒙公平局（pot 10000、callBet 3000）depth=3 被算成 27516（>满池）。
+    修正为线性加注 + 蒙牌半价 + 我方先入池后，EV 随深度收敛到 pot 的三成左右。
+    深度 1 精确可算：我方半价 1500 入池，两对手各 1/2 平跟（半价 1500）/加注
+    （追平+一注底注，蒙牌半价），四组合各 1/4，三人全蒙胜率 1/3：
+      - 双平跟：0.5×(10000+1500+2×1500)−1500
+      - o1 平跟 o2 加注：0.5×(10000+1500+1500+3000)−1500
+      - o1 加注 o2 平跟：0.5×(10000+1500+3000+3000)−1500
+      - 双加注：0.5×(10000+1500+3000+4500)−1500
+    （o1 加注抬升 callBet 6000→o2 平跟追平 6000/2=3000；o2 加注再追平 9000/2=4500）
+    """
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": False},
+        {"id": "o1", "alive": True, "seen": False},
+        {"id": "o2", "alive": True, "seen": False},
+        pot=10000,
+        call_bet=3000,
+        ante=3000,
+    )
+    opps = [
+        _BlindOpponent("o1", False, (0.0, 0.5, 0.5), 0.0),
+        _BlindOpponent("o2", False, (0.0, 0.5, 0.5), 0.0),
+    ]
+    assert _opponents_win_probability(opps) == pytest.approx(1 / 3)
+    ev1 = (
+        0.25
+        * (
+            (1 / 3) * (10000 + 1500 + 2 * 1500)
+            + (1 / 3) * (10000 + 1500 + 1500 + 3000)
+            + (1 / 3) * (10000 + 1500 + 3000 + 3000)
+            + (1 / 3) * (10000 + 1500 + 3000 + 4500)
+        )
+        - 1500
+    )
+    assert _terminal_ev_call_multi(game, 0.5, _RoundTracker(), 1, None, opps, 10000, 0, 3000) == pytest.approx(ev1)
+    # 深度加深 EV 单调递增但收敛：depth=3 远小于满池 20000，旧版 27516（>满池）
+    ev2 = _terminal_ev_call_multi(game, 0.5, _RoundTracker(), 2, None, opps, 10000, 0, 3000)
+    ev3 = _terminal_ev_call_multi(game, 0.5, _RoundTracker(), 3, None, opps, 10000, 0, 3000)
+    assert ev1 < ev2 < ev3
+    assert ev3 < 0.6 * 20000
+    assert ev3 - ev1 < 0.3 * ev3
 
 
 def test_terminal_ev_decision_routes_multi_opponents() -> None:
@@ -2906,11 +2957,12 @@ def test_terminal_ev_peek_multi_uses_all_opponents() -> None:
         _BlindOpponent("p2", True, (0.0, 1.0, 0.0), 0.5),
     ]
     peek_ev = _terminal_ev_peek_multi(game, 0.5, _RoundTracker(), 2, None, opps)
-    # 手算（内盈亏平衡点）：池 = 10000+1000 = 11000，全价成本 1000，
-    # 胜率(t) = (t−0.5)/0.5；盈亏平衡 t* = 0.5 + 0.5×(1000/11000)。
-    # peek_ev = ∫_{t*}^1 (胜率(t)×11000 − 1000) dt（t<t* 弃牌贡献 0）
-    t_star = 0.5 + 0.5 * (1000 / 11000)
+    # 手算（内盈亏平衡点）：池 = 10000+1000 = 11000，我方看牌后强牌全价跟注 1000
+    # 进摊牌底池 → pot_win = 12000，全价成本 1000，
+    # 胜率(t) = (t−0.5)/0.5；盈亏平衡 t* = 0.5 + 0.5×(1000/12000)。
+    # peek_ev = ∫_{t*}^1 (胜率(t)×12000 − 1000) dt（t<t* 弃牌贡献 0）
+    t_star = 0.5 + 0.5 * (1000 / 12000)
     win_integral = ((1 - 0.5) ** 2 - (t_star - 0.5) ** 2) / (2 * 0.5)
-    expected = 11000 * win_integral - 1000 * (1 - t_star)
+    expected = 12000 * win_integral - 1000 * (1 - t_star)
     assert peek_ev == pytest.approx(expected)
     assert peek_ev > 0  # 看牌免费：结构性非负
