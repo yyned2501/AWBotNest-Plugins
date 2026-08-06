@@ -3055,3 +3055,135 @@ def test_terminal_ev_peek_multi_uses_all_opponents() -> None:
     expected = 12000 * win_integral - 1000 * (1 - t_star)
     assert peek_ev == pytest.approx(expected)
     assert peek_ev > 0  # 看牌免费：结构性非负
+
+
+def test_tracker_counts_opponent_consecutive_raises() -> None:
+    """轮询跟踪累计对手本局加注次数（bet 递增 + lastAction 加注才计一次）。"""
+    tracker = _RoundTracker()
+    before = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": True, "bet": 100},
+        {"id": "opponent", "alive": True, "seen": True, "bet": 100, "lastAction": "看牌"},
+        pot=500,
+        call_bet=100,
+    )
+    raise1 = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": True, "bet": 100},
+        {"id": "opponent", "alive": True, "seen": True, "bet": 200, "lastAction": "加注"},
+        pot=700,
+        call_bet=100,
+    )
+    raise2 = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": True, "bet": 100},
+        {"id": "opponent", "alive": True, "seen": True, "bet": 300, "lastAction": "加注"},
+        pot=900,
+        call_bet=100,
+    )
+    # 对手 bet 未变（跟注追平后静止）不再重复计数
+    still = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": True, "bet": 100},
+        {"id": "opponent", "alive": True, "seen": True, "bet": 300, "lastAction": "加注"},
+        pot=900,
+        call_bet=100,
+    )
+
+    _update_round_tracker(before, tracker)
+    _update_round_tracker(raise1, tracker)
+    _update_round_tracker(raise2, tracker)
+    _update_round_tracker(still, tracker)
+
+    assert tracker.opponent_raise_counts["opponent"] == 2
+    assert tracker.snapshots["opponent"].is_raise
+
+
+def test_seen_opponent_ranges_escalates_raise_threshold_for_consecutive_raises() -> None:
+    """回归：对手连续 raise 3 次，门槛按 β=0.5 逐级上调（0.5 → 0.9375）。
+
+    旧实现只按赔率 break-even 反推门槛，连续 raise 的强度信号被低估——
+    我方同花胜率虚高、死追输钱（用户报「对对方牌力预估太保守」）。
+    """
+    tracker = _RoundTracker()
+    tracker.snapshots["opponent"] = _OpponentSnapshot(
+        pot=500, call_bet=100, opponents=1, blind_opponents=1, is_raise=True
+    )
+    tracker.opponent_raise_counts["opponent"] = 3
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": True},
+        {"id": "opponent", "alive": True, "seen": True},
+        pot=1000,
+        call_bet=100,
+    )
+
+    blind, ranges = _seen_opponent_ranges(game, tracker, 0.5)
+
+    assert blind == 0
+    assert len(ranges) == 1
+    # 快照反推门槛 pot=500/callBet=100 → break-even 0.1667，连续 raise 3 次逐级上调：
+    # 0.1667 → 0.5833 → 0.7917 → 0.8958
+    assert ranges[0].lower == pytest.approx(0.8958333)
+
+    # 控制组：单次加注（raise_count=0）门槛保持反推值不升级
+    tracker_flat = _RoundTracker()
+    tracker_flat.snapshots["opponent"] = _OpponentSnapshot(
+        pot=500, call_bet=100, opponents=1, blind_opponents=1, is_raise=True
+    )
+    _, ranges_flat = _seen_opponent_ranges(game, tracker_flat, 0.5)
+    assert ranges_flat[0].lower == pytest.approx(0.1666667)
+
+
+def test_seen_opponent_ranges_no_escalation_in_showdown_phase() -> None:
+    """强制摊牌阶段（phase=showdown）对手 raise 是唯一「继续」动作，不升级门槛。"""
+    tracker = _RoundTracker()
+    tracker.snapshots["opponent"] = _OpponentSnapshot(
+        pot=500, call_bet=100, opponents=1, blind_opponents=1, is_raise=True
+    )
+    tracker.opponent_raise_counts["opponent"] = 3
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": True},
+        {"id": "opponent", "alive": True, "seen": True},
+        pot=1000,
+        call_bet=100,
+    )
+    game["phase"] = "showdown"
+
+    _, ranges = _seen_opponent_ranges(game, tracker, 0.5)
+
+    assert ranges[0].lower == pytest.approx(0.1666667)
+
+
+def test_call_decision_consecutive_raises_flips_flush_to_fold() -> None:
+    """用户场景回归：同花面对对手连续 raise，门槛上调后 EV 由正转负、改弃牌。
+
+    金花(9,5,3) 单挑胜率 0.952；对手连续 raise 5 次门槛升至 0.984（>0.952）→
+    胜率归零 → EV 负。旧实现门槛 0.5 → 胜率 0.904 → EV 巨正 → 死追。
+    """
+    pot, call_bet = 30000.0, 6000.0
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": True},
+        {"id": "opponent", "alive": True, "seen": True},
+        pot=pot,
+        call_bet=call_bet,
+    )
+    game["phase"] = "playing"
+
+    tracker = _RoundTracker()
+    tracker.snapshots["opponent"] = _OpponentSnapshot(
+        pot=500, call_bet=100, opponents=1, blind_opponents=1, is_raise=True
+    )
+    tracker.opponent_raise_counts["opponent"] = 5
+    dec = _call_decision("金花", (9, 5, 3), game, 0.5, tracker, None)
+    assert dec is not None
+    assert dec.expected_value < 0
+
+    tracker_flat = _RoundTracker()
+    tracker_flat.snapshots["opponent"] = _OpponentSnapshot(
+        pot=500, call_bet=100, opponents=1, blind_opponents=1, is_raise=True
+    )
+    dec_flat = _call_decision("金花", (9, 5, 3), game, 0.5, tracker_flat, None)
+    assert dec_flat is not None
+    assert dec_flat.expected_value > 0
+    assert dec_flat.expected_value > dec.expected_value
+
+    # _choose 决策层也翻转：连续 raise 5 次 → 弃牌
+    choice = _choose("金花", (9, 5, 3), game, 0.5, tracker, 0, None)
+    assert not choice.call
+    assert "低于弃牌容差" in choice.reason
