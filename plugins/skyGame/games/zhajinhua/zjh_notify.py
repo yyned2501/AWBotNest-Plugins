@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import datetime
 from typing import Any
 
 from .zjh_hand import _normalize_hand_type
@@ -18,6 +19,7 @@ from .zjh_model import (
     _TerminalDecision,
 )
 from .zjh_state import _is_alive, _is_self, _opponent_entries, _players
+from .zjh_stats import format_stats, load_day_stats, load_total_stats
 
 
 def _threshold_summary(decision: _CallDecision) -> str:
@@ -165,8 +167,15 @@ def _blind_notification(
     return "\n".join(lines)
 
 
-def _game_result_notification(game_data: dict[str, Any], hand: str, hand_type: str) -> str:
-    """生成牌局结束通知：本局结果、我方手牌、对手排行与摊牌手牌。"""
+def _game_result_notification(
+    game_data: dict[str, Any],
+    hand: str,
+    hand_type: str,
+    delta: float | None = None,
+    total_stats: dict[str, int | float] | None = None,
+    day_stats: dict[str, int | float] | None = None,
+) -> str:
+    """生成牌局结束通知：本局结果、我方手牌、对手排行，以及本局盈亏与累计战绩。"""
     game = game_data.get("game", {})
     s = game.get("self", {})
     alive = s.get("alive", False)
@@ -197,6 +206,13 @@ def _game_result_notification(game_data: dict[str, Any], hand: str, hand_type: s
             result_lines.append(f"  {label} 出局 · {p_hand}（{p_hand_type}）")
         else:
             result_lines.append(f"  {label} 出局")
+    # 本局盈亏与战绩（结算自 game.lastResult.selfDelta，由调用方入账后传入）
+    if delta is not None:
+        result_lines.append(f"本局 {delta:+.0f}")
+    if total_stats and total_stats.get("games"):
+        result_lines.append(f"📊 累计 {format_stats(total_stats)}")
+    if day_stats and day_stats.get("games"):
+        result_lines.append(f"📅 今日 {format_stats(day_stats)}")
     return "\n".join(result_lines)
 
 
@@ -206,9 +222,12 @@ async def _notify_game_result(
     game_data: dict[str, Any],
     hand: str,
     hand_type: str,
+    delta: float | None = None,
 ) -> None:
-    """推送牌局结束结果通知。"""
+    """推送牌局结束结果通知，附带累计与当日战绩。"""
     if not cfg.get("zjh_notify_hand", True):
         return
-    notification = _game_result_notification(game_data, hand, hand_type)
+    total_stats = load_total_stats(ctx.kv)
+    day_stats = load_day_stats(ctx.kv, datetime.date.today().isoformat())
+    notification = _game_result_notification(game_data, hand, hand_type, delta, total_stats, day_stats)
     await ctx.notify(notification)
