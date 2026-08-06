@@ -78,6 +78,8 @@ class _RoundTracker:
     seen_acted: bool = False
     # 本局已发送的终局动作（去重：同一轮同动作不重复发送，避免 CSRF 失效后无限循环）
     last_terminal_action: str | None = None
+    # 本局各对手的加注次数（已看牌对手连续 raise 时门槛逐级上调用；每局随 tracker 重建而重置）
+    opponent_raise_counts: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -365,6 +367,11 @@ def _update_round_tracker(game: dict[str, Any], tracker: _RoundTracker, log: Any
                             )
                     else:
                         tracker.snapshots[key] = replace(snapshot, is_raise=_is_raise_action(current.last_action))
+                        if _is_raise_action(current.last_action):
+                            # 对手本局加注次数 +1：连续 raise 是强牌信号，已看牌决策据此
+                            # 逐级上调对手门槛（v1.16.8，防「摸到同花死追输钱」——旧实现
+                            # 只按赔率 break-even 反推门槛，连续加注被低估导致我方胜率虚高）
+                            tracker.opponent_raise_counts[key] = tracker.opponent_raise_counts.get(key, 0) + 1
                         if log:
                             inferred = _combined_opponent_threshold(tracker.peek_snapshots.get(key), snapshot)
                             log.info(
@@ -454,7 +461,9 @@ def _seen_opponent_ranges(
     （对手可能慢打坚果牌）。门槛实测反推优先，缺失才用回退分位；observed 标记来源。
     profile 非空时，把画像引用、对手 uid 与动作类型填入 _SeenRange，并用画像的
     raise_threshold_floor 调整加注下限——诈唬型对手（常拿弱牌加注）下限被拉低
-    → 范围扩大 → 我方胜率更高。
+    → 范围扩大 → 我方胜率更高。连续加注（tracker.opponent_raise_counts）时门槛
+    先按 raise 次数逐级上调（+25%/次），再与画像下四分位取高——连续 raise 是强牌
+    信号，不能被历史弱牌加注拉低（v1.16.8）。
     bucket_key 让画像查询只取对应状态桶（如 "s_s1b1"）的数据。
     """
     blind, _ = _opponent_counts(game)
@@ -476,15 +485,32 @@ def _seen_opponent_ranges(
         bucket_key = f"{'s' if op_seen else 'b'}_s{adj_seen}b{adj_blind}"
         if is_raise:
             base_floor = lower
+            # 连续加注升级：对手本局 raise 次数越多门槛越高。旧实现只按赔率
+            # break-even 反推门槛，连续 raise 的强度信号被低估 → 我方胜率虚高 →
+            # 摸到同花死追对手连加输钱（v1.16.8，用户报「预估太保守」）。
+            # 力度用「每次关掉剩余区间一半」（β=0.5），强于决策树推演的 +25%/次：
+            # 已确认的连续 raise 是事实信号，且 uniform[门槛,1.0] 假设会把约 77%
+            # 权重放在「比我小的牌仍连加」上——真实连续 raise 的对手牌力右偏。
+            # 强制摊牌阶段（phase=showdown）不升级：实测该阶段 raise 是唯一「继续」
+            # 动作（actions 只剩 fold/raise/showdown），对手被迫每轮 raise，不代表牌强。
+            raise_count = tracker.opponent_raise_counts.get(key, 0)
+            if raise_count > 0 and game.get("phase") != "showdown":
+                threshold_now = base_floor
+                for _ in range(raise_count):
+                    threshold_now = threshold_now + (1.0 - threshold_now) * 0.5
+                base_floor = threshold_now
             if profile is not None and key:
                 floor = profile.raise_threshold_floor(key, base_floor, bucket_key)
                 if floor is not None:
-                    base_floor = floor
+                    # 连续加注时取高：升级后的门槛是强信号下限，不能被历史弱牌加注
+                    # 下四分位拉低（那会把「连续 raise 3 次」的对手当单次加注评估）；
+                    # 单次加注沿用旧的收缩混合（诈唬考量，v1.14.3 用户认可的行为）
+                    base_floor = max(base_floor, floor) if raise_count > 0 else floor
                 else:
                     # 无实测手牌分位时回退加注频率推断
                     freq_floor = profile.raise_floor_from_freq_bucket(key, op_seen, adj_seen, adj_blind, base_floor)
                     if freq_floor is not None:
-                        base_floor = freq_floor
+                        base_floor = max(base_floor, freq_floor) if raise_count > 0 else freq_floor
             ranges.append(_SeenRange(base_floor, 1.0, observed, profile, key, action, bucket_key))
         else:
             ranges.append(_SeenRange(lower, 1.0, observed, profile, key, action, bucket_key))
