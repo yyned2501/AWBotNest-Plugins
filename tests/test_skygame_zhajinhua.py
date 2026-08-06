@@ -62,6 +62,7 @@ from plugins.skyGame.games.zhajinhua.zhajinhua import (
     _TerminalDecision,
     _train_opponent_actions,
     _update_round_tracker,
+    record_round_result,
 )
 from plugins.skyGame.games.zhajinhua.zjh_profile import (
     PRIOR_STRENGTH,
@@ -1281,6 +1282,7 @@ class _CapturingContext:
 
     def __init__(self) -> None:
         self.messages: list[str] = []
+        self.kv: dict[str, object] = {}
 
     async def notify(self, message: str, *args: object, **kwargs: object) -> None:
         self.messages.append(message)
@@ -3187,3 +3189,128 @@ def test_call_decision_consecutive_raises_flips_flush_to_fold() -> None:
     choice = _choose("金花", (9, 5, 3), game, 0.5, tracker, 0, None)
     assert not choice.call
     assert "低于弃牌容差" in choice.reason
+
+
+class _FakeKV:
+    """内存版 ctx.kv：支持 get/set（战绩入账与统计读回）。"""
+
+    def __init__(self) -> None:
+        self._d: dict[str, object] = {}
+
+    def get(self, key: str, default: object = None) -> object:
+        return self._d.get(key, default)
+
+    def set(self, key: str, value: object) -> None:
+        self._d[key] = value
+
+
+def test_record_round_result_accumulates_total_and_day() -> None:
+    """正向：多局入账，累计与当日统计同步更新，返回本局净输赢。"""
+    kv = _FakeKV()
+    assert record_round_result(kv, {"roundId": 1, "selfDelta": 15000}, today="2026-08-06") == 15000
+    assert record_round_result(kv, {"roundId": 2, "selfDelta": -3000}, today="2026-08-06") == -3000
+    assert record_round_result(kv, {"roundId": 3, "selfDelta": 2000}, today="2026-08-06") == 2000
+
+    total = kv.get("zjh:stats")
+    assert total["games"] == 3
+    assert total["wins"] == 2 and total["losses"] == 1 and total["draws"] == 0
+    assert total["profit"] == 17000 and total["loss_amount"] == 3000
+    day = kv.get("zjh:stats:day:2026-08-06")
+    assert day == total
+
+
+def test_record_round_result_skips_missing_delta() -> None:
+    """异常路径：无 selfDelta 或结构异常时不入账、返回 None。"""
+    kv = _FakeKV()
+    assert record_round_result(kv, {"roundId": 1}) is None
+    assert record_round_result(kv, {"roundId": 2, "selfDelta": "abc"}) is None
+    assert record_round_result(kv, None) is None
+    assert kv.get("zjh:stats") is None
+
+
+def test_record_round_result_day_isolation() -> None:
+    """不同日期分键存储，互不影响。"""
+    kv = _FakeKV()
+    record_round_result(kv, {"selfDelta": 1000}, today="2026-08-05")
+    record_round_result(kv, {"selfDelta": -500}, today="2026-08-06")
+    assert kv.get("zjh:stats")["games"] == 2
+    assert kv.get("zjh:stats:day:2026-08-05")["games"] == 1
+    assert kv.get("zjh:stats:day:2026-08-06")["games"] == 1
+    assert kv.get("zjh:stats:day:2026-08-05")["profit"] == 1000
+    assert kv.get("zjh:stats:day:2026-08-06")["loss_amount"] == 500
+
+
+def test_game_result_notification_with_delta_and_stats() -> None:
+    """正向：本局盈亏、累计与当日战绩都渲染进对局结束通知。"""
+    game_data = {
+        "game": {
+            "self": {"alive": True},
+            "players": [
+                {"id": "self", "isSelf": True, "alive": True, "hand": "A♠ K♠ Q♠", "handType": "金花"},
+                {"id": "opp", "alive": True, "hand": "K♣ K♦ 9♠", "handType": "对子"},
+            ],
+        }
+    }
+    total = {
+        "games": 120,
+        "wins": 61,
+        "draws": 4,
+        "losses": 55,
+        "profit": 45000.0,
+        "loss_amount": 36100.0,
+    }
+    day = {
+        "games": 12,
+        "wins": 7,
+        "draws": 0,
+        "losses": 5,
+        "profit": 8000.0,
+        "loss_amount": 6800.0,
+    }
+
+    notification = _game_result_notification(game_data, "A♠ K♠ Q♠", "金花", 15000, total, day)
+
+    assert "本局 +15000" in notification
+    assert "📊 累计 120 局 · 胜 61 / 平 4 / 负 55 · 净 +8900" in notification
+    assert "📅 今日 12 局 · 胜 7 / 平 0 / 负 5 · 净 +1200" in notification
+
+
+def test_game_result_notification_negative_delta_and_no_stats() -> None:
+    """异常路径：负盈亏渲染带符号；无战绩时不渲染统计行。"""
+    game_data = {
+        "game": {
+            "self": {"alive": False},
+            "players": [{"id": "self", "isSelf": True, "alive": False}],
+        }
+    }
+    notification = _game_result_notification(game_data, "", "", -3000, None, None)
+    assert "本局 -3000" in notification
+    assert "📊" not in notification
+    assert "📅" not in notification
+
+
+@pytest.mark.asyncio
+async def test_notify_game_result_appends_cumulative_stats() -> None:
+    """正向：_notify_game_result 从 kv 读累计战绩拼进通知。"""
+    ctx = _CapturingContext()
+    ctx.kv["zjh:stats"] = {
+        "games": 10,
+        "wins": 6,
+        "draws": 0,
+        "losses": 4,
+        "profit": 8000.0,
+        "loss_amount": 2500.0,
+    }
+    game_data = {
+        "game": {
+            "self": {"alive": True},
+            "players": [{"id": "self", "isSelf": True, "alive": True}],
+        }
+    }
+
+    await _notify_game_result(ctx, {"zjh_notify_hand": True}, game_data, "A♠ K♠ Q♠", "金花", 15000)
+
+    assert ctx.messages
+    msg = ctx.messages[0]
+    assert "本局 +15000" in msg
+    assert "📊 累计 10 局 · 胜 6 / 平 0 / 负 4 · 净 +5500" in msg

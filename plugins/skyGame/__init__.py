@@ -23,7 +23,7 @@ from .games import hdsky_auth
 __plugin__ = {
     "name": "天空游戏",
     "id": "skyGame",
-    "version": "1.16.8",
+    "version": "1.16.9",
     "author": "Yy",
     "description": "天空系列游戏统一入口：炸金花自动参与、养马自动养护，左侧按游戏分组配置。",
     "scope": "user",
@@ -381,6 +381,9 @@ __plugin__ = {
         },
     },
     "changelog": (
+        "v1.16.9 更新：\n"
+        "- 新增对局战绩统计：每局结算（game.lastResult.selfDelta）入账累计与当日战绩"
+        "（局数·胜/平/负·净盈亏），对局结束通知展示本局盈亏与「📊 累计」「📅 今日」战绩行\n"
         "v1.16.8 更新：\n"
         "- 修复已看牌对手牌力预估太保守：摸到同花面对对手连续加注仍死追输钱"
         "（用户报「对对方牌力预估太保守」）。旧实现只按赔率 break-even 反推门槛，"

@@ -85,6 +85,7 @@ from .zjh_notify import (
 )
 from .zjh_profile import feed_last_result, get_store, record_round_raise_freq, reset_store
 from .zjh_state import _in_hand, _is_self, _opponent_counts, _player_key, _players
+from .zjh_stats import record_round_result
 
 __all__ = [
     "_FOLD_CONFIRM_MAX_RETRIES",
@@ -145,6 +146,7 @@ __all__ = [
     "feed_last_result",
     "get_store",
     "record_round_raise_freq",
+    "record_round_result",
     "reset_store",
     "start",
     "stop",
@@ -480,9 +482,13 @@ async def _poll_loop(ctx: object) -> None:
                 g = game_data.get("game", {})
                 rid = g.get("roundId")
                 if rid and rid != last_rid:
-                    # 上一局结束，推送结果
+                    # 上一局结束：入账本局结算（lastResult 滞后一局，此刻正好是刚结束那局），
+                    # 再推送结果通知（含本局盈亏与累计战绩）
                     if last_rid and round_joined:
-                        await _notify_game_result(ctx, cfg, game_data, last_round_hand, last_round_hand_type)
+                        last_delta = record_round_result(ctx.kv, g.get("lastResult"))
+                        await _notify_game_result(
+                            ctx, cfg, game_data, last_round_hand, last_round_hand_type, last_delta
+                        )
                     last_rid = rid
                     turns_taken = 0
                     # 新一局：待确认弃牌属于上一局，连同重试计数一起重置，
