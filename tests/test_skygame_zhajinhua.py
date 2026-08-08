@@ -50,6 +50,7 @@ from plugins.skyGame.games.zhajinhua.zhajinhua import (
     _seen_factor,
     _seen_opponent_ranges,
     _SeenRange,
+    _self_action_probs,
     _self_hand,
     _snapshot_for_actor,
     _terminal_action_ineffective,
@@ -3943,3 +3944,130 @@ def test_6881_peek_floor_keeps_call_before_raise_then_folds() -> None:
     )
     fold_choice = _choose("对子", (3, 9), after_raise, 0.5, tracker_raise, 0, store)
     assert fold_choice is not None and not fold_choice.call
+
+
+# ── v1.16.20：深度 EV 反推对手门槛 ──
+
+
+def test_opponent_deep_threshold_6881_peek() -> None:
+    """v1.16.20 回归：#6881 单挑上牌快照用深度 EV 反推，门槛显著高于单步 breakeven。
+
+    单步 3500/15750≈0.222 隐含「跟注这一手就结束」，忽略后续轮次追平与终端
+    showdown 成本（用户 2026-08-08：这些金额也要算进去才能算出来 ev）。深度
+    反推把每轮跟注 + 最后摊牌成本计入，depth=2 门槛升到 0.353、随深度递增。
+    """
+    peek = _OpponentSnapshot(pot=12250, call_bet=3500, opponents=1)
+    single = _opponent_hand_threshold(peek)
+    assert single == pytest.approx(3500 / 15750)
+    deep_1 = _opponent_hand_threshold(peek, 1)
+    deep_2 = _opponent_hand_threshold(peek, 2)
+    deep_3 = _opponent_hand_threshold(peek, 3)
+    assert deep_1 > single
+    assert deep_2 > deep_1
+    assert deep_3 > deep_2
+    # 平台默认 zjh_terminal_depth=2：单挑 peek 门槛 0.353，替代 v1.16.18 的 0.5 下限
+    assert deep_2 == pytest.approx(0.3529, abs=1e-3)
+
+
+def test_opponent_deep_threshold_raise_lifts_threshold() -> None:
+    """v1.16.20：我方有加注倾向时，对手后续要追平抬高的 callBet，门槛更高。
+
+    我方画像（call 0.6 / raise 0.4）下，对手上牌后轮次成本更高——门槛从
+    0.353（我方必平跟）升到 0.385；raise 概率越高门槛越高。
+    """
+    peek = _OpponentSnapshot(pot=12250, call_bet=3500, opponents=1)
+    probs = (0.0, 0.6, 0.4)
+    aggressive = (0.0, 0.3, 0.7)
+    assert _opponent_hand_threshold(peek, 2, probs) > _opponent_hand_threshold(peek, 2)
+    assert _opponent_hand_threshold(peek, 2, aggressive) > _opponent_hand_threshold(peek, 2, probs)
+
+
+def test_opponent_deep_threshold_continue_snapshot() -> None:
+    """v1.16.20：#6881 继续下注快照（对手面对 0.533 强已看牌对手）深度反推更高。"""
+    continued = _OpponentSnapshot(pot=26250, call_bet=3500, opponents=1, blind_opponents=0, seen_thresholds=(0.533,))
+    single = _opponent_hand_threshold(continued)
+    assert single == pytest.approx(0.588, abs=1e-3)
+    deep = _opponent_hand_threshold(continued, 2)
+    assert deep > single
+    assert deep == pytest.approx(0.645, abs=1e-3)
+
+
+def test_opponent_deep_threshold_missing_opponent_not_degenerate() -> None:
+    """v1.16.20：单挑快照漏掉「已看牌无门槛」对手时不退化为 0。
+
+    对手 peek 时我方已看牌但 tracker 尚无我方门槛 → seen_thresholds=() 会让
+    _actual_win_probability 退化为恒 1.0（t^0×空积），深度反推错误拉低到 0。
+    缺失对手按蒙牌 t 因子补全后，门槛回到真实量级。
+    """
+    peek = _OpponentSnapshot(pot=12250, call_bet=3500, opponents=1, blind_opponents=0, seen_thresholds=())
+    deep = _opponent_hand_threshold(peek, 2)
+    assert deep is not None
+    assert deep > 0.3
+    # 多人局对手门槛高于所有对手时：EV(1.0)=底池累计+我方入池>0 恒正，深度反推在
+    # t<1 处总有解，返回高于 max(seen) 的门槛（0.98），不退化也不回调 fallback
+    tough = _OpponentSnapshot(pot=1000, call_bet=900, opponents=2, blind_opponents=0, seen_thresholds=(0.9, 0.95))
+    tough_deep = _opponent_hand_threshold(tough, 2)
+    assert tough_deep is not None
+    assert tough_deep > 0.95
+    # 非法快照（seen 越界）→ None（防御性校验，调用方回退 fallback）
+    invalid = _OpponentSnapshot(pot=1000, call_bet=900, opponents=2, blind_opponents=0, seen_thresholds=(0.9, 1.0))
+    assert _opponent_hand_threshold(invalid, 2) is None
+
+
+def test_combined_opponent_threshold_deep_replaces_min_peek() -> None:
+    """v1.16.20：决策侧深度反推替代 v1.16.18 的 min_peek 下限。
+
+    单步反推 0.222 太宽（#6881）；深度反推 depth=2 给 0.353，天然高于单步，
+    无需再 max(反推, zjh_peeked_threshold 分位)。min_peek 参数保留向后兼容，
+    但决策侧调用传 None。
+    """
+    peek = _OpponentSnapshot(pot=12250, call_bet=3500, opponents=1)
+    deep = _combined_opponent_threshold(peek, None, None, 2)
+    single = _combined_opponent_threshold(peek, None)
+    assert deep is not None and single is not None
+    assert deep > single
+    assert deep == pytest.approx(0.353, abs=1e-3)
+
+
+def test_self_action_probs_uses_self_profile() -> None:
+    """v1.16.20：把我也作为一个用户——反推时查我方账号自己的画像。"""
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": True},
+        {"id": "opp", "alive": True, "seen": True},
+        pot=1000,
+        call_bet=100,
+    )
+    store = ProfileStore()
+    # 显式不启用画像 → None（深度反推回退「我方必平跟」）
+    assert _self_action_probs(game, None, True) is None
+    # 画像存在但无我方数据 → 全局先验（ProfileStore 对未知 uid 的标准行为）
+    prior = _self_action_probs(game, store, True)
+    assert prior is not None
+    assert prior == pytest.approx((1 / 3, 1 / 3, 1 / 3))
+    # 我方动作记录进画像（adj 不含自己：面对 1 个看牌对手）
+    store.record_action("self", "raise", True, 1, 0)
+    store.record_action("self", "call", True, 1, 0)
+    probs = _self_action_probs(game, store, True)
+    assert probs is not None
+    assert probs[0] == 0.0  # fold
+    assert probs[1] == pytest.approx(0.5)  # call
+    assert probs[2] == pytest.approx(0.5)  # raise
+
+
+def test_train_opponent_actions_records_self() -> None:
+    """v1.16.20：_train_opponent_actions 把我方动作也记入画像（不再跳过 self）。"""
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": True, "lastAction": "+6400 追加", "bet": 6400},
+        {"id": "opp", "alive": True, "seen": True, "lastAction": "跟注", "bet": 3200},
+        pot=1000,
+        call_bet=100,
+    )
+    store = ProfileStore()
+    last_seen: dict[str, tuple[str, float]] = {}
+    round_action: dict[str, tuple[str, bool, int, int, bool]] = {}
+    _train_opponent_actions(store, game, last_seen, round_action)
+    # 我方动作已记录（桶 s_s1b0：自己看牌、面对 1 个看牌对手）
+    self_probs = store.action_probabilities("self", True, 1, 0)
+    assert self_probs == (0.0, 0.0, 1.0)
+    # round_action 也收我方（结算回填/加注频率共享同一画像）
+    assert round_action["self"][0] == "raise"

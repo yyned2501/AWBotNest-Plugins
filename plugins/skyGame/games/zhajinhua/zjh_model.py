@@ -203,36 +203,218 @@ def _hand_threshold_for_actual_win_probability(
 
 
 def _opponent_threshold(snapshot: _OpponentSnapshot | None) -> float | None:
-    """反推对手在该快照下牌局整体胜率的盈亏平衡门槛。"""
+    """反推对手在该快照下牌局整体胜率的盈亏平衡门槛（单步 breakeven）。"""
     if snapshot is None or snapshot.pot <= 0 or snapshot.call_bet <= 0:
         return None
     return snapshot.call_bet / (snapshot.pot + snapshot.call_bet)
 
 
-def _opponent_hand_threshold(snapshot: _OpponentSnapshot | None) -> float | None:
-    """按蒙牌与已看牌对手权重精确反推对手最低单挑牌力。"""
+def _opponent_hand_threshold(
+    snapshot: _OpponentSnapshot | None,
+    depth: int = 0,
+    self_action_probs: tuple[float, float, float] | None = None,
+    self_seen: bool = True,
+    ante: float = 0.0,
+) -> float | None:
+    """按蒙牌与已看牌对手权重精确反推对手最低单挑牌力。
+
+    depth>0 时用深度 EV 反推（v1.16.20）：站在对手视角递归推演后续轮次，把
+    我方追平/加注与终端摊牌成本计入，直接二分单挑牌力门槛 t 求 EV(t)=0。
+    单步 breakeven `call/(pot+call)` 隐含「跟注这一手就结束」，忽略后续轮次
+    追平与摊牌成本，上牌门槛被系统性低估（#6881 单挑 3500/15750≈0.222 即
+    「看牌后 78% 都会继续」，明显过宽）。depth=0 保持单步（记录/诊断侧）。
+    """
+    if snapshot is None:
+        return None
+    if depth > 0:
+        return _opponent_deep_threshold(snapshot, depth, self_action_probs, self_seen, ante)
     actual_threshold = _opponent_threshold(snapshot)
-    if actual_threshold is None or snapshot is None:
+    if actual_threshold is None:
         return None
     blind_opponents = snapshot.blind_opponents if snapshot.blind_opponents is not None else snapshot.opponents
     return _hand_threshold_for_actual_win_probability(actual_threshold, blind_opponents, snapshot.seen_thresholds)
+
+
+def _opponent_deep_ev(
+    t: float,
+    pot: float,
+    call_bet: float,
+    blind_opponents: int,
+    seen_thresholds: tuple[float, ...],
+    depth: int,
+    self_action_probs: tuple[float, float, float] | None,
+    self_seen: bool,
+    ante: float,
+    cost: float,
+) -> float:
+    """站在对手视角的深度 EV 递归（内部实现，v1.16.20）。
+
+    对手已看牌、牌力 t（单挑门槛）。每轮时序与 _terminal_ev_call 同构、视角互换：
+    对手先按 callBet 跟注入池（已看牌全价）→ 我方行动——我方在评估「继续」价值
+    不会弃牌（p_fold=0，同 v1.16.6「看牌对手不进入 fold 分支」），call/raise 按
+    画像概率加权；我方 callBet 不变平跟、raise 使 callBet 线性递增一注底注（实测
+    ante→2×ante→3×ante，非复利）；我方蒙牌时下注半价（self_seen=False）。深度
+    耗尽 = 强制摊牌（实测 showdown 成本 = 当时 callBet 单倍，已含在跟注入池），
+    不再下注，对手净值 = 胜率 × 底池 − 累计成本。
+    """
+    if self_action_probs is None:
+        p_call, p_raise = 1.0, 0.0
+    else:
+        p_fold, p_call, p_raise = self_action_probs
+        total = p_fold + p_call + p_raise
+        if total <= 0:
+            p_call, p_raise = 1.0, 0.0
+        else:
+            p_fold, p_call, p_raise = p_fold / total, p_call / total, p_raise / total
+            cont = p_call + p_raise
+            if cont <= 0:
+                p_call, p_raise = 1.0, 0.0
+            else:
+                p_call, p_raise = p_call / cont, p_raise / cont
+
+    # 本轮：对手先跟 callBet 入池（已看牌全价）
+    pot += call_bet
+    cost += call_bet
+
+    if depth <= 0:
+        # 深度耗尽 = 强制摊牌结束：对手付最后一次 showdown 成本（=callBet 单倍，
+        # 已含在上方入池），随后按胜率分底池。单步 breakeven 把「跟注这手就结束」
+        # 当免费，忽略这最后摊牌——对手上牌后要 showdown 响应才能结束，该成本
+        # 必须计入（用户 2026-08-08：这些金额也要算进去才能算出来 ev）。
+        win = _actual_win_probability(t, blind_opponents, seen_thresholds)
+        return win * pot - cost
+
+    ev = 0.0
+    # 我方平跟：callBet 不变，我方下注额 = callBet（看牌全价）/ 半价（蒙牌）
+    if p_call > 0:
+        my_stride = call_bet if self_seen else call_bet / 2
+        ev += p_call * _opponent_deep_ev(
+            t,
+            pot + my_stride,
+            call_bet,
+            blind_opponents,
+            seen_thresholds,
+            depth - 1,
+            self_action_probs,
+            self_seen,
+            ante,
+            cost,
+        )
+    # 我方加注：callBet 线性递增一注底注，我方下注额 = 新 callBet（看牌全价/蒙牌半价）
+    if p_raise > 0:
+        new_call_bet = call_bet + ante
+        my_stride = new_call_bet if self_seen else new_call_bet / 2
+        ev += p_raise * _opponent_deep_ev(
+            t,
+            pot + my_stride,
+            new_call_bet,
+            blind_opponents,
+            seen_thresholds,
+            depth - 1,
+            self_action_probs,
+            self_seen,
+            ante,
+            cost,
+        )
+    return ev
+
+
+def _opponent_deep_threshold(
+    snapshot: _OpponentSnapshot,
+    depth: int,
+    self_action_probs: tuple[float, float, float] | None,
+    self_seen: bool,
+    ante: float,
+) -> float | None:
+    """站在对手视角用深度 EV 递归反推对手最低单挑牌力门槛（二分 EV(t)=0）。
+
+    EV(t) 对 t 单调递增（t 越大胜率越高）：二分求 EV(t)=0 的边界，即刚能盈利的
+    t 就是门槛。门槛低于所有已看牌对手时胜率为 0、EV<0，二分下界从
+    max(seen_thresholds) 起。极强牌仍负 EV（多人强对手）返回 None，由调用方
+    回退 fallback 分位。
+    """
+    ante = ante if ante > 0 else snapshot.call_bet
+    blind_opponents = snapshot.blind_opponents if snapshot.blind_opponents is not None else snapshot.opponents
+    seen_thresholds = snapshot.seen_thresholds
+    # 快照可能漏掉「已看牌但无门槛」的对手（如我方已看牌但 tracker 尚未记录我方
+    # 门槛）：单挑时对手面对的对手只剩我方，seen_thresholds=() 会让胜率退化为恒
+    # 1.0（t^0 × 空积），深度反推错误拉低到 0。把缺失对手按蒙牌 t 因子近似
+    # （对随机手牌的单挑胜率 = t），与 _blind_win_probability 对未知手牌的处理一致。
+    missing = max(snapshot.opponents - blind_opponents - len(seen_thresholds), 0)
+    blind_opponents += missing
+    if blind_opponents < 0 or any(not 0 <= threshold < 1 for threshold in seen_thresholds):
+        return None
+
+    def opponent_ev(t: float) -> float:
+        return _opponent_deep_ev(
+            t,
+            snapshot.pot,
+            snapshot.call_bet,
+            blind_opponents,
+            seen_thresholds,
+            depth,
+            self_action_probs,
+            self_seen,
+            ante,
+            0.0,
+        )
+
+    lower = math.nextafter(max(seen_thresholds, default=0.0), 1.0)
+    if opponent_ev(lower) >= 0:
+        return lower
+    if opponent_ev(1.0) < 0:
+        return None
+    upper = 1.0
+    for _ in range(60):
+        middle = (lower + upper) / 2
+        if opponent_ev(middle) < 0:
+            lower = middle
+        else:
+            upper = middle
+    return upper
+
+
+def _self_action_probs(game: dict[str, Any], profile: Any, self_seen: bool) -> tuple[float, float, float] | None:
+    """我方行动概率：把我也作为一个用户做画像（v1.16.20）。
+
+    反推对手门槛时站在对手视角，我方是被反推者眼中的「用户」——我方 call/raise
+    倾向决定对手后续轮次的追平/加注成本，纯赔率反推把它们当常数会低估门槛。
+    查询我方账号在画像里的动作频率（_train_opponent_actions 已把我也当作一个
+    用户记录动作；邻接计数 _opponent_counts 不含我方，直接用其返回的对手蒙/看数）。
+    画像无我方数据时返回 None，深度反推回退「我方必平跟」。
+    """
+    if profile is None:
+        return None
+    self_uid = _self_key(game)
+    if self_uid is None:
+        return None
+    blind_count, seen_count = _opponent_counts(game)
+    return profile.action_probabilities(self_uid, self_seen, seen_count, blind_count)
 
 
 def _combined_opponent_threshold(
     peek_snapshot: _OpponentSnapshot | None,
     continue_snapshot: _OpponentSnapshot | None,
     min_peek: float | None = None,
+    depth: int = 0,
+    self_action_probs: tuple[float, float, float] | None = None,
+    self_seen: bool = True,
+    ante: float = 0.0,
 ) -> float | None:
     """按上牌和看牌后继续下注两次决策推导对手的综合最低牌力。
 
-    min_peek 给上牌门槛设下限（v1.16.18）：peek 是「看牌确认后才继续」的过滤动作，
-    纯赔率盈亏平衡常远低于实际牌力门槛（#6881 单挑 3500/15750≈0.222）——赔率允许
-    22% 胜率就继续，但真实玩家看牌后 78% 都会继续的假设明显过宽，会把对手范围估宽、
-    我方胜率虚高。决策侧传 zjh_peeked_threshold 回退分位做下限，记录/诊断侧不传
-    保持原始反推（决策门槛与日志展示的一致性由各调用点自行负责）。
+    min_peek 给上牌门槛设下限（v1.16.18 旧路径）：peek 是「看牌确认后才继续」的
+    过滤动作，纯赔率盈亏平衡常远低于实际牌力门槛（#6881 单挑 3500/15750≈0.222）——
+    赔率允许 22% 胜率就继续，但真实玩家看牌后 78% 都会继续的假设明显过宽，会把
+    对手范围估宽、我方胜率虚高。决策侧传 zjh_peeked_threshold 回退分位做下限。
+
+    depth>0 时用深度 EV 反推替代 min_peek 下限（v1.16.20，用户确认「深度反推
+    替代下限」）：单步 breakeven 忽略后续轮次追平与终端摊牌成本，上牌门槛被
+    系统性低估；深度反推把上牌成本之外的后续成本计入，门槛天然高于单步，无需
+    再套拍脑袋的分位下限。record/诊断侧不传 depth 保持原始反推。
     """
-    continue_threshold = _opponent_hand_threshold(continue_snapshot)
-    peek_threshold = _opponent_hand_threshold(peek_snapshot)
+    continue_threshold = _opponent_hand_threshold(continue_snapshot, depth, self_action_probs, self_seen, ante)
+    peek_threshold = _opponent_hand_threshold(peek_snapshot, depth, self_action_probs, self_seen, ante)
     if peek_threshold is not None and min_peek is not None:
         peek_threshold = max(peek_threshold, min_peek)
     return max(
@@ -412,16 +594,32 @@ def _update_round_tracker(game: dict[str, Any], tracker: _RoundTracker, log: Any
 
 
 def _seen_opponent_thresholds(
-    game: dict[str, Any], tracker: _RoundTracker, fallback_threshold: float
+    game: dict[str, Any],
+    tracker: _RoundTracker,
+    fallback_threshold: float,
+    depth: int = 0,
+    self_action_probs: tuple[float, float, float] | None = None,
+    self_seen: bool = True,
+    ante: float = 0.0,
 ) -> tuple[int, list[tuple[float, bool]]]:
-    """统计蒙牌对手数，并收集已看牌对手门槛（实测反推优先，缺失才用回退分位）。"""
+    """统计蒙牌对手数，并收集已看牌对手门槛（实测反推优先，缺失才用回退分位）。
+
+    depth>0 时门槛用深度 EV 反推（v1.16.20），替代 min_peek 下限。
+    """
     blind, _ = _opponent_counts(game)
+    ante = ante if ante > 0 else float(game.get("ante", 0) or 0)
     seen_thresholds: list[tuple[float, bool]] = []
     for key, player in _opponent_entries(game):
         if not player.get("seen", False):
             continue
         threshold = _combined_opponent_threshold(
-            tracker.peek_snapshots.get(key), tracker.snapshots.get(key), fallback_threshold
+            tracker.peek_snapshots.get(key),
+            tracker.snapshots.get(key),
+            None,
+            depth,
+            self_action_probs,
+            self_seen,
+            ante,
         )
         observed = threshold is not None
         threshold = threshold if threshold is not None else fallback_threshold
@@ -479,6 +677,10 @@ def _seen_opponent_ranges(
     tracker: _RoundTracker,
     fallback_threshold: float,
     profile: Any = None,
+    depth: int = 0,
+    self_action_probs: tuple[float, float, float] | None = None,
+    self_seen: bool = True,
+    ante: float = 0.0,
 ) -> tuple[int, list[_SeenRange]]:
     """统计蒙牌对手数，并按动作类型为每个已看牌对手构造牌力区间。
 
@@ -493,12 +695,19 @@ def _seen_opponent_ranges(
     bucket_key 让画像查询只取对应状态桶（如 "s_s1b1"）的数据。
     """
     blind, _ = _opponent_counts(game)
+    ante = ante if ante > 0 else float(game.get("ante", 0) or 0)
     ranges: list[_SeenRange] = []
     for key, player in _opponent_entries(game):
         if not player.get("seen", False):
             continue
         threshold = _combined_opponent_threshold(
-            tracker.peek_snapshots.get(key), tracker.snapshots.get(key), fallback_threshold
+            tracker.peek_snapshots.get(key),
+            tracker.snapshots.get(key),
+            None,
+            depth,
+            self_action_probs,
+            self_seen,
+            ante,
         )
         observed = threshold is not None
         lower = threshold if threshold is not None else fallback_threshold
@@ -579,12 +788,18 @@ def _call_decision(
     fallback_threshold: float,
     tracker: _RoundTracker,
     profile: Any = None,
+    depth: int = 0,
+    self_seen: bool = True,
+    ante: float = 0.0,
 ) -> _CallDecision | None:
     """按对手看牌状态及其最近正 EV 行为计算本次跟注的增量 EV。
 
     对手范围全画像驱动：加注对手下限取实测加注分位/频率推断，平跟对手永不封顶；
     反诈唬由逐对手画像（频率异常下界 + 实测弱牌占比）提供，无画像对手 bluff=0，
     此时胜率逐值等于旧的 `_actual_win_probability`，便于回退与 A/B。
+
+    depth>0 时对手门槛用深度 EV 反推（v1.16.20），我方行动概率查我方账号画像
+    （_self_action_probs，把我也作为一个用户）。
     """
     if hand_value is None or not 0 <= fallback_threshold < 1:
         return None
@@ -600,7 +815,11 @@ def _call_decision(
     if one_vs_one <= 0:
         return None
 
-    blind, ranges = _seen_opponent_ranges(game, tracker, fallback_threshold, profile)
+    ante = ante if ante > 0 else float(game.get("ante", 0) or 0)
+    self_action_probs = _self_action_probs(game, profile, self_seen)
+    blind, ranges = _seen_opponent_ranges(
+        game, tracker, fallback_threshold, profile, depth, self_action_probs, self_seen, ante
+    )
     seen = len(ranges)
 
     win_probability = _ranged_win_probability(one_vs_one, blind, ranges)
@@ -1254,7 +1473,12 @@ def _terminal_ev_decision(
     else:
         # 蒙牌精确积分胜率：按对手蒙/看状态（含门槛）计算，已看牌强对手会自然衰减。
         # 作为盲跟决策树的初始胜率，保证截断/递归对强对手场景反映门槛衰减。
-        seen_threshold_list = _seen_opponent_thresholds(game, tracker, fallback_threshold)[1]
+        # 深度 EV 反推对手门槛（v1.16.20）：我方蒙牌，下注半价（self_seen=False）。
+        ante = float(game.get("ante", 0) or 0)
+        self_action_probs = _self_action_probs(game, profile, False)
+        seen_threshold_list = _seen_opponent_thresholds(
+            game, tracker, fallback_threshold, depth, self_action_probs, False, ante
+        )[1]
         blind_win_rate = _blind_win_probability(
             _opponent_counts(game)[0],
             tuple(th for th, _ in seen_threshold_list),
@@ -1310,7 +1534,13 @@ def _terminal_ev_decision(
     )
 
 
-def _blind_decision(game: dict[str, Any], fallback_threshold: float, tracker: _RoundTracker) -> _CallDecision | None:
+def _blind_decision(
+    game: dict[str, Any],
+    fallback_threshold: float,
+    tracker: _RoundTracker,
+    profile: Any = None,
+    depth: int = 0,
+) -> _CallDecision | None:
     """蒙牌（未看牌）决策评估：手牌未知，胜率对未知手牌强度积分，跟注成本按半价计。
 
     用于「蒙还是看」的 EV 决策——EV ≥ 0 时蒙牌半价跟注本身就划算，继续盲跟；
@@ -1319,6 +1549,8 @@ def _blind_decision(game: dict[str, Any], fallback_threshold: float, tracker: _R
     胜率不能把平均单挑胜率 0.5 当固定手牌代进 `t^B`（那会低估：三人全蒙应为 1/3 而非
     0.5²=1/4），改用 `_blind_win_probability` 对未知手牌强度精确积分；`one_vs_one` 字段
     仍记平均单挑胜率 0.5 作展示。成本取已看牌半价。
+
+    depth>0 时对手门槛用深度 EV 反推（v1.16.20），我方蒙牌下注半价。
     """
     if not 0 <= fallback_threshold < 1:
         return None
@@ -1330,7 +1562,11 @@ def _blind_decision(game: dict[str, Any], fallback_threshold: float, tracker: _R
     if pot <= 0 or call_bet <= 0:
         return None
 
-    blind, seen_thresholds = _seen_opponent_thresholds(game, tracker, fallback_threshold)
+    ante = float(game.get("ante", 0) or 0)
+    self_action_probs = _self_action_probs(game, profile, False)
+    blind, seen_thresholds = _seen_opponent_thresholds(
+        game, tracker, fallback_threshold, depth, self_action_probs, False, ante
+    )
     seen = len(seen_thresholds)
 
     blind_cost = _blind_call_cost(float(call_bet))
@@ -1367,7 +1603,7 @@ def _blind_peek_or_call(
     兼容旧行为：depth=1 且 profile=None 时等价旧 _blind_peek_or_call
     （纯单步 EV 决策蒙还是看）。
     """
-    blind_choice = _blind_decision(game, fallback_threshold, tracker)
+    blind_choice = _blind_decision(game, fallback_threshold, tracker, profile, depth)
     terminal = _terminal_ev_decision(
         game, fallback_threshold, tracker, depth, profile, action_probs, opponent_uid, opponents
     )
@@ -1480,6 +1716,8 @@ def _choose(
     tracker: _RoundTracker,
     fold_ev_tolerance_pct: float = 0.0,
     profile: Any = None,
+    depth: int = 0,
+    self_seen: bool = True,
 ) -> _Choice:
     """纯 EV 决策：跟注当且仅当数据有效且增量期望收益不低于弃牌容差。
 
@@ -1487,8 +1725,9 @@ def _choose(
     不弃牌——边际负 EV 在胜率估算噪声内，且弃牌白白让出已投入底池权益。默认 0
     保持旧行为；配置 zjh_fold_ev_tolerance 打开（推荐 5，即 −5%×callBet 内不弃）。
     profile：对手画像（ProfileStore），非空时已看牌胜率接入实测收缩混合 + 逐对手诈唬率。
+    depth>0 时对手门槛用深度 EV 反推（v1.16.20）。
     """
-    decision = _call_decision(hand_type, hand_value, game, fallback_threshold, tracker, profile)
+    decision = _call_decision(hand_type, hand_value, game, fallback_threshold, tracker, profile, depth, self_seen)
     if decision is None:
         return _Choice(False, "牌局数据不完整，保守弃牌", None)
     call_bet = float(game.get("callBet", 0) or 0)
