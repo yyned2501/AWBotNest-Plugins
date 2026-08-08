@@ -763,7 +763,7 @@ return (_ctx, _cache) => {
                               { number: true }
                             ]
                           ]),
-                          _cache[103] || (_cache[103] = _createElementVNode("span", { class: "help" }, " 画像按对手已完成手数衰减：每结算一手，历史计数与手牌样本权重减半（半衰期手数见上）。 高频对手自然衰减快、低频慢；0 = 不衰减（永久保留全部历史，旧行为）。 ", -1))
+                          _cache[103] || (_cache[103] = _createElementVNode("span", { class: "help" }, " 画像按对手已完成手数衰减：每结算一手，历史计数与手牌样本权重减半（半衰期手数见上）。 高频对手自然衰减快、低频慢；0 = 不衰减（永久保留全部历史，旧行为）。 手牌样本窗口自动跟随半衰期（3 个半衰期、最少 100 条），调大半衰期不会缩短真实记忆窗口。 ", -1))
                         ])
                       ]),
                       _createElementVNode("section", _hoisted_69, [
@@ -871,6 +871,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const Config = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-16d8d2cb"]]);
+const Config = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-08c01931"]]);
 
 export { Config as default };
