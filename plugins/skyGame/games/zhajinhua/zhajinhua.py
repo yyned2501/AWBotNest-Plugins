@@ -547,6 +547,12 @@ async def _poll_loop(ctx: object) -> None:
                 phase = g.get("phase", "")
                 actions = g.get("actions", [])
                 joined = s.get("joined", False)
+                # bot 已参局 → 置位 round_joined：战绩入账与对局结果通知的前提。
+                # v1.16.9 曾只声明条件变量却从不置位，roundId 切换条件
+                # `if last_rid and round_joined:` 恒不成立——战绩从不入账、结果通知从不推送。
+                # joined 在参局期间持续为 True，幂等置位即可（每局切换时统一重置为 False）。
+                if joined:
+                    round_joined = True
                 is_turn = s.get("isTurn", False)
                 alive = s.get("alive", False)
                 hand = s.get("hand", "")

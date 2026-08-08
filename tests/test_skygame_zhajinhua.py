@@ -3335,6 +3335,168 @@ def test_record_round_result_skips_missing_delta() -> None:
     assert kv.get("zjh:stats") is None
 
 
+class _LoopStop(BaseException):
+    """中断 _poll_loop 的 while True（继承 BaseException，避免被 except Exception 吞掉）。"""
+
+
+class _PollLog:
+    def info(self, *args: object) -> None:
+        pass
+
+    def warning(self, *args: object) -> None:
+        pass
+
+    def error(self, *args: object) -> None:
+        pass
+
+
+class _PollCtx:
+    def __init__(self, kv: object, cfg: dict[str, object]) -> None:
+        self.kv = kv
+        self.config = cfg
+        self.log = _PollLog()
+        self.notifications: list[str] = []
+
+    async def notify(self, text: str, **kwargs: object) -> None:
+        self.notifications.append(text)
+
+
+class _PollClient:
+    def __init__(self, responses: list[dict[str, object]]) -> None:
+        self._next = iter(responses)
+        self.posts: list[tuple[str, dict[str, object]]] = []
+
+    async def get(self, path: str) -> dict[str, object]:
+        return next(self._next)
+
+    async def post(self, path: str, body: dict[str, object]) -> dict[str, object]:
+        self.posts.append((path, body))
+        return {"ok": True}
+
+    def configure(self, *args: object, **kwargs: object) -> None:  # noqa: ANN002, ANN003
+        pass
+
+    def set_renewer(self, *args: object) -> None:  # noqa: ANN002
+        pass
+
+    def reset_csrf(self) -> None:
+        pass
+
+
+class _FakeHdsky:
+    def __init__(self, responses: list[dict[str, object]]) -> None:
+        self._responses = responses
+
+    async def __aenter__(self) -> _PollClient:
+        return _PollClient(self._responses)
+
+    async def __aexit__(self, *args: object) -> None:  # noqa: ANN002
+        return None
+
+
+@pytest.mark.asyncio
+async def test_poll_loop_records_result_and_notifies_when_bot_joined(monkeypatch: pytest.MonkeyPatch) -> None:
+    """回归 v1.16.9 bug：round_joined 声明后从未置位，roundId 切换条件
+    `if last_rid and round_joined:` 恒不成立——战绩从不入账 zjh:stats、
+    对局结束通知从不推送。
+
+    模拟两轮 poll：R1 bot 已加入（joined=True）→ R2 切换且 lastResult 含
+    selfDelta=15000 → 应入账累计统计并推送带「本局 +15000」的结果通知。
+    """
+    import asyncio
+    import importlib
+
+    # 注：包目录与子模块同名（...games.zhajinhua.zhajinhua），`import ... as x` 会被编译为
+    # from-import 语义而失败，改用 importlib 显式加载。
+    zhajinhua_mod = importlib.import_module("plugins.skyGame.games.zhajinhua.zhajinhua")
+    from plugins.skyGame.games.zhajinhua.zjh_profile import reset_store
+
+    round1 = {
+        "game": {
+            "roundId": "r1",
+            "phase": "betting",
+            "pot": 1000,
+            "callBet": 100,
+            "self": {
+                "id": "self",
+                "displayName": "Bot",
+                "isSelf": True,
+                "joined": True,
+                "alive": True,
+                "isTurn": False,
+            },
+            "players": [
+                {"id": "self", "displayName": "Bot", "isSelf": True, "joined": True, "alive": True, "isTurn": False},
+            ],
+            "actions": [],
+        }
+    }
+    round2 = {
+        "game": {
+            "roundId": "r2",
+            "phase": "betting",
+            "pot": 1000,
+            "callBet": 100,
+            "lastResult": {"roundId": "r1", "selfDelta": 15000},
+            "self": {
+                "id": "self",
+                "displayName": "Bot",
+                "isSelf": True,
+                "joined": True,
+                "alive": True,
+                "isTurn": False,
+            },
+            "players": [
+                {"id": "self", "displayName": "Bot", "isSelf": True, "joined": True, "alive": True, "isTurn": False},
+            ],
+            "actions": [],
+        }
+    }
+
+    class LoopKV:
+        def __init__(self) -> None:
+            self._d: dict[str, object] = {}
+
+        def get(self, key: str, default: object = None) -> object:
+            return self._d.get(key, default)
+
+        def set(self, key: str, value: object) -> None:
+            self._d[key] = value
+
+        def keys(self) -> list[str]:
+            return list(self._d)
+
+    kv = LoopKV()
+    cfg = {
+        "zjh_enabled": True,
+        "zjh_profile_enabled": True,
+        "zjh_notify_hand": True,
+        "zjh_notify_join": True,
+        "zjh_notify_error": True,
+    }
+    ctx = _PollCtx(kv, cfg)
+
+    reset_store()
+    monkeypatch.setattr(zhajinhua_mod, "HdskyClient", lambda log: _FakeHdsky([round1, round2]))
+    monkeypatch.setattr(zhajinhua_mod.hdsky_auth, "renewer_for", lambda _ctx: None)
+    sleep_count = {"n": 0}
+
+    async def _stop_after_two(_seconds: float, *args: object, **kwargs: object) -> None:  # noqa: ANN002, ANN003
+        sleep_count["n"] += 1
+        if sleep_count["n"] >= 2:
+            raise _LoopStop()
+
+    monkeypatch.setattr(asyncio, "sleep", _stop_after_two)
+
+    with pytest.raises(_LoopStop):
+        await zhajinhua_mod._poll_loop(ctx)
+
+    stats = kv.get("zjh:stats")
+    assert isinstance(stats, dict)
+    assert stats["games"] == 1 and stats["profit"] == 15000
+    assert any("本局 +15000" in n for n in ctx.notifications)
+
+
 def test_record_round_result_day_isolation() -> None:
     """不同日期分键存储，互不影响。"""
     kv = _FakeKV()
