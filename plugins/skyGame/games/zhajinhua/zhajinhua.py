@@ -83,7 +83,13 @@ from .zjh_notify import (
     _log_decision,
     _notify_game_result,
 )
-from .zjh_profile import feed_last_result, get_store, record_round_raise_freq, reset_store
+from .zjh_profile import (
+    HALF_LIFE_SAMPLES,
+    feed_last_result,
+    get_store,
+    record_round_raise_freq,
+    reset_store,
+)
 from .zjh_state import _in_hand, _is_self, _opponent_counts, _player_key, _players
 from .zjh_stats import record_round_result
 
@@ -436,8 +442,8 @@ async def _poll_loop(ctx: object) -> None:
     round_joined = False
     last_round_hand = ""
     last_round_hand_type = ""
-    # 对手画像：进程内缓存 + 延迟写 kv（get_store 首次调用加载已有画像）
-    profile_store = get_store(ctx.kv)
+    # 对手画像：进程内缓存 + 延迟写 kv（get_store 首次调用加载已有画像，半衰期按次数/手数）
+    profile_store = get_store(ctx.kv, float(cfg.get("zjh_profile_halflife", HALF_LIFE_SAMPLES) or 0))
     # 连续盲跟计数：同一 roundId 内累计，达上限强制看牌
     blind_calls_so_far = 0
     # 终局动作（showdown/open）未生效重发计数：达上限回退看牌，防门户持续不执行时无限重发
@@ -518,8 +524,9 @@ async def _poll_loop(ctx: object) -> None:
                 last_result_rid = last_result.get("roundId") if isinstance(last_result, dict) else None
                 if last_result_rid and last_result_rid != last_fed_result_rid:
                     feed_last_result(profile_store, game_data, uid_by_display, settled_round_action)
-                    # 加注频率按结算时的最激进动作记录（修复 call 后 raise 被记成非加注）
-                    record_round_raise_freq(profile_store, settled_round_action)
+                    # 加注频率按结算时的最激进动作记录（修复 call 后 raise 被记成非加注），
+                    # 并推进全场对手的衰减时钟（半衰期按手数，弃牌对手也按手数遗忘）
+                    record_round_raise_freq(profile_store, settled_round_action, list(uid_by_display.values()))
                     last_fed_result_rid = last_result_rid
                 if cfg.get("zjh_profile_enabled", True):
                     profile_store.flush()

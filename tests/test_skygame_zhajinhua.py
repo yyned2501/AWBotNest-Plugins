@@ -2331,6 +2331,94 @@ def test_raise_threshold_floor_none_and_shrink() -> None:
     assert floor < 0.6
 
 
+def test_raise_threshold_floor_recent_hands_override_old_bluff() -> None:
+    """半衰期（按次数）：对手早年 8 手弱牌加注（含 235 近零分位）后连续 8 手正常加注，
+    近期加权让加注下限由近期强牌主导，不再被那颗 235 永久锚低；
+    等权（halflife=0，旧行为）下四分位仍被早年弱牌拖低。"""
+    recent = ProfileStore(halflife=2)
+    forever = ProfileStore(halflife=0)
+    for pct in (0.02, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35):
+        recent.record_hand_pctile("opp", "raise", pct)
+        forever.record_hand_pctile("opp", "raise", pct)
+    for _ in range(8):
+        recent.record_hand_pctile("opp", "raise", 0.9)
+        forever.record_hand_pctile("opp", "raise", 0.9)
+    floor_recent = recent.raise_threshold_floor("opp", 0.5)
+    floor_forever = forever.raise_threshold_floor("opp", 0.5)
+    assert floor_recent is not None and floor_forever is not None
+    # 等权：16 样本下四分位落在弱牌区（rank 3.75 → 0.15 与 0.2 之间）→ 被拉低
+    assert floor_forever < 0.5
+    # 近期半衰期=2：弱牌块总权重 ≈0.2，强牌块 ≈3.2，加权下四分位落在 0.9 区 → 高于 base
+    assert floor_recent > floor_forever
+    assert floor_recent > 0.5
+
+
+def test_hand_pctile_lists_capped_to_max_samples() -> None:
+    """分位列表窗口上限：超限丢弃最旧样本（硬遗忘 + 内存上限），扁平与分桶同步。"""
+    store = ProfileStore(max_samples=3)
+    for pct in (0.1, 0.2, 0.3, 0.4, 0.5):
+        store.record_hand_pctile("a", "raise", pct)
+    assert store.hand_percentiles("a", "raise") == [0.3, 0.4, 0.5]
+    assert store.hand_percentiles("a", "raise", "b_s0b0") == [0.3, 0.4, 0.5]
+
+
+def test_action_counts_decay_by_hand_tick() -> None:
+    """计数桶按手数衰减：早期跟注站被近期弃牌覆盖，action_probabilities 反映近期行为。
+
+    走完整结算路径（先 tick_hands 推进时钟再 record_raise_freq）；对照只调动作原语
+    不 tick 的调用不衰减——证明衰减时钟挂在结算而不是动作原语上。
+    """
+    ticking = ProfileStore(halflife=1)  # 1 手半衰，每手 ×0.5
+    uid = "opp"
+    # 前 3 手继续（每手 call 一次 + 结算 tick）
+    for _ in range(3):
+        ticking.record_action(uid, "call", True, 0, 0)
+        record_round_raise_freq(ticking, {uid: ("call", True, 0, 0)}, [uid])
+    # 后 1 手弃牌（弃牌不入 round_action，只 tick 时钟）
+    ticking.record_action(uid, "fold", True, 0, 0)
+    record_round_raise_freq(ticking, {}, [uid])
+    p_fold, p_call, _ = ticking.action_probabilities(uid, True, 0, 0)
+    assert p_fold > p_call  # 近期弃牌主导
+
+    # 对照：只调原语不 tick → 无衰减，call 计数仍占优
+    raw = ProfileStore(halflife=1)
+    for _ in range(3):
+        raw.record_action(uid, "call", True, 0, 0)
+    raw.record_action(uid, "fold", True, 0, 0)
+    r_fold, r_call, _ = raw.action_probabilities(uid, True, 0, 0)
+    assert r_call > r_fold
+
+
+def test_bluff_rate_forgets_old_calling_station() -> None:
+    """半衰期顺手数：早年 10 手全跟注的跟注站，近期 5 手全弃后诈唬率归零；
+    等权（halflife=0）仍按 2/3 继续率算出生诈唬下界。"""
+    ticking = ProfileStore(halflife=2)
+    forever = ProfileStore(halflife=0)
+    uid = "opp"
+    for _ in range(10):
+        ticking.record_action(uid, "call", True, 0, 0)
+        record_round_raise_freq(ticking, {uid: ("call", True, 0, 0)}, [uid])
+        forever.record_action(uid, "call", True, 0, 0)
+        record_round_raise_freq(forever, {uid: ("call", True, 0, 0)}, [uid])
+    for _ in range(5):
+        ticking.record_action(uid, "fold", True, 0, 0)
+        record_round_raise_freq(ticking, {}, [uid])
+        forever.record_action(uid, "fold", True, 0, 0)
+        record_round_raise_freq(forever, {}, [uid])
+    assert ticking.bluff_rate(uid) == 0.0  # 近期 5 手全弃 → 继续率被按手数衰减到 ≤0.5
+    assert forever.bluff_rate(uid) > 0.0  # 终身累计仍按 10/(10+5)=2/3 继续率含诈唬
+
+
+def test_legacy_count_bucket_without_pointer_not_decayed() -> None:
+    """旧格式计数桶无「最后更新手数」指针：首次记录不突然衰减（gap 视为 0）。"""
+    store = ProfileStore(halflife=1)
+    store._cache["old"] = {"b_s0b0": {"fold": 5, "call": 0, "raise": 0}}
+    store.record_action("old", "fold", False, 0, 0)
+    dump = store.debug_dump()
+    assert dump["old"]["b_s0b0"]["fold"] == 6  # 5 + 1，未衰减
+    assert dump["old"]["b_s0b0"]["p"] == 1  # 指针从首个新记录起计时
+
+
 def test_seen_factor_profile_blend_weak_opponent_raises_win() -> None:
     """_seen_factor 画像混合：范围下界高于我方牌力时纯范围胜率为 0，
     画像记录对手加注多弱牌后胜率被抬起；无画像逐值回退纯范围模型。"""
@@ -2706,13 +2794,13 @@ def test_record_raise_freq_records_correctly_per_bucket() -> None:
     store.record_raise_freq("a", False, 0, 1, False)  # b_s0b1, not raise
     dump = store.debug_dump()
     freq_a = dump["a"]["raise_freq"]
-    assert freq_a["s_s1b0"] == {"total": 2, "raises": 1}
-    assert freq_a["b_s0b1"] == {"total": 1, "raises": 0}
+    assert freq_a["s_s1b0"] == {"total": 2, "raises": 1, "p": 0}
+    assert freq_a["b_s0b1"] == {"total": 1, "raises": 0, "p": 0}
     # 不同玩家互不影响
     store.record_raise_freq("b", True, 1, 0, True)
     dump = store.debug_dump()
     freq_b = dump["b"]["raise_freq"]
-    assert freq_b["s_s1b0"] == {"total": 1, "raises": 1}
+    assert freq_b["s_s1b0"] == {"total": 1, "raises": 1, "p": 0}
 
 
 def test_raise_floor_from_freq_none_and_shrink() -> None:
@@ -2769,8 +2857,8 @@ def test_record_round_raise_freq_counts_most_aggressive_action() -> None:
     }
     record_round_raise_freq(store, round_action)
     dump = store.debug_dump()
-    assert dump["p1"]["raise_freq"]["b_s0b1"] == {"total": 1, "raises": 1}
-    assert dump["p2"]["raise_freq"]["b_s0b1"] == {"total": 1, "raises": 0}
+    assert dump["p1"]["raise_freq"]["b_s0b1"] == {"total": 1, "raises": 1, "p": 0}
+    assert dump["p2"]["raise_freq"]["b_s0b1"] == {"total": 1, "raises": 0, "p": 0}
 
 
 def test_record_round_raise_freq_empty_round_action_is_noop() -> None:
