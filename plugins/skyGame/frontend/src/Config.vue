@@ -48,6 +48,7 @@ const DEFAULTS = {
   zjh_terminal_depth: 2,
   zjh_blind_max_calls: 3,
   zjh_profile_enabled: true,
+  zjh_profile_halflife: 20,
   zjh_notify_join: true,
   zjh_notify_hand: true,
   zjh_notify_fold_confirm: false,
@@ -382,6 +383,14 @@ async function renewNow() {
               <span class="lbl">弃牌 EV 容差：{{ cfg.zjh_fold_ev_tolerance }}% callBet</span>
               <input v-model.number="cfg.zjh_fold_ev_tolerance" type="range" min="0" max="30" step="1" />
               <span class="help">跟注 EV 只是略负（≥ −此比例×callBet）时不弃牌。0% = 旧行为（EV&lt;0 即弃）。</span>
+            </div>
+            <div class="fld">
+              <span class="lbl">画像半衰期：{{ cfg.zjh_profile_halflife }} 手</span>
+              <input v-model.number="cfg.zjh_profile_halflife" type="range" min="0" max="200" step="5" />
+              <span class="help">
+                画像按对手已完成手数衰减：每结算一手，历史计数与手牌样本权重减半（半衰期手数见上）。
+                高频对手自然衰减快、低频慢；0 = 不衰减（永久保留全部历史，旧行为）。
+              </span>
             </div>
           </section>
 
