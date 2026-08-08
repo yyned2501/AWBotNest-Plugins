@@ -1,13 +1,20 @@
 # -*- coding: utf-8 -*-
 # 天空游戏 · 养马：hdsky 门户养马自动化
 #
-# 基于实测门户 API（GET /api/portal/horse + POST /api/portal/horse/action）：
+# 基于实测门户 API（GET /api/portal/horse + POST /api/portal/horse/action
+# + POST /api/portal/horse/race/action）：
 #   - 单马账号模型，动作体 {action, requestKey, feedType?}
 #   - 每日上限：喂食 feedMax 次 / 遛马 walkMax 次（stats 字段）
-#   - 动作有冷却（result.code == "cooldown"）：静默处理不刷通知
+#   - 动作有冷却（result.code == "cooldown"）：静默处理，按 remainMs 退避不重复尝试
+#   - 普通喂食（weed/fine）与仙草（divine）独立计数、独立冷却（profile 的
+#     daily_feed_count 与 daily_divine_feed_count 分开）
+#   - 比赛分两类：官方赛（competitions.official，每日免费报名一次）与
+#     玩家养马赛（competitions.match，host 玩家开房、其他玩家按报名额加入）
 #   - 每轮轮询最多执行一个养护动作，节奏拟人：
 #       死亡 → （可选）复活
-#       饱腹度 < 阈值 且可喂 → 喂食（feedType 可配）
+#       玩家赛可加入且体力足 → 加入（配置开关）
+#       玩家赛可加入但体力不足 → 喂仙草补体力（divine 与精草独立冷却）
+#       饱腹度 < 阈值 且可喂 → 喂食（feedType 可配，撞冷却即跳过不硬试）
 #       可遛 且未达上限 → 遛马（赚银元+经验）
 #       官方赛可报名 →（可选）免费报名
 #   - 结果通知用服务端返回的 result.message
@@ -72,6 +79,18 @@ def _walk_fail_count(kv: object, key: str, today: str) -> int:
     return 0 if date != today else count
 
 
+def _feed_cooldown_handle(ctx: object, r: dict, key: str, now_ms: int) -> None:
+    """feed 撞冷却（「刚刚吃过了 xx分钟后再喂」）→ 记 remainMs 退避，不硬试；非冷却清除。"""
+    result = r.get("result", {}) or {}
+    if result.get("code") == "cooldown":
+        remain_ms = int(result.get("remainMs", 0) or 0)
+        if remain_ms > 0:
+            ctx.kv.set(key, now_ms + remain_ms)
+        ctx.log.debug("%s 冷却中: %s", key, result.get("message", ""))
+    else:
+        ctx.kv.delete(key)
+
+
 async def _care_once(ctx: object, cfg: dict, client: HdskyClient) -> None:
     """单次养护决策：最多执行一个动作。"""
     data = await client.get("/api/portal/horse")
@@ -94,6 +113,8 @@ async def _care_once(ctx: object, cfg: dict, client: HdskyClient) -> None:
     st = profile.get("state", {}) or {}
     stats = horse.get("stats", {}) or {}
     balance = horse.get("balance", 0) or 0
+    stamina = int(profile.get("stamina", 100) or 100)
+    now_ms = int(datetime.datetime.now().timestamp() * 1000)
 
     # 死亡处理：复活昂贵（约 30 万银元），默认只提示不动作
     if st.get("isDead"):
@@ -108,17 +129,64 @@ async def _care_once(ctx: object, cfg: dict, client: HdskyClient) -> None:
         return
     ctx.kv.delete("horse:death_notified")
 
-    # 喂食：饱腹度低于阈值且今日次数未到上限
+    # 玩家养马赛（competitions.match）：host 开房后 active，actions 含 join 即可加入。
+    # 契约来自门户前端 portal-horse.js（实测 2026-08-08）：可加入才给 join 动作，
+    # 加入请求体仅 {action: "join", requestKey}，报名额取服务端 match.amount。
+    comps = horse.get("competitions", {}) or {}
+    match = comps.get("match", {}) or {}
+    match_joinable = (
+        bool(cfg.get("horse_auto_match_race", True))
+        and bool(match.get("active"))
+        and "join" in (match.get("actions") or [])
+        and not bool(match.get("joined"))
+    )
+    min_stamina = int(cfg.get("horse_race_min_stamina", 30) or 30)
+
+    # 玩家赛：体力足够 → 直接加入
+    if match_joinable and stamina >= min_stamina:
+        r = await client.post("/api/portal/horse/race/action", {"action": "join", "requestKey": request_key()})
+        ctx.log.info(
+            "加入玩家养马赛 #%s（报名额 %s 银元，体力 %d）", match.get("roundId"), match.get("amount"), stamina
+        )
+        await _notify_result(ctx, cfg, r, "玩家赛加入失败")
+        return
+
+    # 补体力：玩家赛可加入但体力不足 → 喂仙草（divine，+50 体力；与精草独立冷却）。
+    # 仙草冷却中则跳过本轮（不遛马消耗体力），等冷却恢复下轮再补。
+    if match_joinable and stamina < min_stamina:
+        divine_cd_key = "horse:divine_cooldown_until"
+        divine_cd = int(ctx.kv.get(divine_cd_key, 0) or 0)
+        if now_ms < divine_cd:
+            ctx.log.debug(
+                "玩家赛体力不足（%d < %d）且仙草冷却中，剩余 %d 分钟，等待补体力",
+                stamina,
+                min_stamina,
+                (divine_cd - now_ms) // 60000,
+            )
+            return
+        r = await _horse_action(client, "feed", feedType="divine")
+        ctx.log.info("玩家赛体力不足（%d < %d），喂仙草补体力", stamina, min_stamina)
+        _feed_cooldown_handle(ctx, r, divine_cd_key, now_ms)
+        await _notify_result(ctx, cfg, r, "喂仙草失败")
+        return
+
+    # 喂食：饱腹度低于阈值且今日次数未到上限，撞冷却即跳过不硬试
     satiety = int(profile.get("satiety", 100) or 0)
     threshold = int(cfg.get("horse_feed_threshold", 60) or 0)
     feed_count = int(stats.get("feedCountToday", 0) or 0)
     feed_max = int(stats.get("feedMax", 0) or 0)
     if st.get("canFeed") and satiety < threshold and feed_count < feed_max:
-        feed_type = str(cfg.get("horse_feed_type", "weed") or "weed")
-        r = await _horse_action(client, "feed", feedType=feed_type)
-        ctx.log.info("喂食 %s（饱腹 %d < %d，今日 %d/%d）", feed_type, satiety, threshold, feed_count + 1, feed_max)
-        await _notify_result(ctx, cfg, r, "喂食失败")
-        return
+        feed_cd_key = "horse:feed_cooldown_until"
+        feed_cd = int(ctx.kv.get(feed_cd_key, 0) or 0)
+        if now_ms < feed_cd:
+            ctx.log.debug("喂食冷却中，剩余 %d 分钟，本轮跳过不重复尝试", (feed_cd - now_ms) // 60000)
+        else:
+            feed_type = str(cfg.get("horse_feed_type", "fine") or "fine")
+            r = await _horse_action(client, "feed", feedType=feed_type)
+            ctx.log.info("喂食 %s（饱腹 %d < %d，今日 %d/%d）", feed_type, satiety, threshold, feed_count + 1, feed_max)
+            _feed_cooldown_handle(ctx, r, feed_cd_key, now_ms)
+            await _notify_result(ctx, cfg, r, "喂食失败")
+            return
 
     # 遛马：消耗体力赚银元+经验，用完每日额度
     walk_count = int(stats.get("walkCountToday", 0) or 0)
@@ -133,7 +201,6 @@ async def _care_once(ctx: object, cfg: dict, client: HdskyClient) -> None:
         # 门户遛马冷却约 45 分钟，冷却期间 canWalk 仍为 true；靠上次响应的 remainMs 退避，
         # 避免每轮轮询都撞冷却、刷出大量看似失败的「遛马」日志
         cooldown_until_key = "horse:walk_cooldown_until"
-        now_ms = int(datetime.datetime.now().timestamp() * 1000)
         cooldown_until = int(ctx.kv.get(cooldown_until_key, 0) or 0)
         if now_ms < cooldown_until:
             ctx.log.debug("遛马冷却中，剩余 %d 分钟，跳过本轮", (cooldown_until - now_ms) // 60000)
@@ -156,7 +223,7 @@ async def _care_once(ctx: object, cfg: dict, client: HdskyClient) -> None:
         return
 
     # 官方赛：每日免费报名一次（kv 持久化，避免重复报名）
-    official = (horse.get("competitions", {}) or {}).get("official", {}) or {}
+    official = comps.get("official", {}) or {}
     eligibility = official.get("eligibility", {}) or {}
     today = datetime.date.today().isoformat()
     if official.get("joined"):

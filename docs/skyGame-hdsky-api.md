@@ -23,6 +23,7 @@
 | 执行牌局动作 | `POST /api/portal/zhajinhua/action` | `{ "action": "<服务端 actions 中声明的原始值>" }` | `_act_on_hand()`、弃牌和看牌逻辑 |
 | 读取养马状态 | `GET /api/portal/horse` | 无 | `horse.py` 的 `_care_once()`，实测响应 |
 | 执行养马动作 | `POST /api/portal/horse/action` | `{ "action": "walk"\|"feed"\|"revive", "requestKey": "<web_+32hex>", "feedType"?: "weed"\|"fine"\|"divine" }` | `_horse_action()`，实测响应 |
+| 报名/加入比赛 | `POST /api/portal/horse/race/action` | `{ "action": "official_join"\|"official_leave"\|"join"\|"start", "requestKey": "<web_+32hex>", "amount"?: 100 }` | `horse.py` + 门户前端 `portal-horse.js`（2026-08-08 实测） |
 
 动作只能在轮询响应的 `game.self.isTurn == true` 时，且动作值出现在 `game.actions` 列表中时提交。插件不得根据本地猜测构造不在该列表中的动作。
 
@@ -79,7 +80,11 @@
 - 遛马动作用于冷却拒绝时返回外层 `ok: true`、`result.code == "cooldown"`、`result.remainMs`（剩余毫秒）、`result.message`；冷却约 45 分钟，且期间 `state.canWalk` 仍为 `true`，不能用来判断是否可遛。插件记下 `remainMs` 换算的到期时间退避，未到不再尝试；`cooldown` 不计入失败计数，连续真失败 3 次后跳过本轮。（`horse.py` 的 `_care_once()`）
 - **遛马失败熔断按「天」自动重置（v1.16.7 修正）**：旧实现失败计数只在成功遛马时清零——但计数到 3 后就不再发遛马请求，形成**永久死锁**（线上 08-01 遗留 count=3，此后每日 4 次遛马额度全浪费、体力始终满，用户误以为「满体力却只喂草」）。现失败计数带日期存储（kv 值 `{"count": N, "date": "YYYY-MM-DD"}`），跨天自动重置为 0 重新尝试；旧版纯数字遗留值（无日期）视为跨天立即恢复。同日连续失败 3 次仍熔断当日，次日自动恢复。
 - **体力与饱腹是独立字段**：`profile.stamina`（体力，100 满，24 小时自然回满，遛马消耗）与 `profile.satiety`（饱腹度，喂食恢复，低于 `horse_feed_threshold` 才喂）。「体力满却不遛马」是遛马熔断的症状而非喂食逻辑错误——喂食只在 satiety < 阈值时发生（实测 08-06 00:00 satiety=53 喂 weed，喂后 65）。
-- 养马实测字段：`stats.walkCountToday/walkMax`（每日遛马上限）、`stats.feedCountToday/feedMax`、`profile.satiety`（饱腹度）、`horse.balance`（银元）、`profile.state.{isDead,canWalk,canFeed}`。
+- 养马实测字段：`stats.walkCountToday/walkMax`（每日遛马上限）、`stats.feedCountToday/feedMax`、`profile.satiety`（饱腹度）、`profile.stamina`（体力，100 满，遛马消耗、喂食恢复）、`horse.balance`（银元）、`profile.state.{isDead,canWalk,canFeed,canRace}`。
+- **比赛字段（competitions，2026-08-08 实测确认）**：`horse.competitions` 含 `official`（官方赛）与 `match`（玩家养马赛，Horse2）两类。
+  - `official`：`date/status/signupOpen/settled/minEntrants/entrantCount/entrants[]/joined/eligibility{canRace,detail}/rewardPlan[]/yesterday`。报名动作 `official_join`，退出 `official_leave`，每日免费一次。
+  - `match`：`active`（是否进行中/报名中）、`canStart`（本账号能否开房）、`limits{minAmount,maxAmount}`（100–10000）、`history[]`（历史结算：roundId/amount/host/cancelled/winner/ranking/selfDelta）、`active` 时含 `roundId/host/amount/closeAtMs/entrants[]/maxEntrants/actions[]/joined`。**加入条件 = `active && "join" in actions && !joined`**；加入请求体仅 `{action: "join", requestKey}`（报名额取服务端 `match.amount`，无需传 amount）；开房动作 `start` 才需 `amount`（在 limits 范围内）。加入有银元成本（报名额，落败扣除），前端确认文案「报名额为 X 银元，落败会扣除报名额」。
+- **喂食与冷却（2026-08-08 用户确认 + 实测）**：普通喂食（weed/fine）与仙草（divine）**独立计数、独立冷却**——`profile.daily_feed_count`（普通喂食，与 `stats.feedCountToday/feedMax` 对应）与 `profile.daily_divine_feed_count`（仙草）分开。喂食撞冷却时服务端返回「刚刚吃过了 xx分钟后再喂」（`result.code=="cooldown"` + `remainMs`），插件按 `remainMs` 退避不重复尝试；精草冷却中仍可喂仙草补体力。
 
 ## 待现场验证
 
