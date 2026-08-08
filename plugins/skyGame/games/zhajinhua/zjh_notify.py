@@ -46,6 +46,7 @@ def _log_decision(
     game: dict[str, Any],
     choice: _Choice,
     tracker: _RoundTracker,
+    fallback_threshold: float,
 ) -> None:
     """打印一次决策的完整推导，便于核对胜率与 EV。"""
     log = ctx.log
@@ -63,7 +64,7 @@ def _log_decision(
             continue
         peek_snapshot = tracker.peek_snapshots.get(key)
         continue_snapshot = tracker.snapshots.get(key)
-        inferred = _combined_opponent_threshold(peek_snapshot, continue_snapshot)
+        inferred = _combined_opponent_threshold(peek_snapshot, continue_snapshot, fallback_threshold)
         details = []
         if peek_snapshot is not None:
             details.append(
