@@ -602,7 +602,7 @@ def feed_last_result(
     store: ProfileStore,
     game: dict[str, Any],
     uid_by_display: dict[str, str],
-    round_action: dict[str, tuple[str, bool, int, int]] | None = None,
+    round_action: dict[str, tuple[str, bool, int, int, bool]] | None = None,
 ) -> None:
     """从牌局结算 game.lastResult 回填对手真实手牌分位。
 
@@ -661,7 +661,7 @@ def feed_last_result(
 
 def record_round_raise_freq(
     store: ProfileStore,
-    round_action: dict[str, tuple[str, bool, int, int]] | None,
+    round_action: dict[str, tuple[str, bool, int, int, bool]] | None,
     uids: list[str] | None = None,
 ) -> None:
     """结算时按本轮最激进动作记录 hand-level 加注频率。
@@ -669,6 +669,11 @@ def record_round_raise_freq(
     round_action 条目恰好覆盖「本局自愿继续（call/raise 过）」的对手，
     每条记一次 total，最激进动作为 raise 才计 raises——修复旧版「首次动作
     变化时记录」导致 call 后 raise 被记成非加注的低估问题。
+
+    条目第 5 元素 forced=True 表示强制摊牌阶段（phase=showdown）的被迫继续——
+    该阶段 raise 是唯一「继续」动作，不代表牌强，不计入加注频率（否则被迫 raise
+    的对手被当成高频继续，诈唬率/胜率双双高估，反噬决策）。手牌分位回填仍照记
+    （feed_last_result 不区分 forced，那是真实牌面）。
 
     uids 提供时先 tick_hands 推进这些对手的衰减时钟（已完成手数 +1、全部计数桶
     按手数间隔统一衰减）——覆盖弃牌/未在 round_action 的对手，保证 fold 与
@@ -678,7 +683,9 @@ def record_round_raise_freq(
         store.tick_hands(uids)
     if not round_action:
         return
-    for uid, (action, op_seen, seen_count, blind_count) in round_action.items():
+    for uid, (action, op_seen, seen_count, blind_count, forced) in round_action.items():
+        if forced:
+            continue
         store.record_raise_freq(uid, op_seen, seen_count, blind_count, action == "raise")
 
 

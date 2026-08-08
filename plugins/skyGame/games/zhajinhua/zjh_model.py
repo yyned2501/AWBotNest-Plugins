@@ -344,6 +344,14 @@ def _update_round_tracker(game: dict[str, Any], tracker: _RoundTracker, log: Any
                             f"{threshold:.3f}" if threshold is not None else "无法推断",
                         )
             else:
+                # 强制摊牌阶段（phase=showdown）：raise 是唯一「继续」动作（actions 只剩
+                # fold/raise/showdown），对手被迫每轮 raise，不代表牌强——不记录下注快照、
+                # 不累计加注次数。v1.16.8 只豁免了决策侧的门槛升级，快照反推仍被污染：
+                # showdown 被迫 raise 被当成强牌信号反推出高门槛，与「画像把被迫继续
+                # 记成高频继续」叠加，把对手范围/诈唬率双双抬高（用户质疑「对手牌被预测
+                # 更大却算出正 EV」的根因之一）。
+                if game.get("phase") == "showdown":
+                    continue
                 bet_increased = previous.bet is not None and current.bet is not None and current.bet > previous.bet
                 action_changed = current.last_action != previous.last_action and _is_continue_action(
                     current.last_action

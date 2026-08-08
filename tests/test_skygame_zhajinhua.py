@@ -2392,7 +2392,7 @@ def test_action_counts_decay_by_hand_tick() -> None:
     # 前 3 手继续（每手 call 一次 + 结算 tick）
     for _ in range(3):
         ticking.record_action(uid, "call", True, 0, 0)
-        record_round_raise_freq(ticking, {uid: ("call", True, 0, 0)}, [uid])
+        record_round_raise_freq(ticking, {uid: ("call", True, 0, 0, False)}, [uid])
     # 后 1 手弃牌（弃牌不入 round_action，只 tick 时钟）
     ticking.record_action(uid, "fold", True, 0, 0)
     record_round_raise_freq(ticking, {}, [uid])
@@ -2416,9 +2416,9 @@ def test_bluff_rate_forgets_old_calling_station() -> None:
     uid = "opp"
     for _ in range(10):
         ticking.record_action(uid, "call", True, 0, 0)
-        record_round_raise_freq(ticking, {uid: ("call", True, 0, 0)}, [uid])
+        record_round_raise_freq(ticking, {uid: ("call", True, 0, 0, False)}, [uid])
         forever.record_action(uid, "call", True, 0, 0)
-        record_round_raise_freq(forever, {uid: ("call", True, 0, 0)}, [uid])
+        record_round_raise_freq(forever, {uid: ("call", True, 0, 0, False)}, [uid])
     for _ in range(5):
         ticking.record_action(uid, "fold", True, 0, 0)
         record_round_raise_freq(ticking, {}, [uid])
@@ -2458,6 +2458,30 @@ def test_seen_factor_profile_blend_weak_opponent_raises_win() -> None:
     )
 
 
+def test_showdown_forced_raise_does_not_inflate_win_probability() -> None:
+    """用户报障回归（v1.16.14）：「我的牌 82% 强度、对手门槛 90%+ 被预测更大，
+    不可能算出正 EV」——门槛高于我方牌力时纯范围胜率应为 0。
+
+    对手多次 showdown 被迫 raise（旧逻辑记成高频继续 → 诈唬率虚高 → 胜率被抬过
+    盈亏平衡 -> 正 EV 开牌）。修复后 forced 继续不计入继续率，_seen_factor 保持
+    纯范围胜率 0 → 决策落到弃牌（-call_bet）。
+    """
+    hand_threshold = 0.822  # 8-8-2 对子对随机牌胜率（用户场景）
+    store = ProfileStore()
+    uid = "tight"
+    # 对手多次强制摊牌被迫 raise（新逻辑：只标记 forced，不涨继续率）
+    for _ in range(5):
+        record_round_raise_freq(store, {uid: ("raise", True, 0, 0, True)}, [uid])
+    range_90 = _SeenRange(0.90, 1.0, True, profile=store, uid=uid, action="raise")
+    factor = _seen_factor(hand_threshold, range_90)
+    assert factor == pytest.approx(0.0)  # 0.822 < 0.9 → 纯范围 0，无诈唬分量可抬
+
+    # 顺带验证决策：EV 为负 → 弃牌（用户场景 pot=58500/call=3900 用 0 胜率）
+    call_bet = 3900.0
+    ev = factor * (58500.0 + call_bet) - call_bet
+    assert ev < 0
+
+
 def test_call_decision_profile_integration_raises_win_for_weak_opponent() -> None:
     """集成：紧手加注对手（快照反推门槛 0.99）纯范围胜率≈0，画像显示其实测加注多弱牌后
     _call_decision 胜率被显著抬起（加注下限画像直读 + 反诈唬 + 实测胜率混合）。"""
@@ -2495,7 +2519,7 @@ def test_feed_last_result_round_action_bucketing() -> None:
     }
     # 本局加注（单挑，对手看到并加注，桶键 s_s0b0）
     store = ProfileStore()
-    feed_last_result(store, game, {"Damon": "account:1"}, {"account:1": ("raise", True, 0, 0)})
+    feed_last_result(store, game, {"Damon": "account:1"}, {"account:1": ("raise", True, 0, 0, False)})
     dump = store.debug_dump()
     assert dump["account:1"].get("raise_pcts")
     assert not dump["account:1"].get("call_pcts")
@@ -2521,7 +2545,12 @@ def test_feed_last_result_backfills_folded_player_with_revealed_cards() -> None:
         }
     }
     store = ProfileStore()
-    feed_last_result(store, game, {"Nan": "u1", "Win": "u2"}, {"u1": ("raise", True, 0, 0), "u2": ("call", True, 0, 0)})
+    feed_last_result(
+        store,
+        game,
+        {"Nan": "u1", "Win": "u2"},
+        {"u1": ("raise", True, 0, 0, False), "u2": ("call", True, 0, 0, False)},
+    )
     dump = store.debug_dump()
     # 弃牌者按最激进动作进 raise 桶，且牌面可解析 → 精确分位（非牌型中点）
     assert dump["u1"].get("raise_pcts"), "弃牌者亮牌应回填加注桶"
@@ -2799,6 +2828,72 @@ def test_train_opponent_actions_ignores_dead_players_non_fold_action() -> None:
     assert "gone" not in store.debug_dump()
 
 
+def test_train_opponent_actions_showdown_forced_raise_not_recorded() -> None:
+    """强制摊牌阶段对手被迫 raise/call：round_action 标记 forced（手牌回填保留），
+    动作桶不记（否则被迫继续被当成高频继续，诈唬率高估，反噬决策——用户报
+    「对手牌被预测更大却算出正 EV 开牌」的根因之一）。主动弃牌仍照记。"""
+    store = ProfileStore()
+    last_seen: dict[str, tuple[str, float]] = {}
+    round_action: dict[str, tuple[str, bool, int, int, bool]] = {}
+    showdown = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": True},
+        {"id": "p1", "alive": True, "seen": True, "lastAction": "+1500 追加", "bet": 4500},
+        {"id": "p2", "alive": True, "seen": True, "lastAction": "+1500 跟注", "bet": 4500},
+    )
+    showdown.update({"phase": "showdown", "actions": ["fold", "raise", "showdown"]})
+    _train_opponent_actions(store, showdown, last_seen, round_action)
+    # 被迫继续：round_action 有条目（forced=True，供手牌回填），动作桶不记
+    assert round_action["p1"][0] == "raise" and round_action["p1"][4] is True
+    assert round_action["p2"][0] == "call" and round_action["p2"][4] is True
+    assert "p1" not in store.debug_dump()
+    assert "p2" not in store.debug_dump()
+
+    # 对照：正常阶段（非 showdown）raise → forced=False 且动作桶记录
+    store2 = ProfileStore()
+    last_seen2: dict[str, tuple[str, float]] = {}
+    round_action2: dict[str, tuple[str, bool, int, int, bool]] = {}
+    normal = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": True},
+        {"id": "p1", "alive": True, "seen": True, "lastAction": "+1500 追加", "bet": 4500},
+    )
+    normal.update({"phase": "playing", "actions": ["fold", "call", "raise"]})
+    _train_opponent_actions(store2, normal, last_seen2, round_action2)
+    assert round_action2["p1"][0] == "raise" and round_action2["p1"][4] is False
+    assert "p1" in store2.debug_dump()
+
+    # showdown 阶段主动弃牌仍是真实信号：照记 fold
+    store3 = ProfileStore()
+    last_seen3: dict[str, tuple[str, float]] = {}
+    folded = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": True},
+        {"id": "p1", "alive": False, "seen": True, "lastAction": "弃牌", "bet": 4500},
+    )
+    folded.update({"phase": "showdown", "actions": ["fold", "raise", "showdown"]})
+    _train_opponent_actions(store3, folded, last_seen3)
+    assert "p1" in store3.debug_dump()
+
+
+def test_record_round_raise_freq_skips_forced_continue() -> None:
+    """回归：showdown 被迫 raise 不计入 hand-level 继续率——否则对手每轮被迫 raise
+    被当成高频继续，bluff_rate（继续频率下界）高估，胜率被抬过盈亏平衡线。
+    forced 条目只供手牌回填，不涨 continue 手数。"""
+    store = ProfileStore()
+    uid = "opp"
+    # 同一对手多次 showdown 被迫 raise（旧逻辑每条都 +1 total）
+    for _ in range(5):
+        record_round_raise_freq(store, {uid: ("raise", True, 0, 0, True)}, [uid])
+    # 1 次主动弃牌（照常入 fold 桶）
+    store.record_action(uid, "fold", True, 0, 0)
+    assert store.bluff_rate(uid) == 0.0  # 无自愿继续 → 无诈唬下界
+
+    # 对照：2 次自愿继续（非 forced）就产生继续率（2/3 > 0.5 蕴含诈唬下界）
+    store2 = ProfileStore()
+    record_round_raise_freq(store2, {uid: ("raise", True, 0, 0, False)}, [uid])
+    record_round_raise_freq(store2, {uid: ("raise", True, 0, 0, False)}, [uid])
+    store2.record_action(uid, "fold", True, 0, 0)
+    assert store2.bluff_rate(uid) > 0.0
+
+
 # ──────────────────────────────────────────────────────────────────────
 # 加注频率追踪（v1.14.7）
 # ──────────────────────────────────────────────────────────────────────
@@ -2870,9 +2965,9 @@ def test_record_round_raise_freq_counts_most_aggressive_action() -> None:
     """结算时按最激进动作记录加注频率：call 后 raise 的对手必须计为 raise
     （修复旧版「首次动作变化时记录」把后置加注记成非加注的低估）。"""
     store = ProfileStore()
-    round_action: dict[str, tuple[str, bool, int, int]] = {
-        "p1": ("raise", False, 0, 1),  # 先跟后加 → 最激进 raise
-        "p2": ("call", False, 0, 1),  # 只跟注
+    round_action: dict[str, tuple[str, bool, int, int, bool]] = {
+        "p1": ("raise", False, 0, 1, False),  # 先跟后加 → 最激进 raise
+        "p2": ("call", False, 0, 1, False),  # 只跟注
     }
     record_round_raise_freq(store, round_action)
     dump = store.debug_dump()
@@ -3257,6 +3352,55 @@ def test_seen_opponent_ranges_no_escalation_in_showdown_phase() -> None:
     _, ranges = _seen_opponent_ranges(game, tracker, 0.5)
 
     assert ranges[0].lower == pytest.approx(0.1666667)
+
+
+def test_update_round_tracker_showdown_skips_opponent_raise_snapshot() -> None:
+    """回归：强制摊牌阶段对手被迫 raise 不记录下注快照、不累计加注次数。
+
+    v1.16.8 只豁免了决策侧门槛升级，快照反推仍被 showdown 被迫 raise 污染——
+    与画像把被迫继续记成高频继续叠加，把对手门槛/诈唬率双双抬高，正 EV 虚高。
+    """
+    # 正常阶段（playing）：两轮后对手有下注快照 + raise 计数
+    tracker = _RoundTracker()
+    g1 = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": True},
+        {"id": "opponent", "alive": True, "seen": True, "lastAction": "跟注", "bet": 100},
+        pot=1000,
+        call_bet=100,
+    )
+    g1["phase"] = "playing"
+    _update_round_tracker(g1, tracker)
+    g2 = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": True},
+        {"id": "opponent", "alive": True, "seen": True, "lastAction": "追加", "bet": 300},
+        pot=1400,
+        call_bet=200,
+    )
+    g2["phase"] = "playing"
+    _update_round_tracker(g2, tracker)
+    assert "opponent" in tracker.snapshots
+    assert tracker.opponent_raise_counts.get("opponent", 0) == 1
+
+    # 强制摊牌阶段（showdown）：同样连续两轮 raise，不记快照、不计数
+    tracker_sd = _RoundTracker()
+    s1 = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": True},
+        {"id": "opponent", "alive": True, "seen": True, "lastAction": "追加", "bet": 100},
+        pot=1000,
+        call_bet=100,
+    )
+    s1["phase"] = "showdown"
+    _update_round_tracker(s1, tracker_sd)
+    s2 = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": True},
+        {"id": "opponent", "alive": True, "seen": True, "lastAction": "追加", "bet": 300},
+        pot=1400,
+        call_bet=200,
+    )
+    s2["phase"] = "showdown"
+    _update_round_tracker(s2, tracker_sd)
+    assert "opponent" not in tracker_sd.snapshots
+    assert tracker_sd.opponent_raise_counts.get("opponent", 0) == 0
 
 
 def test_call_decision_consecutive_raises_flips_flush_to_fold() -> None:
