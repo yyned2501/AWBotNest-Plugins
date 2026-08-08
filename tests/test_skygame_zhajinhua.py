@@ -3965,8 +3965,10 @@ def test_opponent_deep_threshold_6881_peek() -> None:
     assert deep_1 > single
     assert deep_2 > deep_1
     assert deep_3 > deep_2
-    # 平台默认 zjh_terminal_depth=2：单挑 peek 门槛 0.353，替代 v1.16.18 的 0.5 下限
-    assert deep_2 == pytest.approx(0.3529, abs=1e-3)
+    # 平台默认 zjh_terminal_depth=2：单挑 peek 门槛 0.316，替代 v1.16.18 的 0.5 下限。
+    # v1.16.21 摊牌费修正：深度耗尽时双方都付比牌费（旧版只算对手成本、我方免费
+    # 摊牌，对手成本相对底池被高估），门槛 0.353 → 0.316。
+    assert deep_2 == pytest.approx(0.3158, abs=1e-3)
 
 
 def test_opponent_deep_threshold_raise_lifts_threshold() -> None:
@@ -3989,7 +3991,71 @@ def test_opponent_deep_threshold_continue_snapshot() -> None:
     assert single == pytest.approx(0.588, abs=1e-3)
     deep = _opponent_hand_threshold(continued, 2)
     assert deep > single
-    assert deep == pytest.approx(0.645, abs=1e-3)
+    # v1.16.21 摊牌费修正后 0.645 → 0.637（我方摊牌费入池、对手成本相对 pot 下降）
+    assert deep == pytest.approx(0.6368, abs=1e-3)
+
+
+def test_opponent_deep_threshold_raise_snapshot_shallower() -> None:
+    """v1.16.21：#6922 raise 快照深度少推 1 轮——对手 raise 后牌局期望轮次比
+    全新局面短（我方有主动开牌止损出口 v1.16.19），打满 depth 把后续追平成本
+    高估、门槛偏高。同一 raise 快照：深度减半的门槛低于打满 depth 的门槛。
+    """
+    snap = _OpponentSnapshot(
+        pot=26400, call_bet=3300, opponents=1, blind_opponents=0, seen_thresholds=(0.789,), is_raise=True
+    )
+    shallow = _opponent_hand_threshold(snap, 2, None, True, 3300.0)  # 深度模式内部 2→1
+    full = _opponent_hand_threshold(snap, 3, None, True, 3300.0)  # 内部 3→2，比 2 多一轮
+    assert shallow is not None and full is not None
+    assert shallow < full
+    # #6922 定标：Q对（单挑胜率 0.8764）面对单次 raise 应能继续（对手范围胜率 > 20%）
+    assert (0.8764 - shallow) / (1.0 - shallow) > 0.2
+
+
+def test_opponent_deep_ev_raise_pays_ante() -> None:
+    """v1.16.21：对手 raise 轮入池 = call_bet + ante（追平+加一注），新 callBet
+    抬升一注底注（实测线性递增 3000→6000→9000 非复利，v1.16.5 用户确认）。强牌
+    raise 是价值下注 EV 更高；弱牌 raise 多付一注亏更多。
+    """
+    from plugins.skyGame.games.zhajinhua import zjh_model
+
+    deep_ev = zjh_model._opponent_deep_ev
+    strong_raise = deep_ev(0.95, 3000, 3000, 0, (0.789,), 0, None, True, 3000, 0.0, True)
+    strong_flat = deep_ev(0.95, 3000, 3000, 0, (0.789,), 0, None, True, 3000, 0.0, False)
+    weak_raise = deep_ev(0.79, 3000, 3000, 0, (0.789,), 0, None, True, 3000, 0.0, True)
+    weak_flat = deep_ev(0.79, 3000, 3000, 0, (0.789,), 0, None, True, 3000, 0.0, False)
+    assert strong_raise > strong_flat
+    assert weak_raise < weak_flat
+
+
+def test_seen_opponent_ranges_deep_mode_skips_first_raise_escalation() -> None:
+    """v1.16.21：深度模式（depth>0）首次 raise 不再 β 升级——深度反推已把 raise
+    的经济学（追平+加注+后续轮次）计入，β=0.5 升级是 v1.16.8 为单步反推打的
+    补丁，叠加会把门槛推过头（#6922 单次 raise 阈值 0.92 把 Q对强牌压死）。
+    单步模式（depth=0）保持旧行为（首次即升级）。
+    """
+    tracker = _RoundTracker()
+    tracker.snapshots["opponent"] = _OpponentSnapshot(
+        pot=500, call_bet=100, opponents=1, blind_opponents=1, is_raise=True
+    )
+    tracker.opponent_raise_counts["opponent"] = 1
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True, "seen": True},
+        {"id": "opponent", "alive": True, "seen": True},
+        pot=1000,
+        call_bet=100,
+    )
+    # 单步模式：首次 raise 照旧 β 升级 0.1667 → 0.5833
+    _, flat_ranges = _seen_opponent_ranges(game, tracker, 0.5)
+    assert flat_ranges[0].lower == pytest.approx(0.5833333)
+    # 深度模式：首次 raise 不升级，门槛 = 深度反推原值（0.3077，对手 raise 追平
+    # +加注后 2 轮打满，高于单步 breakeven 但远低于 β 升级后的 0.5833）
+    _, deep_ranges = _seen_opponent_ranges(game, tracker, 0.5, None, 2)
+    assert deep_ranges[0].lower == pytest.approx(0.3077, abs=1e-3)
+    assert deep_ranges[0].lower < flat_ranges[0].lower
+    # 连续 raise 3 次：深度模式从第 2 次起升级 2 次 0.3077 → 0.6538 → 0.8269
+    tracker.opponent_raise_counts["opponent"] = 3
+    _, deep_ranges3 = _seen_opponent_ranges(game, tracker, 0.5, None, 2)
+    assert deep_ranges3[0].lower == pytest.approx(0.8269, abs=1e-3)
 
 
 def test_opponent_deep_threshold_missing_opponent_not_degenerate() -> None:
@@ -4017,16 +4083,16 @@ def test_opponent_deep_threshold_missing_opponent_not_degenerate() -> None:
 def test_combined_opponent_threshold_deep_replaces_min_peek() -> None:
     """v1.16.20：决策侧深度反推替代 v1.16.18 的 min_peek 下限。
 
-    单步反推 0.222 太宽（#6881）；深度反推 depth=2 给 0.353，天然高于单步，
-    无需再 max(反推, zjh_peeked_threshold 分位)。min_peek 参数保留向后兼容，
-    但决策侧调用传 None。
+    单步反推 0.222 太宽（#6881）；深度反推 depth=2 给 0.316（v1.16.21 摊牌费
+    修正，旧 0.353），天然高于单步，无需再 max(反推, zjh_peeked_threshold 分位)。
+    min_peek 参数保留向后兼容，但决策侧调用传 None。
     """
     peek = _OpponentSnapshot(pot=12250, call_bet=3500, opponents=1)
     deep = _combined_opponent_threshold(peek, None, None, 2)
     single = _combined_opponent_threshold(peek, None)
     assert deep is not None and single is not None
     assert deep > single
-    assert deep == pytest.approx(0.353, abs=1e-3)
+    assert deep == pytest.approx(0.3158, abs=1e-3)
 
 
 def test_self_action_probs_uses_self_profile() -> None:
