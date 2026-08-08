@@ -23,7 +23,7 @@ from .games import hdsky_auth
 __plugin__ = {
     "name": "天空游戏",
     "id": "skyGame",
-    "version": "1.16.12",
+    "version": "1.16.13",
     "author": "Yy",
     "description": "天空系列游戏统一入口：炸金花自动参与、养马自动养护，左侧按游戏分组配置。",
     "scope": "user",
@@ -396,6 +396,13 @@ __plugin__ = {
         },
     },
     "changelog": (
+        "v1.16.13 修复：\n"
+        "- 修复对局战绩入账与结果通知仍不生效（v1.16.12 后才暴露的第二层根因，经线上 debug "
+        "日志确认）：线上轮询响应在结算后 roundId 直接变 None、lastResult 只在结算态响应出现"
+        "（新局响应里已被清空），而 v1.16.9 的入账挂在 roundId 切换条件上——切换条件永不满足，"
+        "战绩从不入账 zjh:stats、结果通知从不推送。现入账与通知移到 lastResult 到达时刻"
+        "（与画像回填同步，按 lastResult.roundId 每局去重一次），bot 已参局（round_joined）"
+        "即入账并推送本局盈亏与累计/当日战绩；\n"
         "v1.16.12 修复：\n"
         "- 修复对局战绩统计从未入账、对局结束结果通知从未推送：v1.16.9 声明 round_joined "
         "条件变量却从不置位，`if last_rid and round_joined:` 恒不成立——kv 里 zjh:stats "
