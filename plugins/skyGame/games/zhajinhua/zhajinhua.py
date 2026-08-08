@@ -291,7 +291,7 @@ async def _act_on_hand(
         float(cfg.get("zjh_fold_ev_tolerance", 0) or 0),
         profile,
     )
-    _log_decision(ctx, hand, hand_type, hand_value, game, choice, tracker)
+    _log_decision(ctx, hand, hand_type, hand_value, game, choice, tracker, fallback_threshold)
 
     decision = choice.decision
     actions = game.get("actions", [])
@@ -645,7 +645,7 @@ async def _poll_loop(ctx: object) -> None:
                                 adj_blind = blind_count - (0 if op_seen else 1)
                                 probs = profile_store.action_probabilities(uid, op_seen, adj_seen, adj_blind)
                                 threshold = _combined_opponent_threshold(
-                                    tracker.peek_snapshots.get(uid), tracker.snapshots.get(uid)
+                                    tracker.peek_snapshots.get(uid), tracker.snapshots.get(uid), seen_threshold
                                 )
                                 blind_opponents.append(
                                     _BlindOpponent(

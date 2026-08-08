@@ -3816,3 +3816,132 @@ async def test_notify_game_result_appends_cumulative_stats() -> None:
     msg = ctx.messages[0]
     assert "本局 +15000" in msg
     assert "📊 累计 10 局 · 胜 6 / 平 0 / 负 4 · 净 +5500" in msg
+
+
+def test_combined_opponent_threshold_peek_floor() -> None:
+    """v1.16.18 回归：上牌门槛不低于回退分位。
+
+    #6881 对手 15:02:21 上牌快照 12250/3500 单挑蒙牌 → 纯赔率盈亏平衡 0.222，
+    即「看牌后 78% 都会继续」的过宽假设，把对手范围估宽、我方胜率虚高。
+    决策侧传 zjh_peeked_threshold（0.5）做下限后门槛抬到 0.5；记录/诊断侧
+    不传保持原始反推。
+    """
+    peek = _OpponentSnapshot(pot=12250, call_bet=3500, opponents=1)
+    assert _opponent_hand_threshold(peek) == pytest.approx(3500 / 15750)
+    # 不传下限：保持原始反推（记录/诊断侧）
+    assert _combined_opponent_threshold(peek, None) == pytest.approx(3500 / 15750)
+    # 传下限 0.5：peek 门槛被抬到回退分位
+    assert _combined_opponent_threshold(peek, None, 0.5) == pytest.approx(0.5)
+    # continue 快照反推高于下限时不受影响（下注是更强信号）
+    continued = _OpponentSnapshot(pot=900, call_bet=100, opponents=1)
+    assert _combined_opponent_threshold(None, continued, 0.5) == pytest.approx(0.1)
+    # 无快照：None
+    assert _combined_opponent_threshold(None, None, 0.5) is None
+
+
+def test_seen_factor_bluff_decays_with_raise_count() -> None:
+    """v1.16.18 回归：连续 raise 后诈唬分量按 0.5**raise_count 衰减。
+
+    #6881 15:02:42 起门槛升级到 0.794+，纯范围胜率已归 0，但画像诈唬 23.8% 恒定
+    × 我方牌力 0.763 仍算出 18.2% 胜率 → EV 一路 +325→+7338 应战巨亏 57750。
+    首次 raise 诈唬减半、三次 raise 近零——真实诈唬者不会把空气牌连续 raise 到底。
+    """
+    store = ProfileStore()
+    for _ in range(10):
+        store.record_raise_freq("opp", True, 0, 0, False)
+        store.record_action("opp", "call", True, 0, 0)
+    hand_threshold = 0.7634
+    base = _SeenRange(0.794, 1.0, True, store, "opp", "raise", "s_s0b0")
+    assert _range_factor(hand_threshold, 0.794, 1.0) == 0.0  # 门槛升级后纯范围胜率 0
+    bluff = store.bluff_rate("opp", "s_s0b0")
+    assert bluff > 0
+    # 旧行为（未衰减）：诈唬恒撑胜率
+    legacy = _seen_factor(hand_threshold, base)
+    assert legacy == pytest.approx(bluff * hand_threshold)
+    # 首次 raise：诈唬减半
+    once = _seen_factor(hand_threshold, _SeenRange(0.794, 1.0, True, store, "opp", "raise", "s_s0b0", 0.5))
+    assert once == pytest.approx(0.5 * bluff * hand_threshold)
+    # 三次 raise：诈唬压缩到 legacy/4 以下
+    thrice = _seen_factor(hand_threshold, _SeenRange(0.794, 1.0, True, store, "opp", "raise", "s_s0b0", 0.125))
+    assert thrice < legacy / 4
+
+
+def test_6881_fold_after_opponent_raise_with_bluff_decay() -> None:
+    """#6881 回归（端到端）：对手上牌后连续 raise，我方 9♥3♣3♦ 小对子弃牌止损。
+
+    旧版：上牌门槛 0.222（纯赔率）+ 画像诈唬 23.8% 恒定 → 门槛升级到 0.794 后
+    纯范围内我方胜率归 0，仍由诈唬分量算出 18.2% 胜率 → EV +325→+7338 一路跟到
+    应战巨亏 57750。修复后：上牌门槛不低于回退分位 0.5 + 连续 raise 诈唬按
+    0.5**raise_count 衰减 → 对手首次 raise 后 EV 转负，弃牌。
+    """
+    store = ProfileStore()
+    for _ in range(10):
+        store.record_raise_freq("opp", True, 0, 0, False)
+        store.record_action("opp", "call", True, 0, 0)
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True},
+        {"id": "opp", "alive": True, "seen": True},
+        pot=33250,
+        call_bet=7000,
+    )
+    tracker = _RoundTracker(
+        peek_snapshots={"opp": _OpponentSnapshot(pot=12250, call_bet=3500, opponents=1)},
+        snapshots={
+            "opp": _OpponentSnapshot(
+                pot=26250, call_bet=3500, opponents=1, blind_opponents=0, seen_thresholds=(0.533,), is_raise=True
+            )
+        },
+        opponent_raise_counts={"opp": 1},
+    )
+    choice = _choose("对子", (3, 9), game, 0.5, tracker, 0, store)
+    assert choice is not None
+    assert not choice.call
+    assert choice.decision is not None
+    assert choice.decision.expected_value < 0
+
+
+def test_6881_peek_floor_keeps_call_before_raise_then_folds() -> None:
+    """#6881 完整轨迹回归：对手未加注时上牌下限不阻止跟注，加注后弃牌。
+
+    15:02:29（对手只上牌未加注）→ 上牌门槛 0.222→0.5，9-3-3 单挑仍然正 EV 跟注；
+    15:02:42（对手首次 raise）→ 门槛升级 + 诈唬衰减 → 弃牌。避免「一刀切抬门槛
+    导致一上牌就弃」的过度保守。
+    """
+    store = ProfileStore()
+    for _ in range(10):
+        store.record_raise_freq("opp", True, 0, 0, False)
+        store.record_action("opp", "call", True, 0, 0)
+    peek_snapshots = {"opp": _OpponentSnapshot(pot=12250, call_bet=3500, opponents=1)}
+
+    # 15:02:29：对手上牌后只跟注（continue 快照 0.222，未加注）
+    before_raise = _game(
+        {"id": "self", "alive": True, "isSelf": True},
+        {"id": "opp", "alive": True, "seen": True},
+        pot=15750,
+        call_bet=3500,
+    )
+    tracker_no_raise = _RoundTracker(
+        peek_snapshots=peek_snapshots,
+        snapshots={"opp": _OpponentSnapshot(pot=12250, call_bet=3500, opponents=1, is_raise=False)},
+    )
+    call_choice = _choose("对子", (3, 9), before_raise, 0.5, tracker_no_raise, 0, store)
+    assert call_choice is not None and call_choice.call
+
+    # 15:02:42：对手首次 raise（快照 0.588，raise_count=1）→ 弃牌
+    after_raise = _game(
+        {"id": "self", "alive": True, "isSelf": True},
+        {"id": "opp", "alive": True, "seen": True},
+        pot=33250,
+        call_bet=7000,
+    )
+    tracker_raise = _RoundTracker(
+        peek_snapshots=peek_snapshots,
+        snapshots={
+            "opp": _OpponentSnapshot(
+                pot=26250, call_bet=3500, opponents=1, blind_opponents=0, seen_thresholds=(0.533,), is_raise=True
+            )
+        },
+        opponent_raise_counts={"opp": 1},
+    )
+    fold_choice = _choose("对子", (3, 9), after_raise, 0.5, tracker_raise, 0, store)
+    assert fold_choice is not None and not fold_choice.call

@@ -125,6 +125,7 @@ class _SeenRange:
     uid: str | None = None
     action: str = "call"
     bucket_key: str | None = None
+    bluff_multiplier: float = 1.0
 
 
 def _actual_win_probability(hand_threshold: float, blind_opponents: int, seen_thresholds: tuple[float, ...]) -> float:
@@ -218,15 +219,26 @@ def _opponent_hand_threshold(snapshot: _OpponentSnapshot | None) -> float | None
 
 
 def _combined_opponent_threshold(
-    peek_snapshot: _OpponentSnapshot | None, continue_snapshot: _OpponentSnapshot | None
+    peek_snapshot: _OpponentSnapshot | None,
+    continue_snapshot: _OpponentSnapshot | None,
+    min_peek: float | None = None,
 ) -> float | None:
-    """按上牌和看牌后继续下注两次决策推导对手的综合最低牌力。"""
-    thresholds = [
-        threshold
-        for snapshot in (peek_snapshot, continue_snapshot)
-        if (threshold := _opponent_hand_threshold(snapshot)) is not None
-    ]
-    return max(thresholds, default=None)
+    """按上牌和看牌后继续下注两次决策推导对手的综合最低牌力。
+
+    min_peek 给上牌门槛设下限（v1.16.18）：peek 是「看牌确认后才继续」的过滤动作，
+    纯赔率盈亏平衡常远低于实际牌力门槛（#6881 单挑 3500/15750≈0.222）——赔率允许
+    22% 胜率就继续，但真实玩家看牌后 78% 都会继续的假设明显过宽，会把对手范围估宽、
+    我方胜率虚高。决策侧传 zjh_peeked_threshold 回退分位做下限，记录/诊断侧不传
+    保持原始反推（决策门槛与日志展示的一致性由各调用点自行负责）。
+    """
+    continue_threshold = _opponent_hand_threshold(continue_snapshot)
+    peek_threshold = _opponent_hand_threshold(peek_snapshot)
+    if peek_threshold is not None and min_peek is not None:
+        peek_threshold = max(peek_threshold, min_peek)
+    return max(
+        (threshold for threshold in (continue_threshold, peek_threshold) if threshold is not None),
+        default=None,
+    )
 
 
 def _combined_self_threshold(tracker: _RoundTracker) -> float | None:
@@ -408,7 +420,9 @@ def _seen_opponent_thresholds(
     for key, player in _opponent_entries(game):
         if not player.get("seen", False):
             continue
-        threshold = _combined_opponent_threshold(tracker.peek_snapshots.get(key), tracker.snapshots.get(key))
+        threshold = _combined_opponent_threshold(
+            tracker.peek_snapshots.get(key), tracker.snapshots.get(key), fallback_threshold
+        )
         observed = threshold is not None
         threshold = threshold if threshold is not None else fallback_threshold
         seen_thresholds.append((threshold, observed))
@@ -448,6 +462,12 @@ def _seen_factor(hand_threshold: float, seen_range: _SeenRange) -> float:
         bluff_opp = profile.bluff_rate(uid, bucket_key)
     else:
         bluff_opp = 0.0
+    # 连续加注是强牌信号：诈唬分量按 raise 次数衰减（0.5**raise_count，v1.16.18）。
+    # 门槛升级（β=0.5/次）已把纯范围胜率压到 0，若诈唬分量原样保留会在门槛极高时
+    # 恒撑出正 EV——#6881 对手连续 raise 后门槛 79%+、纯范围胜率 0，画像诈唬 23.8%
+    # 恒定 × 我方牌力 0.763 仍算出 18.2% 胜率 → EV 一路 +325→+7338 应战巨亏 57750。
+    # 真实诈唬者不会把空气牌连续 raise 到底，衰减后首次 raise 保留一半、三次后近零。
+    bluff_opp *= seen_range.bluff_multiplier
     model_win = (1 - bluff_opp) * range_win + bluff_opp * hand_threshold
     if profile is not None and uid:
         return profile.empirical_win_factor(uid, seen_range.action, hand_threshold, model_win, bucket_key)
@@ -477,7 +497,9 @@ def _seen_opponent_ranges(
     for key, player in _opponent_entries(game):
         if not player.get("seen", False):
             continue
-        threshold = _combined_opponent_threshold(tracker.peek_snapshots.get(key), tracker.snapshots.get(key))
+        threshold = _combined_opponent_threshold(
+            tracker.peek_snapshots.get(key), tracker.snapshots.get(key), fallback_threshold
+        )
         observed = threshold is not None
         lower = threshold if threshold is not None else fallback_threshold
         continue_snapshot = tracker.snapshots.get(key)
@@ -518,7 +540,19 @@ def _seen_opponent_ranges(
                     freq_floor = profile.raise_floor_from_freq_bucket(key, op_seen, adj_seen, adj_blind, base_floor)
                     if freq_floor is not None:
                         base_floor = max(base_floor, freq_floor) if raise_count > 0 else freq_floor
-            ranges.append(_SeenRange(base_floor, 1.0, observed, profile, key, action, bucket_key))
+            ranges.append(
+                _SeenRange(
+                    base_floor,
+                    1.0,
+                    observed,
+                    profile,
+                    key,
+                    action,
+                    bucket_key,
+                    # 连续 raise 诈唬衰减：强牌信号，诈唬分量逐级压缩（v1.16.18）
+                    0.5**raise_count if raise_count > 0 else 1.0,
+                )
+            )
         else:
             ranges.append(_SeenRange(lower, 1.0, observed, profile, key, action, bucket_key))
     return blind, ranges
