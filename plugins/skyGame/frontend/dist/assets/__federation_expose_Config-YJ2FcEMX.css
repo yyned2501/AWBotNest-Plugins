@@ -1,0 +1,107 @@
+
+.lcfg[data-v-16d8d2cb] { display: flex; flex-direction: column; gap: 14px; container-type: inline-size; min-height: 100%;
+}
+.layout[data-v-16d8d2cb] { display: flex; gap: 16px; align-items: flex-start; min-height: 100%;
+}
+.sidebar[data-v-16d8d2cb] {
+  flex: 0 0 150px; display: flex; flex-direction: column; gap: 4px;
+  padding: 10px; border-radius: 10px;
+  background: var(--bg-elevated, #1a1d27); border: 1px solid var(--border-light, #2a2e3a);
+}
+.side-title[data-v-16d8d2cb] { font-size: 11px; color: var(--text-muted, #7a8291); padding: 4px 8px 6px;
+}
+.side-item[data-v-16d8d2cb] {
+  display: flex; align-items: center; gap: 8px;
+  padding: 9px 10px; border-radius: 8px; border: none; cursor: pointer; text-align: left;
+  background: none; color: var(--text-secondary, #b9c0cc); font-size: 13px;
+  transition: background 0.15s, color 0.15s;
+}
+.side-item[data-v-16d8d2cb]:hover { background: var(--bg-card, #12141c);
+}
+.side-item.on[data-v-16d8d2cb] { background: var(--accent-dim, #1e3a5f); color: var(--accent, #6ea8fe);
+}
+.side-icon[data-v-16d8d2cb] { font-size: 14px;
+}
+.detail[data-v-16d8d2cb] { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 14px;
+}
+.det-title[data-v-16d8d2cb] { margin: 0; font-size: 15px; font-weight: 600; color: var(--text-primary, #e8ebf0);
+}
+.card[data-v-16d8d2cb] {
+  display: flex; flex-direction: column; gap: 12px; padding: 16px; border-radius: 10px;
+  background: var(--bg-elevated, #1a1d27); border: 1px solid var(--border-light, #2a2e3a);
+}
+.card-h[data-v-16d8d2cb] { font-size: 13px; font-weight: 600; color: var(--accent, #6ea8fe);
+}
+.grid[data-v-16d8d2cb] { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px 20px;
+}
+.fld[data-v-16d8d2cb] { display: flex; flex-direction: column; gap: 6px; min-width: 0;
+}
+.lbl[data-v-16d8d2cb] { font-size: 13px; color: var(--text-secondary, #b9c0cc);
+}
+.help[data-v-16d8d2cb] { font-size: 12px; color: var(--text-muted, #7a8291);
+}
+.row[data-v-16d8d2cb] { display: flex; align-items: center; gap: 10px;
+}
+.row.switch[data-v-16d8d2cb] { cursor: pointer; font-size: 13px; color: var(--text-primary, #e8ebf0);
+}
+.row.switch input[data-v-16d8d2cb] { accent-color: var(--accent, #6ea8fe);
+}
+.inp[data-v-16d8d2cb] {
+  width: 100%; min-width: 0; box-sizing: border-box;
+  padding: 8px 10px; border-radius: 6px; font-size: 13px;
+  background: var(--bg-card, #12141c); color: var(--text-primary, #e8ebf0);
+  border: 1px solid var(--border-light, #2a2e3a);
+  transition: border-color 0.15s;
+}
+.inp[data-v-16d8d2cb]:focus { outline: none; border-color: var(--accent, #6ea8fe);
+}
+.inp[type='number'][data-v-16d8d2cb] { max-width: 150px;
+}
+textarea.inp[data-v-16d8d2cb] { resize: vertical; font-family: inherit;
+}
+.btn[data-v-16d8d2cb] {
+  padding: 7px 14px; border-radius: 6px; cursor: pointer; font-size: 13px;
+  background: var(--bg-card, #12141c); color: var(--text-secondary, #b9c0cc);
+  border: 1px solid var(--border-light, #2a2e3a);
+  transition: border-color 0.15s, color 0.15s;
+}
+.btn[data-v-16d8d2cb]:hover { border-color: var(--accent, #6ea8fe); color: var(--accent, #6ea8fe);
+}
+.btn.primary[data-v-16d8d2cb] { background: var(--accent-dim, #1e3a5f); border-color: var(--accent, #6ea8fe); color: var(--accent, #6ea8fe);
+}
+.btn.lg[data-v-16d8d2cb] { padding: 9px 22px;
+}
+.btn[data-v-16d8d2cb]:disabled { opacity: 0.5; cursor: not-allowed;
+}
+.savebar[data-v-16d8d2cb] { position: sticky; bottom: 0; display: flex; justify-content: flex-end; padding-top: 4px;
+}
+.muted[data-v-16d8d2cb] { font-size: 12px; color: var(--text-muted, #7a8291);
+}
+@container (max-width: 620px) {
+.layout[data-v-16d8d2cb] { flex-direction: column;
+}
+.sidebar[data-v-16d8d2cb] { flex-basis: auto; width: 100%; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 6px;
+}
+.side-title[data-v-16d8d2cb] { display: none;
+}
+.side-item[data-v-16d8d2cb] { flex: 0 1 auto;
+}
+.detail[data-v-16d8d2cb] { width: 100%;
+}
+.grid[data-v-16d8d2cb] { grid-template-columns: 1fr;
+}
+.inp[type='number'][data-v-16d8d2cb] { max-width: none; width: 100%;
+}
+.savebar[data-v-16d8d2cb] { justify-content: stretch;
+}
+.savebar .btn.lg[data-v-16d8d2cb] { width: 100%; text-align: center;
+}
+}
+@container (max-width: 380px) {
+.card[data-v-16d8d2cb] { padding: 12px;
+}
+.sidebar[data-v-16d8d2cb] { padding: 8px; gap: 4px;
+}
+.inp[data-v-16d8d2cb] { padding: 7px 8px;
+}
+}
