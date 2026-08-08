@@ -2362,6 +2362,25 @@ def test_hand_pctile_lists_capped_to_max_samples() -> None:
     assert store.hand_percentiles("a", "raise", "b_s0b0") == [0.3, 0.4, 0.5]
 
 
+def test_hand_pctile_window_follows_halflife() -> None:
+    """窗口上限联动半衰期：默认 max(100, 半衰期×3)，显式传参优先。
+
+    旧版写死 100 条：半衰期 100 时最旧样本权重还剩约一半就被硬切，真实记忆窗口
+    远短于设定值。联动后被丢弃的最旧样本权重已衰减到约 12.5%（3 个半衰期）。
+    """
+    assert ProfileStore(halflife=100)._max_samples == 300
+    assert ProfileStore(halflife=50)._max_samples == 150
+    assert ProfileStore(halflife=20)._max_samples == 100  # 默认半衰期不涨价
+    assert ProfileStore(halflife=0)._max_samples == 100  # 不衰减仍硬遗忘兜底
+    assert ProfileStore(halflife=100, max_samples=3)._max_samples == 3  # 显式优先
+
+    # 行为验证：半衰期 100、默认窗口记录 150 条全部保留（旧版窗口 100 会截断掉 50 条）
+    store = ProfileStore(halflife=100)
+    for i in range(150):
+        store.record_hand_pctile("a", "raise", i / 100)
+    assert len(store.hand_percentiles("a", "raise")) == 150
+
+
 def test_action_counts_decay_by_hand_tick() -> None:
     """计数桶按手数衰减：早期跟注站被近期弃牌覆盖，action_probabilities 反映近期行为。
 

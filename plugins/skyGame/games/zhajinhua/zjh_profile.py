@@ -45,7 +45,7 @@ _WEAK_PCTILE = 0.5
 # 高频对手自动衰减快、低频对手自动衰减慢。半衰期 = 该对手每多打这么多手旧样本权重减半；
 # 0 = 不衰减（终身累计，旧行为）。
 HALF_LIFE_SAMPLES = 20.0
-# 每桶手牌分位列表上限：超限丢弃最旧样本（兼作硬遗忘与内存上限）。
+# 手牌分位列表窗口下限：默认窗口跟随半衰期（3 个半衰期样本数），最少不低于此值。
 MAX_SAMPLES_PER_BUCKET = 100
 # 画像内已完成手数（衰减时钟）键
 _HAND_SEQ = "hand_seq"
@@ -131,13 +131,19 @@ class ProfileStore:
         self,
         kv: object | None = None,
         halflife: float = HALF_LIFE_SAMPLES,
-        max_samples: int = MAX_SAMPLES_PER_BUCKET,
+        max_samples: int | None = None,
     ) -> None:
         self._cache: dict[str, dict[str, Any]] = {}
         self._dirty: set[str] = set()
         self._kv = kv
         # 半衰期（手数）≤0 = 不衰减（终身累计）
         self._halflife = max(float(halflife), 0.0)
+        # 手牌分位窗口上限：显式传参优先；默认跟随半衰期（3 个半衰期样本数、最少 100 条）
+        # ——被丢弃的最旧样本权重已衰减到约 0.5^3=12.5%，长记忆仍保留、存储查询有界。
+        # 半衰期 100+ 时窗口不会再抢在软衰减前主导遗忘（旧版写死 100 会把还有一半
+        # 权重的样本硬切掉，导致分位列表实际记忆窗口远短于设定的半衰期）。
+        if max_samples is None:
+            max_samples = max(MAX_SAMPLES_PER_BUCKET, int(self._halflife * 3))
         self._max_samples = max(int(max_samples), 1)
         # 每手衰减率：半衰期 20 手 → 每手 ×0.966
         self._decay_rate = 0.5 ** (1 / self._halflife) if self._halflife > 0 else 1.0
@@ -683,7 +689,7 @@ _store: ProfileStore | None = None
 def get_store(
     kv: object | None = None,
     halflife: float = HALF_LIFE_SAMPLES,
-    max_samples: int = MAX_SAMPLES_PER_BUCKET,
+    max_samples: int | None = None,
 ) -> ProfileStore:
     """返回全局画像单例；首次调用绑定 kv、半衰期并加载已有画像。"""
     global _store
