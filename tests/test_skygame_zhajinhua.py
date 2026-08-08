@@ -2212,16 +2212,15 @@ def test_hand_percentiles_returns_recorded_and_empty() -> None:
 
 
 def test_empirical_win_factor_shrinkage() -> None:
-    """实测胜率收缩：无样本回退基线，少样本收缩，多样本趋近实测。"""
+    """实测胜率收缩：无样本回退基线，样本不足 _MIN_PROFILE_SAMPLES 也回退基线
+    （v1.16.15：少样本分位统计不可信，可能混有被迫 raise 回填的弱牌），
+    多样本趋近实测。"""
     store = ProfileStore()
     # 无样本 → 回退 model_baseline
     assert store.empirical_win_factor("nobody", "raise", 0.7, 0.42) == pytest.approx(0.42)
-    # 对手加注全弱牌（0.3），我方 0.7 全胜 → wins=1.0；n=1 向 baseline 收缩
+    # 单样本 → 回退 model_baseline（v1.16.15 新门槛：1 < _MIN_PROFILE_SAMPLES）
     store.record_hand_pctile("a", "raise", 0.3)
-    w1 = store.empirical_win_factor("a", "raise", 0.7, 0.42)
-    weight = 1 / (1 + PRIOR_STRENGTH)
-    assert w1 == pytest.approx(weight * 1.0 + (1 - weight) * 0.42)
-    assert w1 > 0.42
+    assert store.empirical_win_factor("a", "raise", 0.7, 0.42) == pytest.approx(0.42)
     # 多样本（n=20 全弱）趋近实测 1.0
     for _ in range(20):
         store.record_hand_pctile("b", "raise", 0.3)
@@ -2593,6 +2592,97 @@ def test_win_prob_1v1_type_band_midpoint() -> None:
     assert zjh_prob.win_prob_1v1_type("不存在的牌型") is None
 
 
+def test_feed_last_result_forced_skips_hand_pctile_fill() -> None:
+    """v1.16.15 回归：forced 条目（showdown 被迫 raise/call）结算时不回填分位。
+
+    被迫 raise 的牌几乎必然是弱牌（牌硬早开牌，只有 air 才被迫 raise 拖回合），
+    回填会拉低加注下四分位 → raise_threshold_floor 降低 → 下局胜率虚高 → 又应战
+    开牌 → 死循环。forced 与自愿继续必须同等待遇：一律不进画像。
+    """
+    game = {
+        "lastResult": {
+            "roundId": "r1",
+            "players": [
+                {"displayName": "Damon", "result": "赢", "handType": "8♠ 8♦ 2♠ → 对子"},
+            ],
+        }
+    }
+    # forced=True（被迫继续）→ 分位不回填
+    store = ProfileStore()
+    feed_last_result(store, game, {"Damon": "account:1"}, {"account:1": ("raise", True, 0, 0, True)})
+    dump = store.debug_dump()
+    assert not dump.get("account:1", {}).get("raise_pcts"), "forced 条目不得回填加注分位"
+    assert not dump.get("account:1", {}).get("call_pcts"), "forced 条目不得回填平跟分位"
+
+    # 对照：forced=False（自愿加注）→ 正常回填
+    store2 = ProfileStore()
+    feed_last_result(store2, game, {"Damon": "account:1"}, {"account:1": ("raise", True, 0, 0, False)})
+    assert store2.debug_dump()["account:1"].get("raise_pcts")
+
+
+def test_raise_threshold_floor_below_min_samples_returns_none() -> None:
+    """v1.16.15：加注分位样本不足 _MIN_PROFILE_SAMPLES 时返回 None（回退反推门槛）。
+
+    用户场景 #6804：272 的 s_s1b0 桶只有 4 个加注样本（含 0.288 弱牌），下四分位
+    被拉到 0.34 → 门槛 0.9 被收缩到 0.58 → 范围胜率从 0 抬到 0.58 → 摸到 0.822
+    对子也误判正 EV。样本不足不采信分位，宁可回退反推门槛保守弃牌。
+    """
+    store = ProfileStore()
+    assert store.raise_threshold_floor("nobody", 0.6) is None  # 无样本
+    # 4 个样本（下四分位 ≈ 第 2 小值，单颗弱牌就能拉跑）→ 不采信
+    for pct in (0.8, 0.5, 0.9, 0.288):
+        store.record_hand_pctile("a", "raise", pct)
+    assert store.raise_threshold_floor("a", 0.9) is None
+    # 对照：样本充足（6 个）→ 正常返回收缩后的下四分位
+    store2 = ProfileStore()
+    for pct in (0.8, 0.5, 0.9, 0.288, 0.7, 0.75):
+        store2.record_hand_pctile("a", "raise", pct)
+    floor = store2.raise_threshold_floor("a", 0.9)
+    assert floor is not None and floor < 0.9
+
+
+def test_empirical_win_factor_below_min_samples_returns_baseline() -> None:
+    """v1.16.15：实测胜率样本不足 _MIN_PROFILE_SAMPLES 时回退模型基线。
+
+    与 raise_threshold_floor 同因：样本不足时实测分位统计不可信（可能混有被迫
+    raise 回填的弱牌），回退基线胜率，不让 4 个样本把实测胜率抬起来。
+    """
+    store = ProfileStore()
+    for pct in (0.8, 0.5, 0.9, 0.288):
+        store.record_hand_pctile("a", "raise", pct)
+    assert store.empirical_win_factor("a", "raise", 0.822, 0.3) == pytest.approx(0.3)
+    # 对照：样本充足 → 用实测分位混合
+    store2 = ProfileStore()
+    for pct in (0.8, 0.5, 0.9, 0.288, 0.7, 0.75):
+        store2.record_hand_pctile("a", "raise", pct)
+    factor = store2.empirical_win_factor("a", "raise", 0.822, 0.3)
+    assert factor != pytest.approx(0.3)
+    assert 0.3 < factor < 0.822
+
+
+def test_user_scene_6804_few_raise_samples_does_not_inflate_win() -> None:
+    """用户报障完整回归（v1.16.15）：8-8-2 对子 82.2%、对手门槛 90%+，画像桶
+    只有 4 个加注样本（含弱牌）→ 分位不采信 → 纯范围胜率 0 → EV 负 → 弃牌。
+
+    旧逻辑：4 样本下四分位 0.34 → 门槛拉到 0.58 → range_win 0.58 × empirical
+    0.75 ≈ 0.71 → 两个对手连乘 0.71×0.19 ≈ 0.146 → 误判正 EV 应战开牌。
+    """
+    hand_threshold = 0.822  # 8-8-2 对子（用户场景）
+    store = ProfileStore()
+    uid = "272"
+    # 模拟 s_s1b0 桶：4 个加注分位（含 0.288 疑似被迫 raise 回填的弱牌）
+    for pct in (0.828, 0.527, 0.491, 0.288):
+        store.record_hand_pctile(uid, "raise", pct, op_seen=True, seen_count=1, blind_count=0)
+    range_90 = _SeenRange(0.90, 1.0, True, profile=store, uid=uid, action="raise", bucket_key="s_s1b0")
+    factor = _seen_factor(hand_threshold, range_90)
+    assert factor == pytest.approx(0.0), "样本不足时不得用画像分位抬胜率"
+
+    # 两个对手连乘（另一紧手 call 型门槛 0.98 → 纯范围 0）仍为 0 → EV 负 → 弃牌
+    call_bet = 3900.0
+    ev = factor * (58500.0 + call_bet) - call_bet
+    assert ev < 0
+
+
 def test_hand_pctile_from_result_type_only_fallback() -> None:
     """无牌面只有牌型时回退牌型级分位（结算 lastResult 的真实情形）。"""
     # 有牌面 → 精确分位
@@ -2829,7 +2919,9 @@ def test_train_opponent_actions_ignores_dead_players_non_fold_action() -> None:
 
 
 def test_train_opponent_actions_showdown_forced_raise_not_recorded() -> None:
-    """强制摊牌阶段对手被迫 raise/call：round_action 标记 forced（手牌回填保留），
+    """强制摊牌阶段对手被迫 raise/call：round_action 标记 forced（v1.16.14 只豁免
+    动作桶/继续率，v1.16.15 连手牌分位回填也一并豁免——被迫 raise 的牌几乎必然是
+    弱牌，回填会拉低加注下四分位 → 下局胜率虚高 → 又应战开牌，死循环），
     动作桶不记（否则被迫继续被当成高频继续，诈唬率高估，反噬决策——用户报
     「对手牌被预测更大却算出正 EV 开牌」的根因之一）。主动弃牌仍照记。"""
     store = ProfileStore()
@@ -2842,7 +2934,7 @@ def test_train_opponent_actions_showdown_forced_raise_not_recorded() -> None:
     )
     showdown.update({"phase": "showdown", "actions": ["fold", "raise", "showdown"]})
     _train_opponent_actions(store, showdown, last_seen, round_action)
-    # 被迫继续：round_action 有条目（forced=True，供手牌回填），动作桶不记
+    # 被迫继续：round_action 有条目（forced=True），动作桶不记、分位不回填
     assert round_action["p1"][0] == "raise" and round_action["p1"][4] is True
     assert round_action["p2"][0] == "call" and round_action["p2"][4] is True
     assert "p1" not in store.debug_dump()
@@ -2876,7 +2968,7 @@ def test_train_opponent_actions_showdown_forced_raise_not_recorded() -> None:
 def test_record_round_raise_freq_skips_forced_continue() -> None:
     """回归：showdown 被迫 raise 不计入 hand-level 继续率——否则对手每轮被迫 raise
     被当成高频继续，bluff_rate（继续频率下界）高估，胜率被抬过盈亏平衡线。
-    forced 条目只供手牌回填，不涨 continue 手数。"""
+    forced 条目不涨 continue 手数（v1.16.14），分位也不回填（v1.16.15）。"""
     store = ProfileStore()
     uid = "opp"
     # 同一对手多次 showdown 被迫 raise（旧逻辑每条都 +1 total）
