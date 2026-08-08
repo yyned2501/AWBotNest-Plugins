@@ -391,23 +391,23 @@ def _train_opponent_actions(
         if round_action is not None and action in ("raise", "call"):
             # 最激进动作优先：加注覆盖平跟（结算回填据此区分加注/平跟手牌分位）
             # 同时存储当时牌局状态桶参数 (action, op_seen, adj_seen, adj_blind, forced)
-            # forced：强制摊牌阶段（phase=showdown）的 raise/call 是对手被迫的唯一
-            # 「继续」动作，不代表牌强——手牌分位回填照记（那是真实牌面），但加注频率
-            # 与动作桶不记（否则 showdown 被迫 raise 被当成高频继续，诈唬率高估，
-            # 反噬决策：把「对手门槛 90%+ 强牌」算出高胜率正 EV 开牌，用户报障）。
+            # forced：摊牌阶段（phase=showdown）的 raise/call 标记。摊牌阶段 raise 是
+            # 强牌信号（弱牌玩家有 fold/showdown 便宜出口不会白 raise，牌好才不想开、
+            # 用 raise 榨取价值——用户确认 2026-08-08），因此动作桶照记、分位照回填；
+            # forced 仅用于 record_round_raise_freq 豁免（continue 率的诈唬下界解读
+            # 不适用于强牌 raise，v1.16.16 保留 v1.16.14 此一处豁免）。
             forced = game.get("phase") == "showdown"
             if action == "raise" or round_action.get(uid) is None or round_action[uid][0] != "raise":  # type: ignore[index]
                 round_action[uid] = (action, op_seen, adj_seen, adj_blind, forced)
-        # 被迫继续（showdown 阶段）不进动作桶；fold 记录仍照常（主动弃牌是真实信号）
-        if not (game.get("phase") == "showdown" and action in ("raise", "call")):
-            store.record_action(
-                uid,
-                action,
-                op_seen,
-                adj_seen,
-                adj_blind,
-                display_name=str(player.get("displayName", "") or ""),
-            )
+        # 动作桶照记（含摊牌阶段 raise/call——真实加注信号）；fold 记录照常
+        store.record_action(
+            uid,
+            action,
+            op_seen,
+            adj_seen,
+            adj_blind,
+            display_name=str(player.get("displayName", "") or ""),
+        )
 
 
 def _terminal_action_ineffective(
