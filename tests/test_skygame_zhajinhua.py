@@ -2213,7 +2213,7 @@ def test_hand_percentiles_returns_recorded_and_empty() -> None:
 
 def test_empirical_win_factor_shrinkage() -> None:
     """实测胜率收缩：无样本回退基线，样本不足 _MIN_PROFILE_SAMPLES 也回退基线
-    （v1.16.15：少样本分位统计不可信，可能混有被迫 raise 回填的弱牌），
+    （v1.16.15：少样本分位统计不可信，单颗异常样本就能把实测胜率拉跑），
     多样本趋近实测。"""
     store = ProfileStore()
     # 无样本 → 回退 model_baseline
@@ -2461,14 +2461,15 @@ def test_showdown_forced_raise_does_not_inflate_win_probability() -> None:
     """用户报障回归（v1.16.14）：「我的牌 82% 强度、对手门槛 90%+ 被预测更大，
     不可能算出正 EV」——门槛高于我方牌力时纯范围胜率应为 0。
 
-    对手多次 showdown 被迫 raise（旧逻辑记成高频继续 → 诈唬率虚高 → 胜率被抬过
-    盈亏平衡 -> 正 EV 开牌）。修复后 forced 继续不计入继续率，_seen_factor 保持
-    纯范围胜率 0 → 决策落到弃牌（-call_bet）。
+    对手多次摊牌阶段 raise（forced=True 不计入继续率 → 诈唬分量不抬胜率），
+    _seen_factor 保持纯范围胜率 0 → 决策落到弃牌（-call_bet）。v1.16.16 保留
+    继续率豁免（摊牌 raise 是强牌信号，强牌继续不该被解读为诈唬下界），
+    但动作桶/快照/分位照记——此处断言只依赖 continue 不涨，仍成立。
     """
     hand_threshold = 0.822  # 8-8-2 对子对随机牌胜率（用户场景）
     store = ProfileStore()
     uid = "tight"
-    # 对手多次强制摊牌被迫 raise（新逻辑：只标记 forced，不涨继续率）
+    # 对手多次摊牌阶段 raise（forced=True：只标记，不涨继续率）
     for _ in range(5):
         record_round_raise_freq(store, {uid: ("raise", True, 0, 0, True)}, [uid])
     range_90 = _SeenRange(0.90, 1.0, True, profile=store, uid=uid, action="raise")
@@ -2592,12 +2593,12 @@ def test_win_prob_1v1_type_band_midpoint() -> None:
     assert zjh_prob.win_prob_1v1_type("不存在的牌型") is None
 
 
-def test_feed_last_result_forced_skips_hand_pctile_fill() -> None:
-    """v1.16.15 回归：forced 条目（showdown 被迫 raise/call）结算时不回填分位。
+def test_feed_last_result_forced_fills_hand_pctile() -> None:
+    """v1.16.16 回归：forced 条目（摊牌阶段 raise/call）结算时照常回填分位。
 
-    被迫 raise 的牌几乎必然是弱牌（牌硬早开牌，只有 air 才被迫 raise 拖回合），
-    回填会拉低加注下四分位 → raise_threshold_floor 降低 → 下局胜率虚高 → 又应战
-    开牌 → 死循环。forced 与自愿继续必须同等待遇：一律不进画像。
+    摊牌阶段 raise 是强牌信号（弱牌玩家有 fold/showdown 两个便宜出口不会白 raise，
+    牌好才不想开、用 raise 榨取价值，用户确认 2026-08-08）——回填强牌分位正确抬高
+    加注下限，而非把它们当弱牌排除。少量不可靠样本由 _MIN_PROFILE_SAMPLES 门槛兜底。
     """
     game = {
         "lastResult": {
@@ -2607,14 +2608,14 @@ def test_feed_last_result_forced_skips_hand_pctile_fill() -> None:
             ],
         }
     }
-    # forced=True（被迫继续）→ 分位不回填
+    # forced=True（摊牌阶段继续）→ 分位照常回填（v1.16.16 撤销 v1.16.15 豁免）
     store = ProfileStore()
     feed_last_result(store, game, {"Damon": "account:1"}, {"account:1": ("raise", True, 0, 0, True)})
     dump = store.debug_dump()
-    assert not dump.get("account:1", {}).get("raise_pcts"), "forced 条目不得回填加注分位"
-    assert not dump.get("account:1", {}).get("call_pcts"), "forced 条目不得回填平跟分位"
+    assert dump.get("account:1", {}).get("raise_pcts"), "forced 加注条目照常回填加注分位"
+    assert not dump.get("account:1", {}).get("call_pcts"), "动作是 raise 只回填加注桶"
 
-    # 对照：forced=False（自愿加注）→ 正常回填
+    # 对照：forced=False（正常阶段加注）→ 同样回填
     store2 = ProfileStore()
     feed_last_result(store2, game, {"Damon": "account:1"}, {"account:1": ("raise", True, 0, 0, False)})
     assert store2.debug_dump()["account:1"].get("raise_pcts")
@@ -2918,12 +2919,12 @@ def test_train_opponent_actions_ignores_dead_players_non_fold_action() -> None:
     assert "gone" not in store.debug_dump()
 
 
-def test_train_opponent_actions_showdown_forced_raise_not_recorded() -> None:
-    """强制摊牌阶段对手被迫 raise/call：round_action 标记 forced（v1.16.14 只豁免
-    动作桶/继续率，v1.16.15 连手牌分位回填也一并豁免——被迫 raise 的牌几乎必然是
-    弱牌，回填会拉低加注下四分位 → 下局胜率虚高 → 又应战开牌，死循环），
-    动作桶不记（否则被迫继续被当成高频继续，诈唬率高估，反噬决策——用户报
-    「对手牌被预测更大却算出正 EV 开牌」的根因之一）。主动弃牌仍照记。"""
+def test_train_opponent_actions_showdown_forced_raise_recorded() -> None:
+    """摊牌阶段对手 raise/call：round_action 标记 forced（v1.16.16 仅用于继续率豁免，
+    不豁免动作桶），动作桶照记。摊牌 raise 是强牌信号（弱牌玩家有 fold/showdown
+    两个便宜出口不会白 raise，牌好才不想开、用 raise 榨取价值；牌不好会主动
+    open/showdown 或 fold，用户确认 2026-08-08）——被迫继续被当成高频继续的
+    担忧只对 continue 率成立，动作桶/分位照记才能画像强牌加注者。主动弃牌仍照记。"""
     store = ProfileStore()
     last_seen: dict[str, tuple[str, float]] = {}
     round_action: dict[str, tuple[str, bool, int, int, bool]] = {}
@@ -2934,11 +2935,11 @@ def test_train_opponent_actions_showdown_forced_raise_not_recorded() -> None:
     )
     showdown.update({"phase": "showdown", "actions": ["fold", "raise", "showdown"]})
     _train_opponent_actions(store, showdown, last_seen, round_action)
-    # 被迫继续：round_action 有条目（forced=True），动作桶不记、分位不回填
+    # 摊牌继续：round_action 有条目（forced=True），动作桶照记（v1.16.16 撤销豁免）
     assert round_action["p1"][0] == "raise" and round_action["p1"][4] is True
     assert round_action["p2"][0] == "call" and round_action["p2"][4] is True
-    assert "p1" not in store.debug_dump()
-    assert "p2" not in store.debug_dump()
+    assert "p1" in store.debug_dump()
+    assert "p2" in store.debug_dump()
 
     # 对照：正常阶段（非 showdown）raise → forced=False 且动作桶记录
     store2 = ProfileStore()
@@ -2966,12 +2967,13 @@ def test_train_opponent_actions_showdown_forced_raise_not_recorded() -> None:
 
 
 def test_record_round_raise_freq_skips_forced_continue() -> None:
-    """回归：showdown 被迫 raise 不计入 hand-level 继续率——否则对手每轮被迫 raise
+    """回归：摊牌阶段 continue 不计入 hand-level 继续率——否则对手每轮摊牌 raise
     被当成高频继续，bluff_rate（继续频率下界）高估，胜率被抬过盈亏平衡线。
-    forced 条目不涨 continue 手数（v1.16.14），分位也不回填（v1.16.15）。"""
+    forced 条目不涨 continue 手数（v1.16.14 保留，v1.16.16 此一处豁免不撤销）：
+    摊牌 raise 是强牌信号，强牌继续不该被解读为诈唬下界；动作桶/分位照记不回退。"""
     store = ProfileStore()
     uid = "opp"
-    # 同一对手多次 showdown 被迫 raise（旧逻辑每条都 +1 total）
+    # 同一对手多次摊牌阶段 raise（forced=True → 不涨 continue 手数）
     for _ in range(5):
         record_round_raise_freq(store, {uid: ("raise", True, 0, 0, True)}, [uid])
     # 1 次主动弃牌（照常入 fold 桶）
@@ -3426,8 +3428,13 @@ def test_seen_opponent_ranges_escalates_raise_threshold_for_consecutive_raises()
     assert ranges_flat[0].lower == pytest.approx(0.1666667)
 
 
-def test_seen_opponent_ranges_no_escalation_in_showdown_phase() -> None:
-    """强制摊牌阶段（phase=showdown）对手 raise 是唯一「继续」动作，不升级门槛。"""
+def test_seen_opponent_ranges_escalates_in_showdown_phase() -> None:
+    """摊牌阶段（phase=showdown）对手连续 raise 照常升级门槛。
+
+    v1.16.8 曾豁免 showdown 门槛升级（以为 raise 是被迫唯一继续）——用户确认这是
+    错的：弱牌玩家有 fold/showdown 便宜出口不会白 raise，摊牌 raise 是强牌信号，
+    连续 raise 应把门槛推高（v1.16.16 撤销豁免）。
+    """
     tracker = _RoundTracker()
     tracker.snapshots["opponent"] = _OpponentSnapshot(
         pot=500, call_bet=100, opponents=1, blind_opponents=1, is_raise=True
@@ -3443,14 +3450,15 @@ def test_seen_opponent_ranges_no_escalation_in_showdown_phase() -> None:
 
     _, ranges = _seen_opponent_ranges(game, tracker, 0.5)
 
-    assert ranges[0].lower == pytest.approx(0.1666667)
+    assert ranges[0].lower == pytest.approx(0.8958333)
 
 
-def test_update_round_tracker_showdown_skips_opponent_raise_snapshot() -> None:
-    """回归：强制摊牌阶段对手被迫 raise 不记录下注快照、不累计加注次数。
+def test_update_round_tracker_showdown_records_opponent_raise_snapshot() -> None:
+    """摊牌阶段对手 raise 照常记录下注快照、累计加注次数。
 
-    v1.16.8 只豁免了决策侧门槛升级，快照反推仍被 showdown 被迫 raise 污染——
-    与画像把被迫继续记成高频继续叠加，把对手门槛/诈唬率双双抬高，正 EV 虚高。
+    v1.16.8 曾豁免决策侧门槛升级与快照反推，把摊牌 raise 当「被迫的唯一继续」——
+    用户确认这是错的：弱牌玩家有 fold/showdown 便宜出口不会白 raise，摊牌 raise 是
+    强牌信号，快照反推出的高门槛正是应该采信的牌力证据（v1.16.16 撤销豁免）。
     """
     # 正常阶段（playing）：两轮后对手有下注快照 + raise 计数
     tracker = _RoundTracker()
@@ -3473,7 +3481,7 @@ def test_update_round_tracker_showdown_skips_opponent_raise_snapshot() -> None:
     assert "opponent" in tracker.snapshots
     assert tracker.opponent_raise_counts.get("opponent", 0) == 1
 
-    # 强制摊牌阶段（showdown）：同样连续两轮 raise，不记快照、不计数
+    # 摊牌阶段（showdown）：同样连续两轮 raise，照记快照、照计数（v1.16.16）
     tracker_sd = _RoundTracker()
     s1 = _game(
         {"id": "self", "alive": True, "isSelf": True, "seen": True},
@@ -3491,8 +3499,8 @@ def test_update_round_tracker_showdown_skips_opponent_raise_snapshot() -> None:
     )
     s2["phase"] = "showdown"
     _update_round_tracker(s2, tracker_sd)
-    assert "opponent" not in tracker_sd.snapshots
-    assert tracker_sd.opponent_raise_counts.get("opponent", 0) == 0
+    assert "opponent" in tracker_sd.snapshots
+    assert tracker_sd.opponent_raise_counts.get("opponent", 0) == 1
 
 
 def test_call_decision_consecutive_raises_flips_flush_to_fold() -> None:

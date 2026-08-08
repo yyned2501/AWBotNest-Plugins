@@ -344,14 +344,12 @@ def _update_round_tracker(game: dict[str, Any], tracker: _RoundTracker, log: Any
                             f"{threshold:.3f}" if threshold is not None else "无法推断",
                         )
             else:
-                # 强制摊牌阶段（phase=showdown）：raise 是唯一「继续」动作（actions 只剩
-                # fold/raise/showdown），对手被迫每轮 raise，不代表牌强——不记录下注快照、
-                # 不累计加注次数。v1.16.8 只豁免了决策侧的门槛升级，快照反推仍被污染：
-                # showdown 被迫 raise 被当成强牌信号反推出高门槛，与「画像把被迫继续
-                # 记成高频继续」叠加，把对手范围/诈唬率双双抬高（用户质疑「对手牌被预测
-                # 更大却算出正 EV」的根因之一）。
-                if game.get("phase") == "showdown":
-                    continue
+                # 摊牌阶段（phase=showdown）对手 raise 照常记录下注快照与加注次数：
+                # 弱牌玩家有 fold/showdown（开牌比大小）两个便宜出口，不会白 raise——
+                # 摊牌阶段还 raise 的对手是强牌信号（牌好才不想开、用 raise 榨取更多
+                # 价值；牌不好会主动 open/showdown 或 fold，用户确认 2026-08-08）。
+                # v1.16.8/14 曾把摊牌 raise 当「被迫的唯一继续」豁免，等于把强牌对手
+                # 在门槛反推里弱化，已撤销。
                 bet_increased = previous.bet is not None and current.bet is not None and current.bet > previous.bet
                 action_changed = current.last_action != previous.last_action and _is_continue_action(
                     current.last_action
@@ -499,10 +497,11 @@ def _seen_opponent_ranges(
             # 力度用「每次关掉剩余区间一半」（β=0.5），强于决策树推演的 +25%/次：
             # 已确认的连续 raise 是事实信号，且 uniform[门槛,1.0] 假设会把约 77%
             # 权重放在「比我小的牌仍连加」上——真实连续 raise 的对手牌力右偏。
-            # 强制摊牌阶段（phase=showdown）不升级：实测该阶段 raise 是唯一「继续」
-            # 动作（actions 只剩 fold/raise/showdown），对手被迫每轮 raise，不代表牌强。
+            # 摊牌阶段（phase=showdown）同样升级（v1.16.16 撤销 v1.16.8 豁免）：
+            # 弱牌玩家有 fold/showdown 便宜出口不会白 raise，摊牌阶段还 raise 的
+            # 对手是强牌信号（牌好才不想开、用 raise 榨取价值），连续 raise 升级适用。
             raise_count = tracker.opponent_raise_counts.get(key, 0)
-            if raise_count > 0 and game.get("phase") != "showdown":
+            if raise_count > 0:
                 threshold_now = base_floor
                 for _ in range(raise_count):
                     threshold_now = threshold_now + (1.0 - threshold_now) * 0.5
