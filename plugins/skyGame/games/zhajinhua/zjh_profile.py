@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import collections.abc
 import math
 from typing import Any
 
@@ -40,6 +41,17 @@ PRIOR_STRENGTH = 3.0
 # 弱牌分位阈值：实测手牌分位低于此值计为一次「诈唬/弱牌继续」
 _WEAK_PCTILE = 0.5
 
+# 近期衰减（按次数/手数，非墙钟时间）：对手参与频率不同，样本序号即其自身活动刻度——
+# 高频对手自动衰减快、低频对手自动衰减慢。半衰期 = 该对手每多打这么多手旧样本权重减半；
+# 0 = 不衰减（终身累计，旧行为）。
+HALF_LIFE_SAMPLES = 20.0
+# 每桶手牌分位列表上限：超限丢弃最旧样本（兼作硬遗忘与内存上限）。
+MAX_SAMPLES_PER_BUCKET = 100
+# 画像内已完成手数（衰减时钟）键
+_HAND_SEQ = "hand_seq"
+# 计数桶内最后更新手数指针键
+_BUCKET_PTR = "p"
+
 
 def _freq_bucket(op_seen: bool, seen_count: int, blind_count: int) -> str:
     """分桶键：对手状态 + 其他看牌人数 + 其他蒙牌人数。
@@ -64,6 +76,50 @@ def _percentile(values: list[float], q: float) -> float:
     return ordered[low] * (1 - frac) + ordered[high] * frac
 
 
+def _recency_weights(n: int, halflife: float) -> list[float]:
+    """对数半衰期位置权重：最新样本权重 1，往前每 halflife 个样本权重减半。
+
+    按次数而非墙钟时间——对手参与频率不同，样本序号即其自身活动刻度的「时间」。
+    halflife≤0 时返回等权（不衰减，退化为普通统计）。
+    """
+    if n <= 1 or halflife <= 0:
+        return [1.0] * n
+    scale = math.log(0.5) / halflife
+    return [math.exp(scale * (n - 1 - i)) for i in range(n)]
+
+
+def _weighted_percentile(values: list[float], q: float, halflife: float) -> float:
+    """按近期权重（最新样本权重最大）的线性插值分位数；values 非空。
+
+    halflife≤0（等权）时退化为 _percentile 的普通线性插值。
+    """
+    n = len(values)
+    if n == 1:
+        return values[0]
+    pairs = sorted((v, w) for v, w in zip(values, _recency_weights(n, halflife)))
+    total = sum(w for _, w in pairs)
+    target = q * total
+    acc = 0.0
+    prev_v = pairs[0][0]
+    for v, w in pairs:
+        acc += w
+        if acc >= target:
+            frac = (target - (acc - w)) / w if w > 0 else 0.0
+            return prev_v + (v - prev_v) * frac
+        prev_v = v
+    return pairs[-1][0]
+
+
+def _weighted_win_share(values: list[float], threshold: float, halflife: float) -> float:
+    """近期加权「value < threshold」占比；halflife≤0 时退化为普通占比。"""
+    n = len(values)
+    if n == 0:
+        return 0.0
+    weights = _recency_weights(n, halflife)
+    wins = sum(w for v, w in zip(values, weights) if v < threshold)
+    return wins / sum(weights)
+
+
 class ProfileStore:
     """进程内对手画像缓存，延迟写回 ctx.kv。
 
@@ -71,10 +127,20 @@ class ProfileStore:
     累计（便于单元测试与纯逻辑复用），flush 为 no-op。
     """
 
-    def __init__(self, kv: object | None = None) -> None:
+    def __init__(
+        self,
+        kv: object | None = None,
+        halflife: float = HALF_LIFE_SAMPLES,
+        max_samples: int = MAX_SAMPLES_PER_BUCKET,
+    ) -> None:
         self._cache: dict[str, dict[str, Any]] = {}
         self._dirty: set[str] = set()
         self._kv = kv
+        # 半衰期（手数）≤0 = 不衰减（终身累计）
+        self._halflife = max(float(halflife), 0.0)
+        self._max_samples = max(int(max_samples), 1)
+        # 每手衰减率：半衰期 20 手 → 每手 ×0.966
+        self._decay_rate = 0.5 ** (1 / self._halflife) if self._halflife > 0 else 1.0
 
     # ── 内部 ──
 
@@ -82,6 +148,56 @@ class ProfileStore:
         if uid not in self._cache:
             self._cache[uid] = {}
         return self._cache[uid]
+
+    def _hand_seq(self, uid: str) -> int:
+        """该对手已完成手数（衰减时钟）；无记录视为 0。"""
+        profile = self._cache.get(uid)
+        if not isinstance(profile, dict):
+            return 0
+        return int(profile.get(_HAND_SEQ, 0))
+
+    def _decay_counts(self, bucket: dict[str, Any], hand: int) -> None:
+        """按手数间隔衰减计数桶：count *= decay^(hand - bucket.p)，随后把指针推进到 hand。
+
+        旧数据无 p 指针时 gap 视为 0（不突然衰减，从首个新记录起正常计时）。
+        """
+        last = bucket.get(_BUCKET_PTR)
+        gap = hand - int(last) if isinstance(last, (int, float)) else 0
+        if gap > 0 and self._decay_rate < 1.0:
+            factor = self._decay_rate**gap
+            for k in bucket:
+                if k != _BUCKET_PTR:
+                    bucket[k] = bucket[k] * factor
+        bucket[_BUCKET_PTR] = hand
+
+    def _iter_count_buckets(self, profile: dict[str, Any]) -> collections.abc.Iterator[dict[str, Any]]:
+        """遍历画像内所有计数桶：动作桶（profile[bucket_key]）与加注频率桶
+        （profile[_RAISE_FREQ][bucket_key]）均为带 _BUCKET_PTR 指针的 dict。"""
+        for value in profile.values():
+            if not isinstance(value, dict):
+                continue
+            if _BUCKET_PTR in value:
+                yield value
+            else:
+                for inner in value.values():
+                    if isinstance(inner, dict) and _BUCKET_PTR in inner:
+                        yield inner
+
+    def tick_hands(self, uids: list[str]) -> None:
+        """结算推进衰减时钟：每个已知对手的已完成手数 +1，并把手数间隔衰减应用到
+        其全部计数桶（含本轮未 touch 的桶）——对手弃牌也按手数遗忘，保证
+        fold/continue 计数桶按同一手数刻度统一衰减，比率不被扭曲。
+        """
+        for uid in uids:
+            uid = self._normalize_uid(uid)
+            profile = self._cache.get(uid)
+            if not isinstance(profile, dict):
+                continue
+            new_hand = int(profile.get(_HAND_SEQ, 0)) + 1
+            for bucket in self._iter_count_buckets(profile):
+                self._decay_counts(bucket, new_hand)
+            profile[_HAND_SEQ] = new_hand
+            self._dirty.add(uid)
 
     @staticmethod
     def _normalize_uid(uid: str) -> str:
@@ -111,6 +227,8 @@ class ProfileStore:
         profile[_TOTAL_HANDS] = profile.get(_TOTAL_HANDS, 0) + 1
         bucket_key = _freq_bucket(op_seen, seen_count, blind_count)
         bucket = profile.setdefault(bucket_key, dict(_EMPTY_ACTIONS))
+        # 局中记录：当前手 = 已完成手数 + 1（本手尚未结算 tick），gap 衰减后 +1
+        self._decay_counts(bucket, self._hand_seq(uid) + 1)
         if action in bucket:
             bucket[action] += 1
             self._dirty.add(uid)
@@ -132,12 +250,18 @@ class ProfileStore:
         uid = self._normalize_uid(uid)
         profile = self._ensure(uid)
         key = _RAISE_PCTS if action == "raise" else _CALL_PCTS
-        profile.setdefault(key, []).append(pctile)
+        values = profile.setdefault(key, [])
+        values.append(pctile)
+        if len(values) > self._max_samples:
+            del values[: len(values) - self._max_samples]
         # 分桶存储
         bucket_key = _freq_bucket(op_seen, seen_count, blind_count)
         bucket_storage = _RAISE_PCTS_BUCKET if action == "raise" else _CALL_PCTS_BUCKET
         bucket_data = profile.setdefault(bucket_storage, {})
-        bucket_data.setdefault(bucket_key, []).append(pctile)
+        bucket_values = bucket_data.setdefault(bucket_key, [])
+        bucket_values.append(pctile)
+        if len(bucket_values) > self._max_samples:
+            del bucket_values[: len(bucket_values) - self._max_samples]
         self._dirty.add(uid)
 
     # ── 训练：记录对手加注频率（按对手状态+剩余人数分桶）──
@@ -160,6 +284,8 @@ class ProfileStore:
         bucket_key = _freq_bucket(op_seen, seen_count, blind_count)
         freq_buckets = profile.setdefault(_RAISE_FREQ, {})
         bucket = freq_buckets.setdefault(bucket_key, {"total": 0, "raises": 0})
+        # 结算记录：当前手 = 已完成手数（tick_hands 已先推进），gap 衰减后 +1
+        self._decay_counts(bucket, self._hand_seq(uid))
         bucket["total"] += 1
         if is_raise:
             bucket["raises"] += 1
@@ -302,7 +428,7 @@ class ProfileStore:
         pcts = self.hand_percentiles(uid, action, bucket_key)
         if not pcts:
             return model_baseline
-        wins = sum(1.0 for p in pcts if p < my_threshold) / len(pcts)
+        wins = _weighted_win_share(pcts, my_threshold, self._halflife)
         weight = len(pcts) / (len(pcts) + PRIOR_STRENGTH)
         return weight * wins + (1 - weight) * model_baseline
 
@@ -322,15 +448,16 @@ class ProfileStore:
         pcts = self.hand_percentiles(uid, "raise", bucket_key) + self.hand_percentiles(uid, "call", bucket_key)
         if len(pcts) < PRIOR_STRENGTH:
             return freq_bluff
-        weak = sum(1.0 for p in pcts if p < _WEAK_PCTILE) / len(pcts)
+        weak = _weighted_win_share(pcts, _WEAK_PCTILE, self._halflife)
         weight = len(pcts) / (len(pcts) + PRIOR_STRENGTH)
         return weight * weak + (1 - weight) * freq_bluff
 
-    def _bucket_action_counts(self, uid: str, bucket_key: str | None = None) -> tuple[int, int, int]:
+    def _bucket_action_counts(self, uid: str, bucket_key: str | None = None) -> tuple[float, float, float]:
         """(fold, call, raise) 动作计数：bucket_key 指定时取该桶，None 时聚合全部状态桶。
 
         动作桶字典含 "fold" 键（由 _EMPTY_ACTIONS 初始化）；raise_freq 桶只有
         total/raises 键、pcts 桶值为列表，均不会被误认。
+        衰减后计数为小数（有效样本数），保留浮点不截断，避免把 0.9 继续率截成 0。
         """
         uid = self._normalize_uid(uid)
         profile = self._cache.get(uid)
@@ -340,19 +467,24 @@ class ProfileStore:
             bucket = profile.get(bucket_key)
             if not isinstance(bucket, dict):
                 return (0, 0, 0)
-            return (int(bucket.get("fold", 0)), int(bucket.get("call", 0)), int(bucket.get("raise", 0)))
-        folds = calls = raises = 0
+            return (
+                float(bucket.get("fold", 0)),
+                float(bucket.get("call", 0)),
+                float(bucket.get("raise", 0)),
+            )
+        folds = calls = raises = 0.0
         for value in profile.values():
             if isinstance(value, dict) and "fold" in value:
-                folds += int(value.get("fold", 0))
-                calls += int(value.get("call", 0))
-                raises += int(value.get("raise", 0))
+                folds += float(value.get("fold", 0))
+                calls += float(value.get("call", 0))
+                raises += float(value.get("raise", 0))
         return (folds, calls, raises)
 
-    def _raise_freq_total(self, uid: str, bucket_key: str | None = None) -> int:
+    def _raise_freq_total(self, uid: str, bucket_key: str | None = None) -> float:
         """hand-level 继续手数：结算时每局自愿继续（call/raise）过的对手记一次。
 
         与动作桶同用 _freq_bucket 桶键；bucket_key 指定时取该桶，None 时聚合全部。
+        衰减后为有效样本数（浮点）。
         """
         uid = self._normalize_uid(uid)
         profile = self._cache.get(uid)
@@ -365,8 +497,8 @@ class ProfileStore:
             bucket = freq_buckets.get(bucket_key)
             if not isinstance(bucket, dict):
                 return 0
-            return int(bucket.get("total", 0))
-        return sum(int(b.get("total", 0)) for b in freq_buckets.values() if isinstance(b, dict))
+            return float(bucket.get("total", 0))
+        return sum(float(b.get("total", 0)) for b in freq_buckets.values() if isinstance(b, dict))
 
     def _bluff_from_freq(self, uid: str, bucket_key: str | None = None) -> float:
         """继续频率隐含的诈唬下界（hand-level 继续率）。
@@ -404,7 +536,7 @@ class ProfileStore:
         pcts = self.hand_percentiles(uid, "raise", bucket_key)
         if not pcts:
             return None
-        floor = _percentile(pcts, 0.25)
+        floor = _weighted_percentile(pcts, 0.25, self._halflife)
         weight = len(pcts) / (len(pcts) + PRIOR_STRENGTH)
         return weight * floor + (1 - weight) * base_threshold
 
@@ -524,13 +656,20 @@ def feed_last_result(
 def record_round_raise_freq(
     store: ProfileStore,
     round_action: dict[str, tuple[str, bool, int, int]] | None,
+    uids: list[str] | None = None,
 ) -> None:
     """结算时按本轮最激进动作记录 hand-level 加注频率。
 
     round_action 条目恰好覆盖「本局自愿继续（call/raise 过）」的对手，
     每条记一次 total，最激进动作为 raise 才计 raises——修复旧版「首次动作
     变化时记录」导致 call 后 raise 被记成非加注的低估问题。
+
+    uids 提供时先 tick_hands 推进这些对手的衰减时钟（已完成手数 +1、全部计数桶
+    按手数间隔统一衰减）——覆盖弃牌/未在 round_action 的对手，保证 fold 与
+    continue 计数按同一手数刻度衰减，比率不被扭曲。
     """
+    if uids:
+        store.tick_hands(uids)
     if not round_action:
         return
     for uid, (action, op_seen, seen_count, blind_count) in round_action.items():
@@ -541,11 +680,15 @@ def record_round_raise_freq(
 _store: ProfileStore | None = None
 
 
-def get_store(kv: object | None = None) -> ProfileStore:
-    """返回全局画像单例；首次调用绑定 kv 并加载已有画像。"""
+def get_store(
+    kv: object | None = None,
+    halflife: float = HALF_LIFE_SAMPLES,
+    max_samples: int = MAX_SAMPLES_PER_BUCKET,
+) -> ProfileStore:
+    """返回全局画像单例；首次调用绑定 kv、半衰期并加载已有画像。"""
     global _store
     if _store is None:
-        _store = ProfileStore(kv)
+        _store = ProfileStore(kv, halflife=halflife, max_samples=max_samples)
         if kv is not None:
             _store.load_all()
     elif kv is not None and _store._kv is None:
