@@ -23,7 +23,7 @@ from .games import hdsky_auth
 __plugin__ = {
     "name": "天空游戏",
     "id": "skyGame",
-    "version": "1.16.16",
+    "version": "1.16.17",
     "author": "Yy",
     "description": "天空系列游戏统一入口：炸金花自动参与、养马自动养护，左侧按游戏分组配置。",
     "scope": "user",
@@ -160,15 +160,35 @@ __plugin__ = {
         },
         "horse_feed_type": {
             "type": "select",
-            "default": "weed",
+            "default": "fine",
             "label": "喂食草料",
             "section": "养马",
             "options": [
-                {"value": "weed", "label": "杂草（100银元 +12饱腹）"},
-                {"value": "fine", "label": "精草（300银元 +30饱腹）"},
-                {"value": "divine", "label": "仙草（1000银元 +60饱腹）"},
+                {"value": "weed", "label": "杂草（100银元 +12饱腹 +6体力）"},
+                {"value": "fine", "label": "精草（300银元 +30饱腹 +18体力）"},
+                {"value": "divine", "label": "仙草（1000银元 +60饱腹 +50体力）"},
             ],
+            "help": "撞冷却（「刚刚吃过了xx分钟后再喂」）自动退避跳过，不重复尝试",
             "order": 12,
+        },
+        "horse_auto_match_race": {
+            "type": "boolean",
+            "default": True,
+            "label": "自动加入玩家养马赛",
+            "section": "养马",
+            "help": "发现玩家开的养马赛（Horse2 玩家赛）时自动加入，报名额取房主设定",
+            "order": 15,
+        },
+        "horse_race_min_stamina": {
+            "type": "slider",
+            "default": 30,
+            "label": "参赛最低体力",
+            "section": "养马",
+            "min": 0,
+            "max": 100,
+            "step": 5,
+            "help": "有玩家赛可参加但体力低于此值时，先喂仙草补体力（与精草独立冷却）",
+            "order": 16,
         },
         "horse_feed_threshold": {
             "type": "slider",
@@ -195,7 +215,7 @@ __plugin__ = {
             "label": "自动报名官方赛",
             "section": "养马",
             "help": "每日官方赛开放报名时免费参加",
-            "order": 15,
+            "order": 17,
         },
         "horse_auto_revive": {
             "type": "boolean",
@@ -203,14 +223,14 @@ __plugin__ = {
             "label": "死亡自动复活",
             "section": "养马",
             "help": "马匹死亡且余额足够时自动复活（约 30 万银元）",
-            "order": 16,
+            "order": 18,
         },
         "horse_notify": {
             "type": "boolean",
             "default": True,
             "label": "养马通知",
             "section": "养马",
-            "order": 17,
+            "order": 19,
         },
         # ── 炸金花 ──
         "zjh_enabled": {
@@ -396,6 +416,16 @@ __plugin__ = {
         },
     },
     "changelog": (
+        "v1.16.17 更新：\n"
+        "- 养马自动加入玩家养马赛（competitions.match，Horse2 玩家赛）：发现有 active 的"
+        "玩家赛（actions 含 join 且未报名）即自动加入，报名额取房主设定（契约来自门户前端"
+        "portal-horse.js 实测 2026-08-08，加入请求体仅 {action: join, requestKey}）；\n"
+        "- 体力值控制：日常喂食默认改精草（fine，+18 体力攒参赛体力）；有玩家赛可参加但"
+        "体力低于 horse_race_min_stamina（默认 30）时先喂仙草（divine，+50 体力）补体力，"
+        "精草与仙草独立冷却（profile.daily_feed_count 与 daily_divine_feed_count 分开计数，"
+        "用户确认不共享 CD），精草冷却中仍可喂仙草；\n"
+        "- 喂食撞冷却自动退避：服务端返回「刚刚吃过了 xx分钟后再喂」（cooldown + remainMs）"
+        "时记录退避时间，冷却未到不重复尝试（不再每轮轮询都硬试）；\n"
         "v1.16.16 修复：\n"
         "- 撤销 v1.16.8/14/15 的摊牌阶段（showdown）强牌豁免——用户确认 2026-08-08："
         "「牌不好就 showdown 或 fold，不可能会 raise」，摊牌阶段还 raise 的对手是强牌信号"
