@@ -705,6 +705,47 @@ def test_choose_action_raise_frequency_extremes() -> None:
     assert _choose_action(choice, ["raise", "call"], 0.5, True, 0.75, 0.0, rng=lambda: 0.0)[0] == "call"
 
 
+def test_choose_action_signal_mix_slow_plays_weak_hand() -> None:
+    """v1.16.22 弱牌慢打混合：胜率低于开牌阈值本应 open 止损，混合概率命中时
+    不直接开牌改跟注——污染「继续=强牌」信号，防对手读「开牌=弱牌」。
+    """
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True},
+        {"id": "blind", "alive": True, "seen": False},
+        pot=10000,
+        call_bet=100,
+    )
+    choice = _choose("散牌", (8, 7, 5), game, 0.5, _RoundTracker())
+    assert choice.decision is not None and choice.decision.win_probability < 0.5
+    # 混合 10%、rng=0.05 命中慢打 → call（不 open）
+    assert _choose_action(choice, ["open", "call"], 0.5, False, 0.75, 1.0, False, 0.1, rng=lambda: 0.05)[0] == "call"
+    # rng=0.5 未命中 → 照旧 open 止损
+    assert _choose_action(choice, ["open", "call"], 0.5, False, 0.75, 1.0, False, 0.1, rng=lambda: 0.5)[0] == "open"
+    # 关闭（0）→ 旧行为必开，不查 rng
+    assert _choose_action(choice, ["open", "call"], 0.5, False, 0.75, 1.0, False, 0.0, rng=lambda: 0.0)[0] == "open"
+
+
+def test_choose_action_signal_mix_fast_plays_strong_hand() -> None:
+    """v1.16.22 强牌快打混合：胜率达标本应继续，混合概率命中时直接开牌——
+    污染「开牌=弱牌」信号，防对手读「继续=强牌」躲掉我方价值。
+    """
+    game = _game(
+        {"id": "self", "alive": True, "isSelf": True},
+        {"id": "blind", "alive": True, "seen": False},
+        pot=1000,
+        call_bet=100,
+    )
+    choice = _choose("顺子", 11, game, 0.5, _RoundTracker())
+    assert choice.decision is not None and choice.decision.win_probability > 0.75
+    # 混合 10%、rng=0.05 命中快打 → open（胜率远高于阈值仍开牌）
+    action, _ = _choose_action(choice, ["open", "call"], 0.5, False, 0.75, 1.0, False, 0.1, rng=lambda: 0.05)
+    assert action == "open"
+    # rng=0.5 未命中 → 照旧继续（call，胜率未达 raise 阈值）
+    assert _choose_action(choice, ["open", "call"], 0.5, False, 0.75, 1.0, False, 0.1, rng=lambda: 0.5)[0] == "call"
+    # 关闭（0）→ 强牌绝不 open，不查 rng
+    assert _choose_action(choice, ["open", "call"], 0.5, False, 0.75, 1.0, False, 0.0, rng=lambda: 0.0)[0] == "call"
+
+
 def test_choose_action_first_peek_no_raise_slow_plays_big_hand() -> None:
     """第一次看牌不加注：本局首次看牌决策即使胜率达标也只平跟慢打，且原因点明慢打。"""
     game = _game(

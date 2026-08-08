@@ -1790,6 +1790,7 @@ def _choose_action(
     raise_threshold: float,
     raise_frequency: float = 1.0,
     first_peek_no_raise: bool = False,
+    signal_mix_prob: float = 0.0,
     rng: Callable[[], float] = random.random,
 ) -> tuple[str, str]:
     """按最终实际胜率选择跟注、主动开牌、追加或应战摊牌，动作必须获服务端允许。
@@ -1805,6 +1806,12 @@ def _choose_action(
     以概率 raise_frequency 加注、其余时候慢打平跟，做混合策略伪装——避免「bot 加注=怪兽」
     被对手摸透后弃牌，导致大牌只赢小底池。rng 供测试注入确定性随机源。
 
+    signal_mix_prob：双向混合策略概率（v1.16.22，0~1，默认 0 关闭）。open 是确定性
+    止损动作（胜率 < open_threshold 必开），对手长期观察可统计出「开牌=弱牌、继续=强牌」
+    并针对性剥削。双向污染：弱牌止损开牌时小概率慢打改跟注（「继续」不再排他等于强牌）；
+    强牌胜率达标本应继续时小概率快打直接开牌（「开牌」不再排他等于弱牌）。与
+    raise_frequency 的加注混合同一思路，概率默认 10%，EV 代价只在两处各 10% 场景偏离最优。
+
     first_peek_no_raise：本局首次看牌决策（tracker.seen_acted 为 False 时由 _act_on_hand
     传入 True）即使胜率达标也不加注，平跟慢打留人——第一次看牌就加注会把对手吓跑，
     后续轮次（seen_acted 为 True）再按 raise_frequency 加注。无 call 授权（强制摊牌）时
@@ -1814,8 +1821,20 @@ def _choose_action(
     if not choice.call or decision is None:
         return "fold", choice.reason
     win_probability = decision.win_probability
-    if "open" in actions and win_probability < open_threshold:
-        return "open", f"最终实际胜率{win_probability:.1%}低于主动开牌阈值{open_threshold:.1%}"
+    if "open" in actions:
+        # 双向混合策略（v1.16.22）：让动作与牌力解耦，防对手统计出
+        # 「开牌=弱牌 / 继续=强牌」。弱牌止损开牌时小概率慢打不直接开
+        # （污染「继续」信号）；强牌胜率达标仍小概率直接开牌（污染「开牌」
+        # 信号）。0 或关闭时保持旧行为（胜率 < 阈值必开）。
+        if win_probability < open_threshold:
+            if signal_mix_prob <= 0 or rng() >= signal_mix_prob:
+                return "open", f"最终实际胜率{win_probability:.1%}低于主动开牌阈值{open_threshold:.1%}"
+            # 弱牌慢打混合：不直接开牌，落入下方 call/showdown 继续
+        elif signal_mix_prob > 0 and rng() < signal_mix_prob:
+            return (
+                "open",
+                f"强牌快打混合：胜率{win_probability:.1%}达标仍直接开牌（混合{signal_mix_prob:.0%}防读牌）",
+            )
     if raise_enabled and "raise" in actions and win_probability >= raise_threshold:
         if first_peek_no_raise and "call" in actions:
             # 本局第一次看牌：大牌慢打平跟留人，不加注（加注会吓退对手，只赢小底池）
