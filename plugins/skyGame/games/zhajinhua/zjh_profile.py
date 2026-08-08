@@ -41,6 +41,14 @@ PRIOR_STRENGTH = 3.0
 # 弱牌分位阈值：实测手牌分位低于此值计为一次「诈唬/弱牌继续」
 _WEAK_PCTILE = 0.5
 
+# 画像实测分量最小样本量：不足时回退模型基线/反推门槛，不采信分位统计。
+# 原因：被迫 raise（showdown 阶段唯一「继续」动作）结算回填的牌几乎必然是弱牌
+# （牌硬早就开牌，只有 air 才被迫 raise 拖回合），少量样本里的这类弱牌分位会把
+# 加注下四分位/实测胜率拉跑 → 范围胜率虚高 → 摸到对子也误判正 EV 应战（v1.16.15，
+# 用户报「对手门檻 90%+ 却算出正 EV 开牌」）。5 个样本内第 2 小值极易被单颗污染
+# 样本主导，低于此数不采信；相信样本量，而不是相信详细到 0.1% 的分位。
+_MIN_PROFILE_SAMPLES = 5
+
 # 近期衰减（按次数/手数，非墙钟时间）：对手参与频率不同，样本序号即其自身活动刻度——
 # 高频对手自动衰减快、低频对手自动衰减慢。半衰期 = 该对手每多打这么多手旧样本权重减半；
 # 0 = 不衰减（终身累计，旧行为）。
@@ -432,7 +440,9 @@ class ProfileStore:
         bucket_key 指定状态桶时只查该桶数据；为 None 查扁平列表。
         """
         pcts = self.hand_percentiles(uid, action, bucket_key)
-        if not pcts:
+        if len(pcts) < _MIN_PROFILE_SAMPLES:
+            # 样本不足：实测胜率不可信（可能混有被迫 raise 回填的弱牌——牌硬早开牌了，
+            # 只有 air 才被迫 raise 拖回合），回退模型基线胜率（v1.16.15）
             return model_baseline
         wins = _weighted_win_share(pcts, my_threshold, self._halflife)
         weight = len(pcts) / (len(pcts) + PRIOR_STRENGTH)
@@ -452,7 +462,9 @@ class ProfileStore:
         """
         freq_bluff = self._bluff_from_freq(uid, bucket_key)
         pcts = self.hand_percentiles(uid, "raise", bucket_key) + self.hand_percentiles(uid, "call", bucket_key)
-        if len(pcts) < PRIOR_STRENGTH:
+        if len(pcts) < _MIN_PROFILE_SAMPLES:
+            # 实测弱牌占比样本不足：不采信（可能混有被迫 raise 回填的弱牌分位，
+            # 与 raise_threshold_floor/empirical_win_factor 同门槛，v1.16.15）
             return freq_bluff
         weak = _weighted_win_share(pcts, _WEAK_PCTILE, self._halflife)
         weight = len(pcts) / (len(pcts) + PRIOR_STRENGTH)
@@ -540,7 +552,9 @@ class ProfileStore:
         bucket_key 指定状态桶时只查该桶数据；为 None 查扁平列表。
         """
         pcts = self.hand_percentiles(uid, "raise", bucket_key)
-        if not pcts:
+        if len(pcts) < _MIN_PROFILE_SAMPLES:
+            # 样本不足：分位统计不可信（下四分位 ≈ 第 2 小值，单颗污染样本就能拉跑），
+            # 回退调用方反推门槛，不让历史被迫 raise 的弱牌把门槛拉低（v1.16.15）
             return None
         floor = _weighted_percentile(pcts, 0.25, self._halflife)
         weight = len(pcts) / (len(pcts) + PRIOR_STRENGTH)
@@ -648,6 +662,12 @@ def feed_last_result(
             bucket = round_action.get(uid)
             if bucket is None:
                 # 未观测到 call/raise（报名后弃牌、或弃牌者无动作记录）：无可归属桶
+                continue
+            if bucket[4]:
+                # forced = 强制摊牌阶段被迫继续：动作桶/频率已豁免（v1.16.14），
+                # 手牌分位同样不回填——被迫 raise 的牌几乎必然是弱牌（牌硬早开牌了，
+                # 只有 air 才被迫 raise 拖回合），回填会拉低加注下四分位/实测胜率，
+                # 下局把对手当高频诈唬 → 胜率虚高 → 又应战开牌 → 死循环（v1.16.15）
                 continue
             store.record_hand_pctile(uid, bucket[0], pctile, bucket[1], bucket[2], bucket[3])
             continue
