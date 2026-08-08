@@ -656,7 +656,7 @@ def test_choose_action_opens_for_low_final_actual_win_rate() -> None:
     assert choice.decision is not None
     assert choice.decision.win_probability < 0.5
     assert choice.decision.expected_value > 0
-    assert _choose_action(choice, ["open", "call"], True, 0.5, False, 0.75)[0] == "open"
+    assert _choose_action(choice, ["open", "call"], 0.5, False, 0.75)[0] == "open"
 
 
 def test_choose_action_raises_for_high_final_actual_win_rate() -> None:
@@ -670,7 +670,7 @@ def test_choose_action_raises_for_high_final_actual_win_rate() -> None:
 
     assert choice.decision is not None
     assert choice.decision.win_probability > 0.75
-    assert _choose_action(choice, ["raise", "call"], False, 0.5, True, 0.75)[0] == "raise"
+    assert _choose_action(choice, ["raise", "call"], 0.5, True, 0.75)[0] == "raise"
 
 
 def test_choose_action_raise_frequency_slow_plays_when_rng_high() -> None:
@@ -684,9 +684,9 @@ def test_choose_action_raise_frequency_slow_plays_when_rng_high() -> None:
     choice = _choose("顺子", 11, game, 0.5, _RoundTracker())
     assert choice.decision is not None and choice.decision.win_probability > 0.75
     # 频率 0.65，rng=0.9 ≥ 0.65 → 不加注，落回 call
-    assert _choose_action(choice, ["raise", "call"], False, 0.5, True, 0.75, 0.65, rng=lambda: 0.9)[0] == "call"
+    assert _choose_action(choice, ["raise", "call"], 0.5, True, 0.75, 0.65, rng=lambda: 0.9)[0] == "call"
     # rng=0.1 < 0.65 → 加注
-    assert _choose_action(choice, ["raise", "call"], False, 0.5, True, 0.75, 0.65, rng=lambda: 0.1)[0] == "raise"
+    assert _choose_action(choice, ["raise", "call"], 0.5, True, 0.75, 0.65, rng=lambda: 0.1)[0] == "raise"
 
 
 def test_choose_action_raise_frequency_extremes() -> None:
@@ -699,9 +699,9 @@ def test_choose_action_raise_frequency_extremes() -> None:
     )
     choice = _choose("顺子", 11, game, 0.5, _RoundTracker())
     # 频率 1.0：即便 rng 接近 1 也必加
-    assert _choose_action(choice, ["raise", "call"], False, 0.5, True, 0.75, 1.0, rng=lambda: 0.999)[0] == "raise"
+    assert _choose_action(choice, ["raise", "call"], 0.5, True, 0.75, 1.0, rng=lambda: 0.999)[0] == "raise"
     # 频率 0：rng=0 也不加（0<0 为 False）→ 慢打 call
-    assert _choose_action(choice, ["raise", "call"], False, 0.5, True, 0.75, 0.0, rng=lambda: 0.0)[0] == "call"
+    assert _choose_action(choice, ["raise", "call"], 0.5, True, 0.75, 0.0, rng=lambda: 0.0)[0] == "call"
 
 
 def test_choose_action_first_peek_no_raise_slow_plays_big_hand() -> None:
@@ -716,13 +716,11 @@ def test_choose_action_first_peek_no_raise_slow_plays_big_hand() -> None:
     assert choice.decision is not None and choice.decision.win_probability > 0.75
 
     # first_peek_no_raise=True（首次看牌）：达标也不加注 → call，原因含慢打说明
-    action, reason = _choose_action(choice, ["raise", "call"], False, 0.5, True, 0.75, 1.0, first_peek_no_raise=True)
+    action, reason = _choose_action(choice, ["raise", "call"], 0.5, True, 0.75, 1.0, first_peek_no_raise=True)
     assert action == "call"
     assert "第一次看牌慢打" in reason
     # first_peek_no_raise=False（后续轮次）：同样达标 → 加注
-    assert (
-        _choose_action(choice, ["raise", "call"], False, 0.5, True, 0.75, 1.0, first_peek_no_raise=False)[0] == "raise"
-    )
+    assert _choose_action(choice, ["raise", "call"], 0.5, True, 0.75, 1.0, first_peek_no_raise=False)[0] == "raise"
 
 
 def test_choose_action_first_peek_no_raise_skipped_when_no_call_authorized() -> None:
@@ -736,7 +734,7 @@ def test_choose_action_first_peek_no_raise_skipped_when_no_call_authorized() -> 
     choice = _choose("顺子", 11, game, 0.5, _RoundTracker())
     # actions 无 call：first_peek_no_raise=True 也照常按频率加注（频率 1.0 → raise）
     assert (
-        _choose_action(choice, ["fold", "raise", "showdown"], False, 0.5, True, 0.75, 1.0, first_peek_no_raise=True)[0]
+        _choose_action(choice, ["fold", "raise", "showdown"], 0.5, True, 0.75, 1.0, first_peek_no_raise=True)[0]
         == "raise"
     )
 
@@ -750,7 +748,7 @@ def test_choose_action_falls_back_to_call_when_server_disallows_attack() -> None
     )
     choice = _choose("散牌", (8, 7, 5), game, 0.5, _RoundTracker())
 
-    assert _choose_action(choice, ["call"], True, 0.5, True, 0.75)[0] == "call"
+    assert _choose_action(choice, ["call"], 0.5, True, 0.75)[0] == "call"
 
 
 def test_choose_action_folds_for_negative_ev() -> None:
@@ -762,7 +760,7 @@ def test_choose_action_folds_for_negative_ev() -> None:
     )
     choice = _choose("对子", (14, 13), game, 0.5, _RoundTracker())
 
-    assert _choose_action(choice, ["open", "raise", "call"], True, 0.5, True, 0.75)[0] == "fold"
+    assert _choose_action(choice, ["open", "raise", "call"], 0.5, True, 0.75)[0] == "fold"
 
 
 def test_choose_rejects_negative_ev() -> None:

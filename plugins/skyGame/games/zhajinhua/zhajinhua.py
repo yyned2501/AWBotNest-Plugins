@@ -304,7 +304,6 @@ async def _act_on_hand(
     action, reason = _choose_action(
         choice,
         actions if isinstance(actions, list) else [],
-        bool(cfg.get("zjh_open_enabled", False)),
         float(cfg.get("zjh_open_max_win_rate", 50)) / 100,
         bool(cfg.get("zjh_raise_enabled", False)),
         float(cfg.get("zjh_raise_min_win_rate", 75)) / 100,

@@ -1514,7 +1514,6 @@ def _action_override(actions: list[Any]) -> str | None:
 def _choose_action(
     choice: _Choice,
     actions: list[Any],
-    open_enabled: bool,
     open_threshold: float,
     raise_enabled: bool,
     raise_threshold: float,
@@ -1523,6 +1522,10 @@ def _choose_action(
     rng: Callable[[], float] = random.random,
 ) -> tuple[str, str]:
     """按最终实际胜率选择跟注、主动开牌、追加或应战摊牌，动作必须获服务端允许。
+
+    主动开牌（open）无开关（v1.16.19 移除 zjh_open_enabled）：胜率低于 open_threshold
+    且服务端授权 open 即发起比牌——开牌止损，比继续跟注省钱。开关曾导致配置漂移后
+    该行为整体丢失（用户 2026-08-08 反馈「开关弄丢后不再主动开牌输钱」）。
 
     强制摊牌阶段 actions 只有 fold/raise/showdown（无 call/open）：EV 支持继续时，
     showdown 作为「继续」动作（相当于全价跟注到摊牌）；胜率达标且允许则 raise。
@@ -1540,7 +1543,7 @@ def _choose_action(
     if not choice.call or decision is None:
         return "fold", choice.reason
     win_probability = decision.win_probability
-    if open_enabled and "open" in actions and win_probability < open_threshold:
+    if "open" in actions and win_probability < open_threshold:
         return "open", f"最终实际胜率{win_probability:.1%}低于主动开牌阈值{open_threshold:.1%}"
     if raise_enabled and "raise" in actions and win_probability >= raise_threshold:
         if first_peek_no_raise and "call" in actions:

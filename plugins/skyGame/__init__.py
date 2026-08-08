@@ -23,7 +23,7 @@ from .games import hdsky_auth
 __plugin__ = {
     "name": "天空游戏",
     "id": "skyGame",
-    "version": "1.16.18",
+    "version": "1.16.19",
     "author": "Yy",
     "description": "天空系列游戏统一入口：炸金花自动参与、养马自动养护，左侧按游戏分组配置。",
     "scope": "user",
@@ -261,14 +261,6 @@ __plugin__ = {
             "help": "优先按已看牌对手实际下注时的底池和成本反推；未观测到下注时才使用此回退分位。",
             "order": 23,
         },
-        "zjh_open_enabled": {
-            "type": "boolean",
-            "default": False,
-            "label": "启用低胜率主动开牌",
-            "section": "炸金花",
-            "help": "最终实际胜率低于阈值但 EV 为正时，服务器允许 open 才发起比牌；默认关闭以先观察费用。",
-            "order": 24,
-        },
         "zjh_open_max_win_rate": {
             "type": "slider",
             "default": 50,
@@ -277,8 +269,8 @@ __plugin__ = {
             "min": 0,
             "max": 95,
             "step": 5,
-            "help": "仅在最终实际胜率低于此值、EV 为正且服务端允许 open 时主动开牌。",
-            "order": 25,
+            "help": "最终实际胜率低于此值、EV 为正且服务端允许 open 时主动开牌（开牌止损，比继续跟注省钱）。",
+            "order": 24,
         },
         "zjh_raise_enabled": {
             "type": "boolean",
@@ -416,6 +408,11 @@ __plugin__ = {
         },
     },
     "changelog": (
+        "v1.16.19 更新：\n"
+        "- 主动开牌（open）不再依赖配置开关：移除 zjh_open_enabled，最终实际胜率低于"
+        " zjh_open_max_win_rate（默认 50%）且服务端允许 open 时直接主动开牌（开牌止损，"
+        "比继续跟注省钱）。开关曾导致配置漂移后该行为整体丢失——用户 2026-08-08 反馈"
+        "「开关弄丢后不再主动开牌输钱」，现去掉开关只保留胜率阈值，配置被重置也不会丢；\n"
         "v1.16.18 修复：\n"
         "- 上牌门槛不低于回退分位（zjh_peeked_threshold，默认 50%）：对手 peek 后继续"
         "（看牌确认才敢继续）是过滤动作，纯赔率盈亏平衡常远低于实际牌力门槛（#6881 单挑"
