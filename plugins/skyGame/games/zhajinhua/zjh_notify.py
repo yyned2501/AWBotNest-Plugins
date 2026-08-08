@@ -16,6 +16,7 @@ from .zjh_model import (
     _Choice,
     _combined_opponent_threshold,
     _RoundTracker,
+    _self_action_probs,
     _TerminalDecision,
 )
 from .zjh_state import _is_alive, _is_self, _opponent_entries, _players
@@ -47,8 +48,15 @@ def _log_decision(
     choice: _Choice,
     tracker: _RoundTracker,
     fallback_threshold: float,
+    depth: int = 0,
+    profile: Any = None,
+    self_seen: bool = True,
 ) -> None:
-    """打印一次决策的完整推导，便于核对胜率与 EV。"""
+    """打印一次决策的完整推导，便于核对胜率与 EV。
+
+    depth>0 时展示深度 EV 反推的门槛（v1.16.20，与决策侧一致），
+    我方行动概率查我方账号画像（把我也作为一个用户）。
+    """
     log = ctx.log
     decision = choice.decision
     pot = game.get("pot")
@@ -58,13 +66,17 @@ def _log_decision(
             "决策[弃] %s(%s) 键值=%s 原因=%s 底池=%s 成本=%s", hand, hand_type, hand_value, choice.reason, pot, call_bet
         )
         return
+    ante = float(game.get("ante", 0) or 0)
+    self_action_probs = _self_action_probs(game, profile, self_seen)
     seen_detail = []
     for key, player in _opponent_entries(game):
         if not player.get("seen", False):
             continue
         peek_snapshot = tracker.peek_snapshots.get(key)
         continue_snapshot = tracker.snapshots.get(key)
-        inferred = _combined_opponent_threshold(peek_snapshot, continue_snapshot, fallback_threshold)
+        inferred = _combined_opponent_threshold(
+            peek_snapshot, continue_snapshot, None, depth, self_action_probs, self_seen, ante
+        )
         details = []
         if peek_snapshot is not None:
             details.append(

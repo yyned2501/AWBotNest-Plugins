@@ -66,6 +66,7 @@ from .zjh_model import (
     _seen_factor,
     _seen_opponent_ranges,
     _SeenRange,
+    _self_action_probs,
     _snapshot_for_actor,
     _terminal_ev_call,
     _terminal_ev_call_multi,
@@ -140,6 +141,7 @@ __all__ = [
     "_seen_factor",
     "_seen_opponent_ranges",
     "_self_hand",
+    "_self_action_probs",
     "_snapshot_for_actor",
     "_terminal_action_ineffective",
     "_terminal_action_or_fallback",
@@ -282,6 +284,9 @@ async def _act_on_hand(
     """
     rid = game.get("roundId")
     hand_value = _extract_hand_value(hand_type, hand)
+    # 深度 EV 反推对手门槛（v1.16.20）：深度与 zjh_terminal_depth 一致，我方已看牌
+    # 全价下注，我方行动概率查我方账号画像（把我也作为一个用户）。
+    depth = int(cfg.get("zjh_terminal_depth", 2) or 2)
     choice = _choose(
         hand_type,
         hand_value,
@@ -290,8 +295,10 @@ async def _act_on_hand(
         tracker,
         float(cfg.get("zjh_fold_ev_tolerance", 0) or 0),
         profile,
+        depth,
+        True,
     )
-    _log_decision(ctx, hand, hand_type, hand_value, game, choice, tracker, fallback_threshold)
+    _log_decision(ctx, hand, hand_type, hand_value, game, choice, tracker, fallback_threshold, depth, profile, True)
 
     decision = choice.decision
     actions = game.get("actions", [])
@@ -340,22 +347,25 @@ def _train_opponent_actions(
     last_seen: dict[str, tuple[str, float]],
     round_action: dict[str, tuple[str, bool, int, int, bool]] | None = None,
 ) -> None:
-    """每轮训练画像：遍历所有对手，检测动作变化并去重记录。
+    """每轮训练画像：遍历所有玩家（含我方），检测动作变化并去重记录。
 
-    - 覆盖所有时机（bot 看牌后、对手行动中、多人局全部对手）；
+    - 我方动作也入画像（v1.16.20「把我也作为一个用户」）：反推对手门槛时站在
+      对手视角，我方的 call/raise 倾向决定对手后续轮次的追平/加注成本，查询
+      我方账号自己的画像得到行动概率。我方不在 _opponent_counts 计数内，
+      adj_seen/adj_blind 直接用其返回的对手蒙/看数（不减自己）。
+    - 覆盖所有时机（bot 看牌后、对手行动中、多人局全部玩家）；
     - 用 last_seen 签名（lastAction + bet）去重：同一动作只在变化时记一次，
       避免轮询重复计数把跟注/加注频率撑高。
     - 已出局（alive=False）玩家只记录 fold：实测门户在弃牌的同一快照就把
       alive 置 false（lastAction='弃牌' 只在死人状态可见），若跳过死人，
       fold 永远进不了画像，继续频率分母缺失会系统性高估诈唬率。
-    last_seen 由调用方在 `_poll_loop` 维护（跨局重置），键为对手 uid，
+    last_seen 由调用方在 `_poll_loop` 维护（跨局重置），键为玩家 uid，
     值为 (lastAction, bet) 签名。
-    round_action：本轮各对手最激进动作 {uid: "raise"|"call"}（raise 覆盖 call），
+    round_action：本轮各玩家最激进动作 {uid: "raise"|"call"}（raise 覆盖 call），
     供结算回填按实际动作分桶；None 时不维护。
     """
     for index, player in enumerate(_players(game)):
-        if _is_self(player):
-            continue
+        is_self = _is_self(player)
         alive = bool(player.get("alive") or player.get("active", False))
         uid = _player_key(player, index)
         current_action = str(player.get("lastAction", "") or "")
@@ -377,8 +387,12 @@ def _train_opponent_actions(
         if not alive and action != "fold":
             continue  # 出局玩家只有弃牌这一种新动作值得记录
         op_seen = bool(player.get("seen", False))
-        blind_count, seen_count = _opponent_counts(game)  # (蒙牌数, 看牌数)
-        if alive:
+        blind_count, seen_count = _opponent_counts(game)  # (蒙牌数, 看牌数)，不含我方
+        if is_self:
+            # 我方不在对手计数里，邻接计数就是全部对手的蒙/看数，无需排除自己
+            adj_seen = seen_count
+            adj_blind = blind_count
+        elif alive:
             # 存活对手计入计数，排除当前对手自身
             adj_seen = seen_count - (1 if op_seen else 0)
             adj_blind = blind_count - (0 if op_seen else 1)
@@ -643,8 +657,16 @@ async def _poll_loop(ctx: object) -> None:
                                 adj_seen = seen_count - (1 if op_seen else 0)
                                 adj_blind = blind_count - (0 if op_seen else 1)
                                 probs = profile_store.action_probabilities(uid, op_seen, adj_seen, adj_blind)
+                                # 深度 EV 反推对手门槛（v1.16.20）：我方蒙牌半价，
+                                # 我方行动概率查我方账号画像（把我也作为一个用户）。
                                 threshold = _combined_opponent_threshold(
-                                    tracker.peek_snapshots.get(uid), tracker.snapshots.get(uid), seen_threshold
+                                    tracker.peek_snapshots.get(uid),
+                                    tracker.snapshots.get(uid),
+                                    None,
+                                    int(cfg.get("zjh_terminal_depth", 2) or 2),
+                                    _self_action_probs(g, profile_store, False),
+                                    False,
+                                    g.get("ante") if isinstance(g.get("ante"), (int, float)) else 0,
                                 )
                                 blind_opponents.append(
                                     _BlindOpponent(
