@@ -488,13 +488,9 @@ async def _poll_loop(ctx: object) -> None:
                 g = game_data.get("game", {})
                 rid = g.get("roundId")
                 if rid and rid != last_rid:
-                    # 上一局结束：入账本局结算（lastResult 滞后一局，此刻正好是刚结束那局），
-                    # 再推送结果通知（含本局盈亏与累计战绩）
-                    if last_rid and round_joined:
-                        last_delta = record_round_result(ctx.kv, g.get("lastResult"))
-                        await _notify_game_result(
-                            ctx, cfg, game_data, last_round_hand, last_round_hand_type, last_delta
-                        )
+                    # 新一局开始：重置本局状态。战绩入账与结果通知不在此处——
+                    # 线上结算后 roundId 直接变 None、lastResult 只出现在结算态响应
+                    # （新局响应里已被清空），入账改由下方 lastResult 去重块驱动。
                     last_rid = rid
                     turns_taken = 0
                     # 新一局：待确认弃牌属于上一局，连同重试计数一起重置，
@@ -528,6 +524,15 @@ async def _poll_loop(ctx: object) -> None:
                     # 并推进全场对手的衰减时钟（半衰期按手数，弃牌对手也按手数遗忘）
                     record_round_raise_freq(profile_store, settled_round_action, list(uid_by_display.values()))
                     last_fed_result_rid = last_result_rid
+                    # 战绩入账 + 对局结果通知：与画像回填同步，正是结算到达时刻
+                    # （lastResult 每轮重复出现，靠 last_fed_result_rid 每局去重一次）。
+                    # 旧 v1.16.9 等 roundId 切换时入账，但线上结算态 roundId 变 None、
+                    # 新局响应 lastResult 已被清空——从不入账、从不推送（用户反馈）。
+                    if round_joined:
+                        last_delta = record_round_result(ctx.kv, last_result)
+                        await _notify_game_result(
+                            ctx, cfg, game_data, last_round_hand, last_round_hand_type, last_delta
+                        )
                 if cfg.get("zjh_profile_enabled", True):
                     profile_store.flush()
                 s = g.get("self", {})

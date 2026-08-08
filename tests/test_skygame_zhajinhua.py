@@ -3396,12 +3396,14 @@ class _FakeHdsky:
 
 @pytest.mark.asyncio
 async def test_poll_loop_records_result_and_notifies_when_bot_joined(monkeypatch: pytest.MonkeyPatch) -> None:
-    """回归 v1.16.9 bug：round_joined 声明后从未置位，roundId 切换条件
-    `if last_rid and round_joined:` 恒不成立——战绩从不入账 zjh:stats、
-    对局结束通知从不推送。
+    """回归 v1.16.9 战绩入账 bug（两层根因，v1.16.12 修复第一层、v1.16.13 修复第二层）：
+    1. round_joined 声明后从未置位，战绩从不入账、通知从不推送；
+    2. 入账挂在 roundId 切换条件上，但线上结算后 roundId 直接变 None、
+       lastResult 只在结算态响应出现（新局响应里已被清空）——切换条件永不满足。
 
-    模拟两轮 poll：R1 bot 已加入（joined=True）→ R2 切换且 lastResult 含
-    selfDelta=15000 → 应入账累计统计并推送带「本局 +15000」的结果通知。
+    模拟线上真实形态两轮 poll：R1 牌局（rid=6809, joined=True）→ R2 结算态
+    （roundId=None + lastResult 含 selfDelta=15000）→ 应在结算到达时入账累计
+    统计并推送带「本局 +15000」的结果通知。
     """
     import asyncio
     import importlib
@@ -3413,10 +3415,11 @@ async def test_poll_loop_records_result_and_notifies_when_bot_joined(monkeypatch
 
     round1 = {
         "game": {
-            "roundId": "r1",
-            "phase": "betting",
+            "roundId": 6809,
+            "phase": "playing",
             "pot": 1000,
             "callBet": 100,
+            "lastResult": None,
             "self": {
                 "id": "self",
                 "displayName": "Bot",
@@ -3431,25 +3434,11 @@ async def test_poll_loop_records_result_and_notifies_when_bot_joined(monkeypatch
             "actions": [],
         }
     }
+    # 结算态：roundId 直接变 None（新局响应里 lastResult 已被清空），
+    # lastResult 只在结算态响应出现——入账必须在此驱动，而非等 roundId 切换
     round2 = {
         "game": {
-            "roundId": "r2",
-            "phase": "betting",
-            "pot": 1000,
-            "callBet": 100,
-            "lastResult": {"roundId": "r1", "selfDelta": 15000},
-            "self": {
-                "id": "self",
-                "displayName": "Bot",
-                "isSelf": True,
-                "joined": True,
-                "alive": True,
-                "isTurn": False,
-            },
-            "players": [
-                {"id": "self", "displayName": "Bot", "isSelf": True, "joined": True, "alive": True, "isTurn": False},
-            ],
-            "actions": [],
+            "lastResult": {"roundId": 6809, "selfDelta": 15000},
         }
     }
 
