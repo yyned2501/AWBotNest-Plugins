@@ -46,6 +46,7 @@ const DEFAULTS = {
   zjh_first_peek_no_raise: true,
   zjh_fold_ev_tolerance: 5,
   zjh_terminal_depth: 2,
+  zjh_signal_mix_prob: 10,
   zjh_blind_max_calls: 3,
   zjh_profile_enabled: true,
   zjh_profile_halflife: 20,
@@ -338,6 +339,12 @@ async function renewNow() {
                 <span class="help">正 EV 且最终实际胜率低于阈值时，若允许 open 则发起比牌。</span>
                 <span class="lbl">最高实际胜率：{{ cfg.zjh_open_max_win_rate }}%</span>
                 <input v-model.number="cfg.zjh_open_max_win_rate" type="range" min="0" max="95" step="5" />
+                <span class="lbl">信号混合：{{ cfg.zjh_signal_mix_prob }}%</span>
+                <input v-model.number="cfg.zjh_signal_mix_prob" type="range" min="0" max="50" step="5" />
+                <span class="help">
+                  双向混合防读牌：弱牌该开牌止损时小概率改跟注慢打、强牌该继续时小概率直接开牌——
+                  对手统计不出「开牌=弱牌、继续=强牌」。0=关（旧行为：低于开牌阈值必开）。
+                </span>
               </div>
               <div class="fld">
                 <label class="row switch">
