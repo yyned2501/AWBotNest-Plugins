@@ -246,16 +246,23 @@ def _opponent_deep_ev(
     self_seen: bool,
     ante: float,
     cost: float,
+    is_raise: bool = False,
 ) -> float:
     """站在对手视角的深度 EV 递归（内部实现，v1.16.20）。
 
     对手已看牌、牌力 t（单挑门槛）。每轮时序与 _terminal_ev_call 同构、视角互换：
-    对手先按 callBet 跟注入池（已看牌全价）→ 我方行动——我方在评估「继续」价值
-    不会弃牌（p_fold=0，同 v1.16.6「看牌对手不进入 fold 分支」），call/raise 按
-    画像概率加权；我方 callBet 不变平跟、raise 使 callBet 线性递增一注底注（实测
+    对手先入池（已看牌全价）→ 我方行动——我方在评估「继续」价值不会弃牌
+    （p_fold=0，同 v1.16.6「看牌对手不进入 fold 分支」），call/raise 按画像概率
+    加权；我方 callBet 不变平跟、raise 使 callBet 线性递增一注底注（实测
     ante→2×ante→3×ante，非复利）；我方蒙牌时下注半价（self_seen=False）。深度
     耗尽 = 强制摊牌（实测 showdown 成本 = 当时 callBet 单倍，已含在跟注入池），
     不再下注，对手净值 = 胜率 × 底池 − 累计成本。
+
+    is_raise（v1.16.21，仅快照时刻传入）：快照的 call_bet 是行动前成本，对手
+    raise 实际追平该成本 + 加一注底注（= call_bet + ante），并让后续 callBet 抬升
+    一注——单次 raise 的经济学在此精确入账，替代旧版 β=0.5 的笼统升级（#6922
+    对手单次 raise 门槛被抬到 0.92，Q对强牌被判终胜率 0 直接弃牌）。递归轮次对手
+    是被动跟随，不传 is_raise。
     """
     if self_action_probs is None:
         p_call, p_raise = 1.0, 0.0
@@ -272,17 +279,26 @@ def _opponent_deep_ev(
             else:
                 p_call, p_raise = p_call / cont, p_raise / cont
 
-    # 本轮：对手先跟 callBet 入池（已看牌全价）
-    pot += call_bet
-    cost += call_bet
+    # 本轮：对手先入池（已看牌全价）。快照时刻对手若为 raise：追平当前成本
+    # + 加一注底注（实测 callBet 线性递增 ante→2×ante→3×ante，非复利），
+    # 新 callBet 抬升一注，后续轮次对手按新值跟随（v1.16.21 精确建模）。
+    if is_raise:
+        pot += call_bet + ante
+        cost += call_bet + ante
+        call_bet += ante
+    else:
+        pot += call_bet
+        cost += call_bet
 
     if depth <= 0:
         # 深度耗尽 = 强制摊牌结束：对手付最后一次 showdown 成本（=callBet 单倍，
         # 已含在上方入池），随后按胜率分底池。单步 breakeven 把「跟注这手就结束」
         # 当免费，忽略这最后摊牌——对手上牌后要 showdown 响应才能结束，该成本
         # 必须计入（用户 2026-08-08：这些金额也要算进去才能算出来 ev）。
+        # 摊牌双方都下注：我方也付一次 callBet 比牌费（v1.16.21 修正，旧版只算
+        # 对手成本、我方免费摊牌——对手成本相对底池被高估，门槛偏高）。
         win = _actual_win_probability(t, blind_opponents, seen_thresholds)
-        return win * pot - cost
+        return win * (pot + call_bet) - cost
 
     ev = 0.0
     # 我方平跟：callBet 不变，我方下注额 = callBet（看牌全价）/ 半价（蒙牌）
@@ -336,6 +352,12 @@ def _opponent_deep_threshold(
     ante = ante if ante > 0 else snapshot.call_bet
     blind_opponents = snapshot.blind_opponents if snapshot.blind_opponents is not None else snapshot.opponents
     seen_thresholds = snapshot.seen_thresholds
+    # raise 快照（v1.16.21）：对手 raise 后牌局期望轮次比全新局面短——我方有主动
+    # 开牌止损出口（v1.16.19），raise 往往触发开牌/摊牌提前结束。深度少推 1 轮，
+    # 避免把对手后续追平成本高估（#6922 单次 raise 门槛被推到 0.92 把 Q对强牌
+    # 压成终胜率 0 直接弃牌——Q对 87.6% 单挑胜率面对单次 raise 不该弃）。
+    if snapshot.is_raise and depth > 0:
+        depth -= 1
     # 快照可能漏掉「已看牌但无门槛」的对手（如我方已看牌但 tracker 尚未记录我方
     # 门槛）：单挑时对手面对的对手只剩我方，seen_thresholds=() 会让胜率退化为恒
     # 1.0（t^0 × 空积），深度反推错误拉低到 0。把缺失对手按蒙牌 t 因子近似
@@ -357,6 +379,7 @@ def _opponent_deep_threshold(
             self_seen,
             ante,
             0.0,
+            snapshot.is_raise,  # 快照本轮是 raise：追平+加注入池，callBet 抬升（v1.16.21）
         )
 
     lower = math.nextafter(max(seen_thresholds, default=0.0), 1.0)
@@ -731,10 +754,17 @@ def _seen_opponent_ranges(
             # 摊牌阶段（phase=showdown）同样升级（v1.16.16 撤销 v1.16.8 豁免）：
             # 弱牌玩家有 fold/showdown 便宜出口不会白 raise，摊牌阶段还 raise 的
             # 对手是强牌信号（牌好才不想开、用 raise 榨取价值），连续 raise 升级适用。
+            # 深度反推（depth>0）下首次 raise 的经济学已由 _opponent_deep_ev 精确
+            # 入账（追平+加注入池、callBet 抬升，v1.16.21）——单次 raise 不再 β 升级，
+            # 旧版叠加双重惩罚：#6922 对手单次 raise 门槛被抬到 0.92，Q对（单挑
+            # 87.6%）被判终胜率 0 直接弃牌。连续 raise（从第 2 次起）才是额外强牌
+            # 信号，仍按 β=0.5 逐级上调。单步（depth=0，记录/诊断侧）保持 v1.16.8
+            # 旧行为（首次即升级）。
             raise_count = tracker.opponent_raise_counts.get(key, 0)
             if raise_count > 0:
                 threshold_now = base_floor
-                for _ in range(raise_count):
+                escalations = raise_count - 1 if depth > 0 else raise_count
+                for _ in range(escalations):
                     threshold_now = threshold_now + (1.0 - threshold_now) * 0.5
                 base_floor = threshold_now
             if profile is not None and key:
@@ -758,8 +788,10 @@ def _seen_opponent_ranges(
                     key,
                     action,
                     bucket_key,
-                    # 连续 raise 诈唬衰减：强牌信号，诈唬分量逐级压缩（v1.16.18）
-                    0.5**raise_count if raise_count > 0 else 1.0,
+                    # 连续 raise 诈唬衰减：强牌信号，诈唬分量逐级压缩（v1.16.18）。
+                    # 深度模式下与门槛升级一致：首次 raise 的强度已由精确经济学覆盖，
+                    # 从第 2 次 raise 起衰减（v1.16.21）；单步保持旧行为（首次即衰减）。
+                    0.5 ** (raise_count - 1 if depth > 0 else raise_count) if raise_count > 0 else 1.0,
                 )
             )
         else:
