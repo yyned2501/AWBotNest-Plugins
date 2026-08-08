@@ -339,7 +339,7 @@ def _train_opponent_actions(
     store: object,
     game: dict[str, Any],
     last_seen: dict[str, tuple[str, float]],
-    round_action: dict[str, str] | None = None,
+    round_action: dict[str, tuple[str, bool, int, int, bool]] | None = None,
 ) -> None:
     """每轮训练画像：遍历所有对手，检测动作变化并去重记录。
 
@@ -390,17 +390,24 @@ def _train_opponent_actions(
             adj_blind = blind_count
         if round_action is not None and action in ("raise", "call"):
             # 最激进动作优先：加注覆盖平跟（结算回填据此区分加注/平跟手牌分位）
-            # 同时存储当时牌局状态桶参数 (action, op_seen, adj_seen, adj_blind)
+            # 同时存储当时牌局状态桶参数 (action, op_seen, adj_seen, adj_blind, forced)
+            # forced：强制摊牌阶段（phase=showdown）的 raise/call 是对手被迫的唯一
+            # 「继续」动作，不代表牌强——手牌分位回填照记（那是真实牌面），但加注频率
+            # 与动作桶不记（否则 showdown 被迫 raise 被当成高频继续，诈唬率高估，
+            # 反噬决策：把「对手门槛 90%+ 强牌」算出高胜率正 EV 开牌，用户报障）。
+            forced = game.get("phase") == "showdown"
             if action == "raise" or round_action.get(uid) is None or round_action[uid][0] != "raise":  # type: ignore[index]
-                round_action[uid] = (action, op_seen, adj_seen, adj_blind)
-        store.record_action(
-            uid,
-            action,
-            op_seen,
-            adj_seen,
-            adj_blind,
-            display_name=str(player.get("displayName", "") or ""),
-        )
+                round_action[uid] = (action, op_seen, adj_seen, adj_blind, forced)
+        # 被迫继续（showdown 阶段）不进动作桶；fold 记录仍照常（主动弃牌是真实信号）
+        if not (game.get("phase") == "showdown" and action in ("raise", "call")):
+            store.record_action(
+                uid,
+                action,
+                op_seen,
+                adj_seen,
+                adj_blind,
+                display_name=str(player.get("displayName", "") or ""),
+            )
 
 
 def _terminal_action_ineffective(
@@ -453,10 +460,10 @@ async def _poll_loop(ctx: object) -> None:
     # 对手动作去重签名：uid → (lastAction, bet)，跨局重置
     last_opponent_seen: dict[str, tuple[str, float]] = {}
     # 本轮各对手最激进动作 uid → (action, op_seen, seen_count, blind_count)（结算回填分桶用）
-    round_opponent_action: dict[str, tuple[str, bool, int, int]] = {}
+    round_opponent_action: dict[str, tuple[str, bool, int, int, bool]] = {}
     # 刚结束那局（lastResult 待回填）的对手动作快照：lastResult 滞后一局，
     # roundId 切换时把当前轮动作移入此变量，供随后到达的 lastResult 回填取用
-    settled_round_action: dict[str, tuple[str, bool, int, int]] = {}
+    settled_round_action: dict[str, tuple[str, bool, int, int, bool]] = {}
     # 已回填的结算局 roundId（同一局 lastResult 每轮重复出现，只回填一次）
     last_fed_result_rid: Any = None
 
