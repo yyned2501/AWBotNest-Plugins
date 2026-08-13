@@ -21,6 +21,7 @@ import re
 import time
 from collections.abc import Iterator
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -28,10 +29,12 @@ import httpx
 __plugin__ = {
     "name": "JUAI 自动签到",
     "id": "juai_checkin",
-    "version": "1.4.0",
+    "version": "1.4.1",
     "author": "Yy",
     "description": "每日自动签到 juai 平台（多账号）：浏览器过 recaptcha 登录并缓存 30 天 session，签到仍走 REST。",
     "changelog": (
+        "v1.4.1 更新：\n"
+        "- 登录失败时在插件数据目录留截图 + 页面控件清单，用于定位平台环境差异\n"
         "v1.4.0 更新：\n"
         "- 本地 CloakBrowser 实测调通登录：登录卡片本就在 /login，真正卡点是\n"
         "  Semi Design 协议 checkbox 拦截普通点击导致 Continue 一直禁用。\n"
@@ -540,7 +543,20 @@ async def _ensure_session(ctx: Any, email: str, password: str) -> dict[str, str]
     ctx.log.info("[登录][%s] 打开浏览器登录（过 recaptcha）", _masked_email(email))
 
     def action(page: Any) -> dict[str, str]:
-        return _browser_login(page, email, password)
+        try:
+            return _browser_login(page, email, password)
+        except Exception:
+            # 失败时留现场截图 + 可见控件清单，便于对照平台浏览器真实渲染
+            try:
+                shot_dir = getattr(ctx, "data_dir", None)
+                if shot_dir is not None:
+                    shot = Path(shot_dir) / f"login_fail_{email.casefold().replace('@', '_at_')}.png"
+                    page.screenshot(path=str(shot))
+                    ctx.log.warning("[登录][%s] 失败截图已存到插件数据目录：%s", _masked_email(email), shot.name)
+                ctx.log.warning("[登录][%s] 失败时页面：%s", _masked_email(email), _page_debug(page))
+            except Exception:  # noqa: BLE001 - 截图失败不影响抛错
+                pass
+            raise
 
     result = await browser.run(LOGIN_URL, action, headless=True, timeout=BROWSER_TIMEOUT)
     cookie = str((result or {}).get("cookie") or "")
