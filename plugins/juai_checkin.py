@@ -28,10 +28,13 @@ import httpx
 __plugin__ = {
     "name": "JUAI 自动签到",
     "id": "juai_checkin",
-    "version": "1.3.2",
+    "version": "1.3.3",
     "author": "Yy",
     "description": "每日自动签到 juai 平台（多账号）：浏览器过 recaptcha 登录并缓存 30 天 session，签到仍走 REST。",
     "changelog": (
+        "v1.3.3 更新：\n"
+        "- Sign in 改用 DOM 文本点击兜底，失败摘要带上可见按钮文字；"
+        "1.3.2 只认 button locator，英文首页的 Sign in 链接触发不到\n"
         "v1.3.2 更新：\n"
         "- 实测无头浏览器落到英文首页，须先点 Sign in 才进登录表单；"
         "同时识别中英文入口/协议/提交按钮，并在点「继续」前强制勾协议\n"
@@ -462,9 +465,59 @@ def _login_error_from_text(text: str) -> str | None:
     return None
 
 
+def _visible_clickables(page: Any) -> list[str]:
+    """收集当前页可见按钮/链接文字，供失败摘要对照。"""
+    labels: list[str] = []
+    try:
+        nodes = page.locator("button, a, [role='button']")
+        count = min(nodes.count(), 40)
+    except Exception:  # noqa: BLE001
+        return labels
+    for index in range(count):
+        try:
+            node = nodes.nth(index)
+            if not node.is_visible(timeout=200):
+                continue
+            text = re.sub(r"\s+", " ", node.inner_text(timeout=800)).strip()
+            if text:
+                labels.append(text[:40])
+        except Exception:  # noqa: BLE001
+            continue
+    return labels
+
+
+def _click_by_js_text(page: Any, labels: tuple[str, ...]) -> bool:
+    """用 DOM 文本匹配点击，避开 Playwright locator 对复合控件/空格文案的漏点。"""
+    try:
+        return bool(
+            page.evaluate(
+                """(labels) => {
+                    const wanted = labels.map((s) => s.replace(/\\s+/g, '').toLowerCase()).filter(Boolean);
+                    const nodes = [...document.querySelectorAll('a,button,[role="button"],span,div')];
+                    const target = nodes.find((node) => {
+                        const text = (node.innerText || '').replace(/\\s+/g, '').toLowerCase();
+                        if (!text || text.length > 40) return false;
+                        const style = getComputedStyle(node);
+                        const rect = node.getBoundingClientRect();
+                        const visible = style.display !== 'none' && style.visibility !== 'hidden'
+                            && rect.width > 0 && rect.height > 0;
+                        return visible && wanted.some((w) => text === w || text.includes(w));
+                    });
+                    if (!target) return false;
+                    target.click();
+                    return true;
+                }""",
+                list(labels),
+            )
+        )
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _page_debug(page: Any) -> str:
     text = re.sub(r"\s+", " ", _page_text(page, timeout_ms=2_000)).strip()
-    return f"url={_current_url(page)} text={text[:180]!r}"
+    click_text = " | ".join(_visible_clickables(page)[:12])
+    return f"url={_current_url(page)} clicks=[{click_text}] text={text[:120]!r}"
 
 
 def _browser_login(page: Any, email: str, password: str) -> dict[str, str]:
@@ -480,11 +533,18 @@ def _browser_login(page: Any, email: str, password: str) -> dict[str, str]:
         if username_input is not None:
             break
         # 无头浏览器实测先落到英文首页，必须点 Sign in 才出登录表单
-        if not clicked_signin and _click_visible_button_text(page, _SIGNIN_LABELS, contains=True):
-            clicked_signin = True
-            page.wait_for_timeout(600)
-            continue
-        if _click_visible_button_text(page, _EMAIL_LOGIN_LABELS, contains=True):
+        if not clicked_signin:
+            clicked = _click_visible_button_text(page, _SIGNIN_LABELS, contains=True) or _click_by_js_text(
+                page, _SIGNIN_LABELS
+            )
+            if clicked:
+                clicked_signin = True
+                page.wait_for_timeout(800)
+                continue
+        clicked_email = _click_visible_button_text(page, _EMAIL_LOGIN_LABELS, contains=True) or _click_by_js_text(
+            page, _EMAIL_LOGIN_LABELS
+        )
+        if clicked_email:
             page.wait_for_timeout(400)
             continue
         page.wait_for_timeout(400)
@@ -504,6 +564,8 @@ def _browser_login(page: Any, email: str, password: str) -> dict[str, str]:
     submitted = _click_visible_button_text(page, ("继续", "continue", "登录", "login"))
     if not submitted:
         submitted = _click_visible_button_text(page, ("继续", "continue"), contains=True)
+    if not submitted:
+        submitted = _click_by_js_text(page, ("继续", "continue"))
     if not submitted:
         try:
             password_input.press("Enter")
