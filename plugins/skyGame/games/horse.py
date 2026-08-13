@@ -19,7 +19,7 @@
 #       今日普通喂食额度未用完 → 喂配置草料（不再只看饱腹阈值）
 #       可遛 且未达上限 → 遛马（赚银元+经验）
 #       官方赛可报名 →（可选）免费报名
-#   - 喂食通知用结构化表格（notify_table），不把服务端长文案原样推送
+#   - 喂食/遛马通知用结构化表格（notify_table），不把服务端长文案原样推送
 #   - 遛马连续失败熔断按「天」自动重置（kv 带日期），避免历史失败永久禁用遛马
 
 from __future__ import annotations
@@ -60,6 +60,30 @@ def _stat_pair(current: object, maximum: int) -> str:
     return f"{int(current or 0)}/{maximum}"
 
 
+def _append_profile_rows(rows: list[list[object]], profile: dict) -> None:
+    """喂食/遛马共用的马匹状态行。"""
+    if not profile:
+        return
+    if profile.get("horse_name"):
+        rows.append(["马匹", str(profile.get("horse_name"))])
+    if profile.get("level") is not None:
+        exp = profile.get("exp")
+        level_text = f"Lv.{int(profile.get('level') or 0)}"
+        if exp not in (None, ""):
+            level_text += f"（经验 {int(exp):,}）"
+        rows.append(["等级", level_text])
+    if profile.get("stamina") is not None:
+        rows.append(["体力", _stat_pair(profile.get("stamina"), 100)])
+    if profile.get("mood") is not None:
+        rows.append(["心情", _stat_pair(profile.get("mood"), 100)])
+    if profile.get("satiety") is not None:
+        rows.append(["饱腹", _stat_pair(profile.get("satiety"), 100)])
+    if profile.get("daily_feed_count") is not None:
+        rows.append(["今日普通喂养", _stat_pair(profile.get("daily_feed_count"), 5)])
+    if profile.get("daily_divine_feed_count") is not None:
+        rows.append(["今日仙草", _stat_pair(profile.get("daily_divine_feed_count"), _DIVINE_DAILY_MAX)])
+
+
 def _format_feed_table(payload: dict, fallback: str) -> tuple[list[str], list[list[object]], str]:
     """把喂食结果收成两列表格，不把服务端长文案原样推送。
 
@@ -80,26 +104,50 @@ def _format_feed_table(payload: dict, fallback: str) -> tuple[list[str], list[li
         rows.append(["经验", f"+{int(result.get('expGain') or 0)}"])
     if result.get("progressGain") not in (None, ""):
         rows.append(["长期进度", f"+{result.get('progressGain')}"])
-    if profile:
-        if profile.get("horse_name"):
-            rows.append(["马匹", str(profile.get("horse_name"))])
-        if profile.get("level") is not None:
-            exp = profile.get("exp")
-            level_text = f"Lv.{int(profile.get('level') or 0)}"
-            if exp not in (None, ""):
-                level_text += f"（经验 {int(exp):,}）"
-            rows.append(["等级", level_text])
-        if profile.get("stamina") is not None:
-            rows.append(["体力", _stat_pair(profile.get("stamina"), 100)])
-        if profile.get("mood") is not None:
-            rows.append(["心情", _stat_pair(profile.get("mood"), 100)])
-        if profile.get("satiety") is not None:
-            rows.append(["饱腹", _stat_pair(profile.get("satiety"), 100)])
-        if profile.get("daily_feed_count") is not None:
-            rows.append(["今日普通喂养", _stat_pair(profile.get("daily_feed_count"), 5)])
-        if profile.get("daily_divine_feed_count") is not None:
-            rows.append(["今日仙草", _stat_pair(profile.get("daily_divine_feed_count"), _DIVINE_DAILY_MAX)])
+    _append_profile_rows(rows, profile)
     if len(rows) == 1 and not ok:
+        rows = [["结果", result.get("message") or fallback]]
+    return ["项目", "内容"], rows, caption
+
+
+def _format_walk_table(
+    payload: dict,
+    fallback: str,
+    walk_today: int | None = None,
+    walk_max: int | None = None,
+) -> tuple[list[str], list[list[object]], str]:
+    """把遛马结果收成两列表格。
+
+    2026-08-14 实测成功响应含 expGain/progressGain/bonusAmount/penaltyAmount/
+    eventKind/eventNote/profile；message 仍是十余行说明+随机事件，原样推送会被平台拆歪。
+    """
+    result = payload.get("result", {}) or {}
+    profile = result.get("profile") or {}
+    stats = ((payload.get("horse") or {}).get("stats") or {}) if isinstance(payload.get("horse"), dict) else {}
+    ok = bool(result.get("ok", payload.get("ok", False)))
+    caption = "🐴 遛马成功" if ok else f"🐴 {result.get('message') or fallback}"
+    rows: list[list[object]] = []
+    if result.get("expGain") not in (None, ""):
+        rows.append(["经验", f"+{int(result.get('expGain') or 0)}"])
+    if result.get("progressGain") not in (None, ""):
+        rows.append(["长期进度", f"+{result.get('progressGain')}"])
+    bonus = int(result.get("bonusAmount", 0) or 0)
+    penalty = int(result.get("penaltyAmount", 0) or 0)
+    if bonus:
+        rows.append(["奖励", f"+{bonus:,} 银元"])
+    if penalty:
+        rows.append(["惩罚", f"-{penalty:,} 银元"])
+    note = str(result.get("eventNote") or "").strip()
+    if note:
+        rows.append(["随机事件", note])
+    _append_profile_rows(rows, profile)
+    if walk_today is None:
+        walk_today = stats.get("walkCountToday")
+    if walk_max is None:
+        walk_max = stats.get("walkMax")
+    if walk_today is not None and walk_max not in (None, 0, ""):
+        rows.append(["今日遛马", _stat_pair(walk_today, int(walk_max))])
+    if not rows:
         rows = [["结果", result.get("message") or fallback]]
     return ["项目", "内容"], rows, caption
 
@@ -117,18 +165,27 @@ def _is_cooldown(payload: dict) -> bool:
 
 
 def _remain_ms(payload: dict) -> int:
-    """优先 remainMs；没有则从「xx分钟后再喂/再来」文案抠分钟。"""
+    """优先 remainMs；没有则从「x小时y分钟后再来/再喂」文案抠时长。"""
     result = payload.get("result", {}) or {}
     remain = int(result.get("remainMs", 0) or 0)
     if remain > 0:
         return remain
     msg = str(result.get("message") or "")
-    match = re.search(r"(\d+)\s*分钟", msg)
-    return int(match.group(1)) * 60 * 1000 if match else 0
+    hours = re.search(r"(\d+)\s*小时", msg)
+    minutes = re.search(r"(\d+)\s*分钟", msg)
+    total_min = (int(hours.group(1)) if hours else 0) * 60 + (int(minutes.group(1)) if minutes else 0)
+    return total_min * 60 * 1000
 
 
-async def _notify_result(ctx: object, cfg: dict, payload: dict, fallback: str) -> None:
-    """喂食走结构化表格；其它动作仍用服务端短消息。冷却静默。"""
+async def _notify_result(
+    ctx: object,
+    cfg: dict,
+    payload: dict,
+    fallback: str,
+    walk_today: int | None = None,
+    walk_max: int | None = None,
+) -> None:
+    """喂食/遛马走结构化表格；其它动作仍用服务端短消息。冷却静默。"""
     result = payload.get("result", {}) or {}
     if _is_cooldown(payload):
         ctx.log.debug("养护动作冷却中: %s", result.get("message", ""))
@@ -138,6 +195,10 @@ async def _notify_result(ctx: object, cfg: dict, payload: dict, fallback: str) -
     ok = bool(result.get("ok", payload.get("ok", False)))
     if result.get("feedType") or result.get("feedLabel") or fallback.startswith("喂"):
         headers, rows, caption = _format_feed_table(payload, fallback)
+        await ctx.notify_table(headers, rows, caption=caption, level="success" if ok else "warning", category="养马")
+        return
+    if fallback.startswith("遛马") or result.get("eventKind") is not None or result.get("bonusAmount") is not None:
+        headers, rows, caption = _format_walk_table(payload, fallback, walk_today, walk_max)
         await ctx.notify_table(headers, rows, caption=caption, level="success" if ok else "warning", category="养马")
         return
     msg = result.get("message") or fallback
@@ -360,7 +421,7 @@ async def _care_once(ctx: object, cfg: dict, client: HdskyClient) -> None:
         else:
             ctx.kv.set(walk_fail_key, json.dumps({"count": walk_fail_count + 1, "date": today}))
             ctx.log.warning("遛马失败: %s", result.get("message") or result.get("code") or "未知")
-        await _notify_result(ctx, cfg, r, "遛马失败")
+        await _notify_result(ctx, cfg, r, "遛马失败", walk_count + 1, walk_max)
         return
 
     # 官方赛：每日免费报名一次（kv 持久化，避免重复报名）
