@@ -583,12 +583,20 @@ class _ScriptedPage:
         nodes = [self.username, self.password, self.agree]
         return _LocatorList([n for n in nodes if selector in n.selectors and n.visible])
 
-    def evaluate(self, script: str) -> Any:
+    def evaluate(self, script: str, *args: Any) -> Any:
         if "localStorage.getItem" in script and "user" in script:
             return self._user_json
-        if "我已阅读并同意" in script:
+        if "我已阅读并同意" in script or "I have read" in script:
             self.agree.checked = True
             return True
+        if "labels" in script and args:
+            wanted = {"".join(str(x).split()).lower() for x in args[0]}
+            for node in (self.email_login_btn, self.continue_btn):
+                text = "".join(node.text.split()).lower()
+                if any(w and (text == w or w in text) for w in wanted):
+                    node.click()
+                    return True
+            return False
         return None
 
     def wait_for_timeout(self, _ms: int) -> None:
