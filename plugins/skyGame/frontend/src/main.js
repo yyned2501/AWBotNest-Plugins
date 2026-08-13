@@ -20,9 +20,11 @@ const DEFAULTS = {
   // 养马
   horse_enabled: false,
   horse_poll_interval: 120,
-  horse_feed_type: 'weed',
+  horse_feed_type: 'fine',
   horse_feed_threshold: 60,
   horse_auto_walk: true,
+  horse_auto_match_race: true,
+  horse_race_min_stamina: 30,
   horse_auto_official_race: false,
   horse_auto_revive: false,
   horse_notify: true,

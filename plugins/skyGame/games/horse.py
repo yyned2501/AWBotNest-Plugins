@@ -13,11 +13,11 @@
 #   - 每轮轮询最多执行一个养护动作，节奏拟人：
 #       死亡 → （可选）复活
 #       玩家赛可加入且体力足 → 加入（配置开关）
-#       玩家赛可加入但体力不足 → 喂仙草补体力（divine 与精草独立冷却）
-#       饱腹度 < 阈值 且可喂 → 喂食（feedType 可配，撞冷却即跳过不硬试）
+#       玩家赛可加入但体力不足 → 先喂配置草料（精草/杂草），不够再仙草
+#       今日普通喂食额度未用完 → 喂配置草料（不再只看饱腹阈值）
 #       可遛 且未达上限 → 遛马（赚银元+经验）
 #       官方赛可报名 →（可选）免费报名
-#   - 结果通知用服务端返回的 result.message
+#   - 喂食通知用结构化表格（notify_table），不把服务端长文案原样推送
 #   - 遛马连续失败熔断按「天」自动重置（kv 带日期），避免历史失败永久禁用遛马
 
 from __future__ import annotations
@@ -31,6 +31,13 @@ from .hdsky import HdskyClient, request_key
 
 _task: asyncio.Task[None] | None = None
 
+# 门户 horse.feeds 实测（2026-08-13）：普通喂食每日 5 次，仙草每日 3 次，独立计数。
+_FEED_LABELS = {"weed": "杂草", "fine": "精草", "divine": "仙草"}
+_FEED_STAMINA = {"weed": 6, "fine": 18, "divine": 50}
+_DIVINE_DAILY_MAX = 3
+_FEED_CD_KEY = "horse:feed_cooldown_until"
+_DIVINE_CD_KEY = "horse:divine_cooldown_until"
+
 
 async def _horse_action(client: HdskyClient, action: str, **extra: object) -> dict:
     """POST /api/portal/horse/action，自动带 requestKey。"""
@@ -38,20 +45,76 @@ async def _horse_action(client: HdskyClient, action: str, **extra: object) -> di
     return await client.post("/api/portal/horse/action", body)
 
 
+def _feed_label(feed_type: str) -> str:
+    return _FEED_LABELS.get(feed_type, feed_type or "草料")
+
+
+def _stat_pair(current: object, maximum: int) -> str:
+    return f"{int(current or 0)}/{maximum}"
+
+
+def _format_feed_table(payload: dict, fallback: str) -> tuple[list[str], list[list[object]], str]:
+    """把喂食结果收成两列表格，不把服务端长文案原样推送。
+
+    实测 feed 成功响应含 feedType/feedLabel/amount/expGain/progressGain/profile，
+    旧实现直接推 result.message（十余行说明+规则），平台按「字段：内容」自动拆表后列对不齐。
+    """
+    result = payload.get("result", {}) or {}
+    profile = result.get("profile") or {}
+    feed_type = str(result.get("feedType") or "")
+    label = str(result.get("feedLabel") or _feed_label(feed_type) or "草料")
+    ok = bool(result.get("ok", payload.get("ok", False)))
+    caption = f"🐴 {label}喂养成功" if ok else f"🐴 {result.get('message') or fallback}"
+    rows: list[list[object]] = [["草料", label]]
+    amount = result.get("amount")
+    if amount not in (None, ""):
+        rows.append(["花费", f"{int(amount):,} 银元"])
+    if result.get("expGain") not in (None, ""):
+        rows.append(["经验", f"+{int(result.get('expGain') or 0)}"])
+    if result.get("progressGain") not in (None, ""):
+        rows.append(["长期进度", f"+{result.get('progressGain')}"])
+    if profile:
+        if profile.get("horse_name"):
+            rows.append(["马匹", str(profile.get("horse_name"))])
+        if profile.get("level") is not None:
+            exp = profile.get("exp")
+            level_text = f"Lv.{int(profile.get('level') or 0)}"
+            if exp not in (None, ""):
+                level_text += f"（经验 {int(exp):,}）"
+            rows.append(["等级", level_text])
+        if profile.get("stamina") is not None:
+            rows.append(["体力", _stat_pair(profile.get("stamina"), 100)])
+        if profile.get("mood") is not None:
+            rows.append(["心情", _stat_pair(profile.get("mood"), 100)])
+        if profile.get("satiety") is not None:
+            rows.append(["饱腹", _stat_pair(profile.get("satiety"), 100)])
+        if profile.get("daily_feed_count") is not None:
+            rows.append(["今日普通喂养", _stat_pair(profile.get("daily_feed_count"), 5)])
+        if profile.get("daily_divine_feed_count") is not None:
+            rows.append(["今日仙草", _stat_pair(profile.get("daily_divine_feed_count"), _DIVINE_DAILY_MAX)])
+    if len(rows) == 1 and not ok:
+        rows = [["结果", result.get("message") or fallback]]
+    return ["项目", "内容"], rows, caption
+
+
 async def _notify_result(ctx: object, cfg: dict, payload: dict, fallback: str) -> None:
-    """用服务端返回的消息通知。cooldown 是预期内拒绝，只记 debug 不打扰。"""
+    """喂食走结构化表格；其它动作仍用服务端短消息。cooldown 静默。"""
     result = payload.get("result", {}) or {}
     if result.get("code") == "cooldown":
         ctx.log.debug("养护动作冷却中: %s", result.get("message", ""))
         return
     if not cfg.get("horse_notify", True):
         return
+    ok = bool(result.get("ok", payload.get("ok", False)))
+    if result.get("feedType") or result.get("feedLabel") or fallback.startswith("喂"):
+        headers, rows, caption = _format_feed_table(payload, fallback)
+        await ctx.notify_table(headers, rows, caption=caption, level="success" if ok else "warning", category="养马")
+        return
     msg = result.get("message") or fallback
-    ok = result.get("ok", payload.get("ok", False))
     if ok:
-        await ctx.notify(f"🐴 {msg}")
+        await ctx.notify(f"🐴 {msg}", category="养马")
     else:
-        await ctx.notify(f"🐴 {msg}", level="warning")
+        await ctx.notify(f"🐴 {msg}", level="warning", category="养马")
 
 
 def _walk_fail_count(kv: object, key: str, today: str) -> int:
@@ -89,6 +152,41 @@ def _feed_cooldown_handle(ctx: object, r: dict, key: str, now_ms: int) -> None:
         ctx.log.debug("%s 冷却中: %s", key, result.get("message", ""))
     else:
         ctx.kv.delete(key)
+
+
+def _configured_feed_type(cfg: dict) -> str:
+    feed_type = str(cfg.get("horse_feed_type", "fine") or "fine")
+    return feed_type if feed_type in _FEED_LABELS else "fine"
+
+
+def _in_cooldown(ctx: object, key: str, now_ms: int) -> bool:
+    return now_ms < int(ctx.kv.get(key, 0) or 0)
+
+
+def _regular_feed_ready(st: dict, stats: dict, profile: dict, now_ms: int, ctx: object) -> bool:
+    """普通喂食（weed/fine）额度未用完、可喂、且不在冷却。"""
+    feed_count = int(stats.get("feedCountToday", profile.get("daily_feed_count", 0)) or 0)
+    feed_max = int(stats.get("feedMax", 5) or 5)
+    return bool(st.get("canFeed")) and feed_count < feed_max and not _in_cooldown(ctx, _FEED_CD_KEY, now_ms)
+
+
+def _divine_feed_ready(st: dict, profile: dict, now_ms: int, ctx: object) -> bool:
+    """仙草额度未用完、可喂、且不在冷却。"""
+    divine_count = int(profile.get("daily_divine_feed_count", 0) or 0)
+    return (
+        bool(st.get("canFeed")) and divine_count < _DIVINE_DAILY_MAX and not _in_cooldown(ctx, _DIVINE_CD_KEY, now_ms)
+    )
+
+
+async def _do_feed(ctx: object, cfg: dict, client: HdskyClient, feed_type: str, reason: str) -> dict:
+    """执行一次喂食并处理冷却/通知。"""
+    cd_key = _DIVINE_CD_KEY if feed_type == "divine" else _FEED_CD_KEY
+    now_ms = int(datetime.datetime.now().timestamp() * 1000)
+    r = await _horse_action(client, "feed", feedType=feed_type)
+    ctx.log.info("喂食 %s（%s）", feed_type, reason)
+    _feed_cooldown_handle(ctx, r, cd_key, now_ms)
+    await _notify_result(ctx, cfg, r, f"喂{_feed_label(feed_type)}失败")
+    return r
 
 
 async def _care_once(ctx: object, cfg: dict, client: HdskyClient) -> None:
@@ -151,42 +249,48 @@ async def _care_once(ctx: object, cfg: dict, client: HdskyClient) -> None:
         await _notify_result(ctx, cfg, r, "玩家赛加入失败")
         return
 
-    # 补体力：玩家赛可加入但体力不足 → 喂仙草（divine，+50 体力；与精草独立冷却）。
-    # 仙草冷却中则跳过本轮（不遛马消耗体力），等冷却恢复下轮再补。
+    # 补体力：玩家赛可加入但体力不足。优先喂配置草料（精草/杂草），只有配置草料
+    # 不够达标 / 额度用完 / 冷却中才动仙草。两边都喂不了则本轮空手，等冷却，不遛马耗体力。
     if match_joinable and stamina < min_stamina:
-        divine_cd_key = "horse:divine_cooldown_until"
-        divine_cd = int(ctx.kv.get(divine_cd_key, 0) or 0)
-        if now_ms < divine_cd:
-            ctx.log.debug(
-                "玩家赛体力不足（%d < %d）且仙草冷却中，剩余 %d 分钟，等待补体力",
-                stamina,
-                min_stamina,
-                (divine_cd - now_ms) // 60000,
-            )
+        feed_type = _configured_feed_type(cfg)
+        if feed_type != "divine" and _regular_feed_ready(st, stats, profile, now_ms, ctx):
+            gain = _FEED_STAMINA.get(feed_type, 0)
+            if stamina + gain >= min_stamina:
+                await _do_feed(
+                    ctx,
+                    cfg,
+                    client,
+                    feed_type,
+                    f"玩家赛体力不足（{stamina} < {min_stamina}），{_feed_label(feed_type)}+{gain} 可达标",
+                )
+                return
+        if _divine_feed_ready(st, profile, now_ms, ctx):
+            await _do_feed(ctx, cfg, client, "divine", f"玩家赛体力不足（{stamina} < {min_stamina}），喂仙草补体力")
             return
-        r = await _horse_action(client, "feed", feedType="divine")
-        ctx.log.info("玩家赛体力不足（%d < %d），喂仙草补体力", stamina, min_stamina)
-        _feed_cooldown_handle(ctx, r, divine_cd_key, now_ms)
-        await _notify_result(ctx, cfg, r, "喂仙草失败")
+        ctx.log.debug(
+            "玩家赛体力不足（%d < %d）且草料暂不可喂，等待补体力",
+            stamina,
+            min_stamina,
+        )
         return
 
-    # 喂食：饱腹度低于阈值且今日次数未到上限，撞冷却即跳过不硬试
+    # 日常喂食：今日普通额度没用完就喂配置草料（用满 5 次攒体力/长期进度）。
+    # 饱腹阈值只作下限提示，不再挡住额度未用完的精草。
     satiety = int(profile.get("satiety", 100) or 0)
     threshold = int(cfg.get("horse_feed_threshold", 60) or 0)
-    feed_count = int(stats.get("feedCountToday", 0) or 0)
-    feed_max = int(stats.get("feedMax", 0) or 0)
-    if st.get("canFeed") and satiety < threshold and feed_count < feed_max:
-        feed_cd_key = "horse:feed_cooldown_until"
-        feed_cd = int(ctx.kv.get(feed_cd_key, 0) or 0)
-        if now_ms < feed_cd:
-            ctx.log.debug("喂食冷却中，剩余 %d 分钟，本轮跳过不重复尝试", (feed_cd - now_ms) // 60000)
-        else:
-            feed_type = str(cfg.get("horse_feed_type", "fine") or "fine")
-            r = await _horse_action(client, "feed", feedType=feed_type)
-            ctx.log.info("喂食 %s（饱腹 %d < %d，今日 %d/%d）", feed_type, satiety, threshold, feed_count + 1, feed_max)
-            _feed_cooldown_handle(ctx, r, feed_cd_key, now_ms)
-            await _notify_result(ctx, cfg, r, "喂食失败")
+    feed_count = int(stats.get("feedCountToday", profile.get("daily_feed_count", 0)) or 0)
+    feed_max = int(stats.get("feedMax", 5) or 5)
+    feed_type = _configured_feed_type(cfg)
+    if feed_type == "divine":
+        if _divine_feed_ready(st, profile, now_ms, ctx) and satiety < threshold:
+            await _do_feed(ctx, cfg, client, "divine", f"饱腹 {satiety} < {threshold}")
             return
+    elif _regular_feed_ready(st, stats, profile, now_ms, ctx):
+        await _do_feed(ctx, cfg, client, feed_type, f"今日普通喂养 {feed_count}/{feed_max}，饱腹 {satiety}")
+        return
+    elif st.get("canFeed") and feed_count < feed_max and _in_cooldown(ctx, _FEED_CD_KEY, now_ms):
+        remain = (int(ctx.kv.get(_FEED_CD_KEY, 0) or 0) - now_ms) // 60000
+        ctx.log.debug("喂食冷却中，剩余 %d 分钟，本轮跳过不重复尝试", remain)
 
     # 遛马：消耗体力赚银元+经验，用完每日额度
     walk_count = int(stats.get("walkCountToday", 0) or 0)

@@ -28,9 +28,11 @@ const DEFAULTS = {
   // 养马
   horse_enabled: false,
   horse_poll_interval: 120,
-  horse_feed_type: 'weed',
+  horse_feed_type: 'fine',
   horse_feed_threshold: 60,
   horse_auto_walk: true,
+  horse_auto_match_race: true,
+  horse_race_min_stamina: 30,
   horse_auto_official_race: false,
   horse_auto_revive: false,
   horse_notify: true,
@@ -58,9 +60,9 @@ const DEFAULTS = {
 
 // 草料选项（与后端 config_schema 一致）
 const FEED_TYPES = [
-  { value: 'weed', label: '杂草（100银元 +12饱腹）' },
-  { value: 'fine', label: '精草（300银元 +30饱腹）' },
-  { value: 'divine', label: '仙草（1000银元 +60饱腹）' },
+  { value: 'weed', label: '杂草（100银元 +12饱腹 +6体力）' },
+  { value: 'fine', label: '精草（300银元 +30饱腹 +18体力）' },
+  { value: 'divine', label: '仙草（1000银元 +60饱腹 +50体力）' },
 ]
 
 // 左侧分组：按游戏归类
@@ -235,7 +237,7 @@ async function renewNow() {
               <input v-model="cfg.horse_enabled" type="checkbox" />
               <span>启用养马自动化</span>
             </label>
-            <span class="help" style="margin-top:-4px">每轮轮询最多执行一个养护动作：喂食 → 遛马 → 官方赛</span>
+            <span class="help" style="margin-top:-4px">每轮最多一个动作：参赛补体力（先精草后仙草）→ 喂食额度 → 遛马 → 官方赛</span>
             <div class="grid">
               <div class="fld">
                 <span class="lbl">养护轮询间隔(秒)</span>
@@ -264,7 +266,7 @@ async function renewNow() {
               <div class="fld">
                 <span class="lbl">饱腹度阈值</span>
                 <input v-model.number="cfg.horse_feed_threshold" class="inp" type="number" min="0" max="100" step="5" />
-                <span class="help">低于此值且今日次数未用完时喂（每日上限 5 次）</span>
+                <span class="help">普通草料按每日 5 次额度喂；仅草料选仙草时才看此饱腹阈值</span>
               </div>
             </div>
           </section>
@@ -276,6 +278,16 @@ async function renewNow() {
               <span>自动遛马</span>
             </label>
             <span class="help" style="margin-top:-4px">用完每日遛马额度（4 次），赚银元+经验，体力耗尽自动停</span>
+            <label class="row switch">
+              <input v-model="cfg.horse_auto_match_race" type="checkbox" />
+              <span>自动加入玩家养马赛</span>
+            </label>
+            <span class="help" style="margin-top:-4px">发现玩家开的 Horse2 时自动加入，报名额取房主设定</span>
+            <div class="fld">
+              <span class="lbl">参赛最低体力</span>
+              <input v-model.number="cfg.horse_race_min_stamina" class="inp" type="number" min="0" max="100" step="5" />
+              <span class="help">体力不够先喂配置草料，不够再喂仙草（仙草每日 3 次）</span>
+            </div>
             <label class="row switch">
               <input v-model="cfg.horse_auto_official_race" type="checkbox" />
               <span>自动报名官方赛</span>
