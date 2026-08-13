@@ -333,14 +333,22 @@ class _FakeKv:
 
 
 class _FakeBrowser:
-    def __init__(self, result: dict[str, str] | None = None, error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        result: dict[str, str] | None = None,
+        error: Exception | None = None,
+        fail_times: int = 0,
+    ) -> None:
         self.result = result
         self.error = error
+        self.fail_times = fail_times  # 前 N 次调用抛错，之后返回 result（模拟重试后成功）
         self.calls: list[dict[str, Any]] = []
 
     async def run(self, url: str, action: Any, **kwargs: Any) -> Any:
         self.calls.append({"url": url, "action": action, **kwargs})
-        if self.error:
+        if self.error and len(self.calls) <= self.fail_times:
+            raise self.error
+        if self.error and self.fail_times == 0:
             raise self.error
         return self.result
 
@@ -428,14 +436,35 @@ async def test_ensure_session_browser_missing() -> None:
 
 async def test_ensure_session_browser_error(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_probe_client(monkeypatch, _FakeClient([]))
+    monkeypatch.setattr("plugins.juai_checkin.BROWSER_RETRY_INTERVAL", 0)
     ctx = _FakeCtx({})
     ctx.browser = _FakeBrowser(error=RuntimeError("用户名或密码错误"))
     with pytest.raises(RuntimeError, match="用户名或密码错误"):
         await _ensure_session(ctx, "a@x.com", "pw")
+    # 重试满 BROWSER_LOGIN_ATTEMPTS 次仍失败
+    assert len(ctx.browser.calls) == 3
+
+
+async def test_ensure_session_browser_retry_then_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 平台浏览器登录偶发超时：第 1 次失败、第 2 次成功 → 整体成功
+    _patch_probe_client(monkeypatch, _FakeClient([]))
+    monkeypatch.setattr("plugins.juai_checkin.BROWSER_RETRY_INTERVAL", 0)
+    ctx = _FakeCtx({})
+    ctx.browser = _FakeBrowser(
+        result={"cookie": "session=ok", "user_id": "u-9"},
+        error=RuntimeError("登录超时"),
+        fail_times=1,
+    )
+    result = await _ensure_session(ctx, "a@x.com", "pw")
+    assert result == {"cookie": "session=ok", "user_id": "u-9"}
+    assert len(ctx.browser.calls) == 2  # 失败 1 次 + 成功 1 次
+    saved = ctx.kv.get(SESSION_KEY)
+    assert isinstance(saved, dict) and saved["a@x.com"]["user_id"] == "u-9"
 
 
 async def test_ensure_session_rejects_empty_browser_result(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_probe_client(monkeypatch, _FakeClient([]))
+    monkeypatch.setattr("plugins.juai_checkin.BROWSER_RETRY_INTERVAL", 0)
     ctx = _FakeCtx({})
     ctx.browser = _FakeBrowser(result={"cookie": "", "user_id": ""})
     with pytest.raises(RuntimeError, match="有效会话"):

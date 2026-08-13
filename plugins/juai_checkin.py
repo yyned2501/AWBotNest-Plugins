@@ -29,10 +29,13 @@ import httpx
 __plugin__ = {
     "name": "JUAI 自动签到",
     "id": "juai_checkin",
-    "version": "1.4.1",
+    "version": "1.4.2",
     "author": "Yy",
     "description": "每日自动签到 juai 平台（多账号）：浏览器过 recaptcha 登录并缓存 30 天 session，签到仍走 REST。",
     "changelog": (
+        "v1.4.2 更新：\n"
+        "- 浏览器登录加重试（最多 3 次、间隔 10 秒）：实测平台登录偶发超时，"
+        "重试后续签到走缓存 session 稳定运行\n"
         "v1.4.1 更新：\n"
         "- 登录失败时在插件数据目录留截图 + 页面控件清单，用于定位平台环境差异\n"
         "v1.4.0 更新：\n"
@@ -170,6 +173,9 @@ SESSION_KEY = "account_sessions"
 REQUEST_TIMEOUT = 30.0
 BROWSER_TIMEOUT = 240
 LOGIN_WAIT_SECONDS = 45.0
+# 平台浏览器登录偶发超时（页面渲染/recaptcha 时快时慢），失败自动重试
+BROWSER_LOGIN_ATTEMPTS = 3
+BROWSER_RETRY_INTERVAL = 10.0
 
 _run_lock: asyncio.Lock | None = None
 _background_tasks: set[asyncio.Task[dict[str, Any]]] = set()
@@ -540,7 +546,7 @@ async def _ensure_session(ctx: Any, email: str, password: str) -> dict[str, str]
     if browser is None:
         raise RuntimeError("平台托管浏览器不可用，无法完成 recaptcha 登录")
 
-    ctx.log.info("[登录][%s] 打开浏览器登录（过 recaptcha）", _masked_email(email))
+    masked = _masked_email(email)
 
     def action(page: Any) -> dict[str, str]:
         try:
@@ -552,21 +558,37 @@ async def _ensure_session(ctx: Any, email: str, password: str) -> dict[str, str]
                 if shot_dir is not None:
                     shot = Path(shot_dir) / f"login_fail_{email.casefold().replace('@', '_at_')}.png"
                     page.screenshot(path=str(shot))
-                    ctx.log.warning("[登录][%s] 失败截图已存到插件数据目录：%s", _masked_email(email), shot.name)
-                ctx.log.warning("[登录][%s] 失败时页面：%s", _masked_email(email), _page_debug(page))
+                    ctx.log.warning("[登录][%s] 失败截图已存到插件数据目录：%s", masked, shot.name)
+                ctx.log.warning("[登录][%s] 失败时页面：%s", masked, _page_debug(page))
             except Exception:  # noqa: BLE001 - 截图失败不影响抛错
                 pass
             raise
 
-    result = await browser.run(LOGIN_URL, action, headless=True, timeout=BROWSER_TIMEOUT)
-    cookie = str((result or {}).get("cookie") or "")
-    user_id = str((result or {}).get("user_id") or "")
-    if not cookie or not user_id:
-        raise RuntimeError("浏览器登录未拿到有效会话")
-    sessions[email.casefold()] = {"cookie": cookie, "user_id": user_id}
-    ctx.kv.set(SESSION_KEY, sessions)
-    ctx.log.info("[登录][%s] 已写入 session 缓存", _masked_email(email))
-    return {"cookie": cookie, "user_id": user_id}
+    last_err: Exception | None = None
+    for attempt in range(1, BROWSER_LOGIN_ATTEMPTS + 1):
+        ctx.log.info("[登录][%s] 打开浏览器登录（第 %s/%s 次，过 recaptcha）", masked, attempt, BROWSER_LOGIN_ATTEMPTS)
+        try:
+            result = await browser.run(LOGIN_URL, action, headless=True, timeout=BROWSER_TIMEOUT)
+            cookie = str((result or {}).get("cookie") or "")
+            user_id = str((result or {}).get("user_id") or "")
+            if cookie and user_id:
+                sessions[email.casefold()] = {"cookie": cookie, "user_id": user_id}
+                ctx.kv.set(SESSION_KEY, sessions)
+                ctx.log.info("[登录][%s] 已写入 session 缓存", masked)
+                return {"cookie": cookie, "user_id": user_id}
+            last_err = RuntimeError("浏览器登录未拿到有效会话")
+        except Exception as exc:  # noqa: BLE001 - 单次失败收敛后重试
+            last_err = exc
+        if attempt < BROWSER_LOGIN_ATTEMPTS:
+            ctx.log.warning(
+                "[登录][%s] 第 %s 次浏览器登录失败，%s 秒后重试：%s",
+                masked,
+                attempt,
+                int(BROWSER_RETRY_INTERVAL),
+                last_err,
+            )
+            await asyncio.sleep(BROWSER_RETRY_INTERVAL)
+    raise RuntimeError(f"浏览器登录重试 {BROWSER_LOGIN_ATTEMPTS} 次仍失败：{last_err}")
 
 
 async def _checkin_one(
