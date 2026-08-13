@@ -8,7 +8,7 @@ import json
 
 import pytest
 
-from plugins.skyGame.games.horse import _care_once, _format_feed_table
+from plugins.skyGame.games.horse import _care_once, _format_feed_table, _is_cooldown, _remain_ms
 
 
 def _now_ms() -> int:
@@ -392,7 +392,12 @@ async def test_match_race_divine_cooldown_response_stores_backoff() -> None:
     ctx = _FakeCtx()
     action = {
         "ok": True,
-        "result": {"ok": False, "code": "cooldown", "remainMs": 1800000, "message": "刚刚吃过了，30分钟 后再喂。"},
+        "result": {
+            "ok": False,
+            "code": "feed_cooldown",
+            "remainMs": 1800000,
+            "message": "你的马刚吃过，30分钟 后再喂。",
+        },
     }
     # 精草额度用完，才会走到仙草
     client = _FakeClient(_horse_state(stamina=12, feed_today=5, match=_active_match()), action)
@@ -434,7 +439,12 @@ async def test_feed_cooldown_response_stores_backoff() -> None:
     state = _horse_state(satiety=40, feed_today=1)  # 额度未用完 → 触发喂食
     action = {
         "ok": True,
-        "result": {"ok": False, "code": "cooldown", "remainMs": 2700000, "message": "刚刚吃过了，45分钟 后再喂。"},
+        "result": {
+            "ok": False,
+            "code": "feed_cooldown",
+            "remainMs": 2700000,
+            "message": "你的马刚吃过，45分钟 后再喂。",
+        },
     }
     client = _FakeClient(state, action)
     before = _now_ms()
@@ -460,17 +470,33 @@ async def test_feed_in_cooldown_skips_without_posting() -> None:
 
 
 @pytest.mark.asyncio
-async def test_feed_success_clears_cooldown() -> None:
-    # 正向：喂食成功 → 清除过期冷却标记，下次到点可再喂
+async def test_feed_success_sets_local_backoff() -> None:
+    # 正向：喂食成功后本地先按 60 分钟退避，避免下一轮立刻再撞 feed_cooldown
     ctx = _FakeCtx()
     ctx.kv.set("horse:feed_cooldown_until", _now_ms() - 1000)  # 上次退避已过期
-    action = {"ok": True, "result": {"ok": True, "message": "精草喂养成功"}}
+    action = {"ok": True, "result": {"ok": True, "feedType": "fine", "feedLabel": "精草"}}
     client = _FakeClient(_horse_state(satiety=40, feed_today=1), action)
+    before = _now_ms()
 
     await _care_once(ctx, {}, client)
 
-    assert "horse:feed_cooldown_until" not in ctx.kv
+    assert ctx.kv.get("horse:feed_cooldown_until") == pytest.approx(before + 60 * 60 * 1000, abs=5000)
     assert any("喂食 fine" in msg for _, msg in ctx.log.records)
+
+
+def test_is_cooldown_accepts_feed_and_walk_codes() -> None:
+    # 正向：喂食/遛马各自的冷却码都算冷却；普通失败不算
+    assert _is_cooldown({"result": {"code": "feed_cooldown"}})
+    assert _is_cooldown({"result": {"code": "cooldown"}})
+    assert _is_cooldown({"result": {"ok": False, "remainMs": 1000, "message": "你的马刚吃过，20分钟 后再喂。"}})
+    assert not _is_cooldown({"result": {"ok": False, "code": "exhausted"}})
+
+
+def test_remain_ms_falls_back_to_message_minutes() -> None:
+    # 异常路径：没有 remainMs 时从文案里抠分钟数
+    assert _remain_ms({"result": {"remainMs": 3127469}}) == 3127469
+    assert _remain_ms({"result": {"message": "你的马刚吃过，20分钟 后再喂。"}}) == 20 * 60 * 1000
+    assert _remain_ms({"result": {}}) == 0
 
 
 @pytest.mark.asyncio

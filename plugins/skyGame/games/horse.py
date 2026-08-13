@@ -5,7 +5,9 @@
 # + POST /api/portal/horse/race/action）：
 #   - 单马账号模型，动作体 {action, requestKey, feedType?}
 #   - 每日上限：喂食 feedMax 次 / 遛马 walkMax 次（stats 字段）
-#   - 动作有冷却（result.code == "cooldown"）：静默处理，按 remainMs 退避不重复尝试
+#   - 动作有冷却：遛马 result.code == "cooldown"；喂食实测为 "feed_cooldown"
+#     （2026-08-14）。静默处理，按 remainMs 退避不重复尝试
+#   - 普通喂食成功后本地先按 60 分钟退避（门户喂食冷却约 1 小时），避免下一轮立刻硬试
 #   - 普通喂食（weed/fine）与仙草（divine）独立计数、独立冷却（profile 的
 #     daily_feed_count 与 daily_divine_feed_count 分开）
 #   - 比赛分两类：官方赛（competitions.official，每日免费报名一次）与
@@ -25,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import json
+import re
 
 from . import hdsky_auth
 from .hdsky import HdskyClient, request_key
@@ -37,6 +40,10 @@ _FEED_STAMINA = {"weed": 6, "fine": 18, "divine": 50}
 _DIVINE_DAILY_MAX = 3
 _FEED_CD_KEY = "horse:feed_cooldown_until"
 _DIVINE_CD_KEY = "horse:divine_cooldown_until"
+# 普通喂食成功后的本地预退避。门户 feed_cooldown 约 1 小时（2026-08-14 实测：
+# 23:57 喂成功，00:04 再喂仍剩 53 分钟），成功响应不带 remainMs。
+_FEED_SUCCESS_BACKOFF_MS = 60 * 60 * 1000
+_COOLDOWN_CODES = frozenset({"cooldown", "feed_cooldown", "walk_cooldown", "divine_cooldown"})
 
 
 async def _horse_action(client: HdskyClient, action: str, **extra: object) -> dict:
@@ -97,10 +104,33 @@ def _format_feed_table(payload: dict, fallback: str) -> tuple[list[str], list[li
     return ["项目", "内容"], rows, caption
 
 
-async def _notify_result(ctx: object, cfg: dict, payload: dict, fallback: str) -> None:
-    """喂食走结构化表格；其它动作仍用服务端短消息。cooldown 静默。"""
+def _is_cooldown(payload: dict) -> bool:
+    """喂食/遛马冷却：门户喂食用 feed_cooldown，遛马用 cooldown。"""
     result = payload.get("result", {}) or {}
-    if result.get("code") == "cooldown":
+    code = str(result.get("code") or "")
+    if code in _COOLDOWN_CODES:
+        return True
+    if result.get("remainMs") not in (None, "", 0):
+        return True
+    msg = str(result.get("message") or "")
+    return "后再喂" in msg or "后再来" in msg
+
+
+def _remain_ms(payload: dict) -> int:
+    """优先 remainMs；没有则从「xx分钟后再喂/再来」文案抠分钟。"""
+    result = payload.get("result", {}) or {}
+    remain = int(result.get("remainMs", 0) or 0)
+    if remain > 0:
+        return remain
+    msg = str(result.get("message") or "")
+    match = re.search(r"(\d+)\s*分钟", msg)
+    return int(match.group(1)) * 60 * 1000 if match else 0
+
+
+async def _notify_result(ctx: object, cfg: dict, payload: dict, fallback: str) -> None:
+    """喂食走结构化表格；其它动作仍用服务端短消息。冷却静默。"""
+    result = payload.get("result", {}) or {}
+    if _is_cooldown(payload):
         ctx.log.debug("养护动作冷却中: %s", result.get("message", ""))
         return
     if not cfg.get("horse_notify", True):
@@ -143,15 +173,22 @@ def _walk_fail_count(kv: object, key: str, today: str) -> int:
 
 
 def _feed_cooldown_handle(ctx: object, r: dict, key: str, now_ms: int) -> None:
-    """feed 撞冷却（「刚刚吃过了 xx分钟后再喂」）→ 记 remainMs 退避，不硬试；非冷却清除。"""
+    """喂食冷却或成功后都记下退避时间；真失败才清标记。
+
+    成功响应不带 remainMs（2026-08-14 实测），但门户立刻再喂会回 feed_cooldown。
+    成功后先按 60 分钟本地退避，撞冷却再用服务端 remainMs 校准。
+    """
     result = r.get("result", {}) or {}
-    if result.get("code") == "cooldown":
-        remain_ms = int(result.get("remainMs", 0) or 0)
+    if _is_cooldown(r):
+        remain_ms = _remain_ms(r)
         if remain_ms > 0:
             ctx.kv.set(key, now_ms + remain_ms)
         ctx.log.debug("%s 冷却中: %s", key, result.get("message", ""))
-    else:
-        ctx.kv.delete(key)
+        return
+    if result.get("ok", r.get("ok", False)):
+        ctx.kv.set(key, now_ms + _FEED_SUCCESS_BACKOFF_MS)
+        return
+    ctx.kv.delete(key)
 
 
 def _configured_feed_type(cfg: dict) -> str:
@@ -311,8 +348,8 @@ async def _care_once(ctx: object, cfg: dict, client: HdskyClient) -> None:
             return
         r = await _horse_action(client, "walk")
         result = r.get("result", {}) or {}
-        if result.get("code") == "cooldown":
-            remain_ms = int(result.get("remainMs", 0) or 0)
+        if _is_cooldown(r):
+            remain_ms = _remain_ms(r)
             if remain_ms > 0:
                 ctx.kv.set(cooldown_until_key, now_ms + remain_ms)
             ctx.log.debug("遛马冷却中，不计数: %s", result.get("message", ""))
