@@ -46,13 +46,16 @@
 
 ### 浏览器登录页（已确认）
 
-`/login` 是 SPA 壳（HTML 仅约 1.6KB），控件全靠 JS 渲染：
+`/login` 是 SPA 壳（HTML 仅约 1.6KB），控件全靠 JS 渲染。无头浏览器（CloakBrowser，fingerprint-platform=windows）实测先渲染**英文首页**，正文可见 `Home / Console / Sign in / Sign up`，并不直接出账密表单。
 
-1. 先点「使用 邮箱或用户名 登录」才出 username/password 表单（两步 UI）。
-2. 协议开关开启时必须勾选「我已阅读并同意」，否则前端 toast「请先阅读并同意用户协议和隐私政策」并直接 return，不发请求。
-3. 点「继续」后前端先打 recaptcha，再 `POST /api/user/login?recaptcha=...`。
-4. 成功：`localStorage.user = JSON.stringify(data)`，跳转 `/console`。
-5. `data.require_2fa` 为真时出 2FA 弹窗，改走 `POST /api/user/login/2fa`。当前配置账号未观察到 2FA；插件遇 2FA 明确失败，不盲重试。
+1. 先点「Sign in」/「登录」进入登录卡。
+2. 再点「使用 邮箱或用户名 登录」（无第三方 OAuth 时这一步可能已展开）。
+3. 协议开关开启时必须勾选「我已阅读并同意」/ 英文等价文案，否则前端 toast 并直接 return，不发请求。
+4. 点「继续」/「Continue」后前端先打 recaptcha（若 `recaptcha_check=true`），再 `POST /api/user/login?recaptcha=...`。
+5. 成功：`localStorage.user = JSON.stringify(data)`，跳转 `/console`。
+6. `data.require_2fa` 为真时出 2FA 弹窗，改走 `POST /api/user/login/2fa`。当前配置账号未观察到 2FA；插件遇 2FA 明确失败，不盲重试。
+
+`GET /api/status` 的 `recaptcha_check` 可能随站点配置开关：2026-08-13 早间为 `true`（纯 REST 报 token 为空），同日下午再测为 `false`。插件始终走浏览器登录，不依赖该开关。
 
 ### 成功响应（已确认）
 
@@ -76,9 +79,10 @@ HTTP 200：
 
 ### 待验证
 
-- 无头浏览器（CloakBrowser / Playwright headless）打出的 v3 评分是否稳定过关。
-- 浏览器抽出的 `session` Cookie 直接塞进 httpx `Cookie` 头，签到/余额接口是否一律接受（按 cookie 属性应接受；部署后用已配置账号实测）。
+- 无头浏览器点完 Sign in 后 recaptcha v3 评分是否稳定过关（`recaptcha_check` 现为 false 时不强制）。
+- 浏览器抽出的 `session` Cookie 直接塞进 httpx `Cookie` 头，签到/余额接口是否一律接受。
 - `browser_fingerprint` 缺省时服务端是否拒绝。
+- 站点语言是否可在无头环境强制中文，避免每次都要走英文入口。
 
 ## 查询签到状态（已确认）
 

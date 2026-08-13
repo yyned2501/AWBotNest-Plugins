@@ -576,7 +576,7 @@ class _ScriptedPage:
         # timeout：什么都不改，等 LOGIN_WAIT_SECONDS
 
     def locator(self, selector: str) -> _LocatorList:
-        if selector == "button":
+        if selector.startswith("button"):
             return _LocatorList([self.email_login_btn, self.continue_btn])
         if selector == "body":
             return _LocatorList([_Node(text=self._body, visible=True)])
@@ -608,6 +608,18 @@ def test_browser_login_success() -> None:
 
 def test_browser_login_two_step_oauth_first() -> None:
     page = _ScriptedPage(after_submit="ok", start_on_oauth=True)
+    result = _browser_login(page, "a@x.com", "pw")
+    assert result["user_id"] == "u-123"
+    assert page.email_login_btn.clicks == 1
+    assert page.username.typed == "a@x.com"
+
+
+def test_browser_login_english_landing_clicks_signin() -> None:
+    """无头浏览器实测先落到英文首页，须点 Sign in 才出表单。"""
+    page = _ScriptedPage(after_submit="ok", start_on_oauth=True)
+    page.email_login_btn.text = "Sign in"
+    page.continue_btn.text = "Continue"
+    page.agree.text = "I have read and agree"
     result = _browser_login(page, "a@x.com", "pw")
     assert result["user_id"] == "u-123"
     assert page.email_login_btn.clicks == 1
