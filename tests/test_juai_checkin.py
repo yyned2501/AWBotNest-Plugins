@@ -482,12 +482,12 @@ class _Node:
     def inner_text(self, timeout: int = 0) -> str:
         return self.text
 
-    def click(self, timeout: int = 0) -> None:
+    def click(self, timeout: int = 0, force: bool = False) -> None:
         self.clicks += 1
         if self.on_click:
             self.on_click()
 
-    def check(self) -> None:
+    def check(self, timeout: int = 0, force: bool = False) -> None:
         self.checked = True
         self.clicks += 1
 
@@ -508,6 +508,14 @@ class _LocatorList:
     def nth(self, index: int) -> _Node:
         return self._nodes[index]
 
+    @property
+    def first(self) -> "_LocatorList":
+        return _LocatorList(self._nodes[:1])
+
+    def click(self, timeout: int = 0, force: bool = False) -> None:
+        if self._nodes:
+            self._nodes[0].click(timeout=timeout, force=force)
+
     def is_visible(self, timeout: int = 0) -> bool:
         return bool(self._nodes) and self._nodes[0].visible
 
@@ -518,48 +526,44 @@ class _LocatorList:
 
 
 class _ScriptedPage:
-    """足够支撑 _browser_login 的同步 page 替身。"""
+    """足够支撑 _browser_login 的同步 page 替身。
 
-    def __init__(self, *, after_submit: str = "ok", start_on_oauth: bool = False) -> None:
+    模拟实测页面：登录卡片直接在 /login 渲染，含 username/password 输入框、
+    Semi Design 协议 checkbox、login-btn-primary 提交按钮。
+    """
+
+    def __init__(self, *, after_submit: str = "ok", has_checkbox: bool = True) -> None:
         self.url = "https://www.juaiapi.com/login"
-        self._body = "登录"
+        self._body = "登 录"
         self._user_json = ""
         self._cookies: list[dict[str, str]] = []
         self._after_submit = after_submit
         self.username = _Node(
-            selectors={
-                'input[name="username"]',
-                'input[placeholder*="用户名"]',
-                'input[placeholder*="邮箱"]',
-            },
-            visible=not start_on_oauth,
+            selectors={'input[name="username"]', "#username", 'input[placeholder*="username" i]'},
+            visible=True,
         )
         self.password = _Node(
-            selectors={'input[name="password"]', 'input[type="password"]'},
-            visible=not start_on_oauth,
+            selectors={'input[name="password"]', "#password", 'input[type="password"]'},
+            visible=True,
         )
         self.agree = _Node(
             kind="checkbox",
-            text="我已阅读并同意",
             checked=False,
-            selectors={'input[type="checkbox"]', '[role="checkbox"]', 'label:has-text("我已阅读并同意")'},
+            selectors={'input[type="checkbox"]'},
             on_click=lambda: setattr(self.agree, "checked", True),
         )
-        self.email_login_btn = _Node(
+        self._has_checkbox = has_checkbox
+        # 提交按钮：新流程按选择器 button.login-btn-primary 匹配
+        self.continue_btn = _Node(
             kind="button",
-            text="使用 邮箱或用户名 登录",
-            on_click=self._reveal_form,
+            text="Continue",
+            selectors={"button.login-btn-primary", 'button[type="submit"]'},
+            on_click=self._submit,
         )
-        # 占位：验证按钮文字模糊匹配（「邮箱或用户名」是完整文案的子串）
-        self.continue_btn = _Node(kind="button", text="继续", on_click=self._submit)
         self.context = self
 
     def cookies(self) -> list[dict[str, str]]:
         return list(self._cookies)
-
-    def _reveal_form(self) -> None:
-        self.username.visible = True
-        self.password.visible = True
 
     def _submit(self) -> None:
         if self._after_submit == "ok":
@@ -576,28 +580,23 @@ class _ScriptedPage:
         # timeout：什么都不改，等 LOGIN_WAIT_SECONDS
 
     def locator(self, selector: str) -> _LocatorList:
-        if selector.startswith("button"):
-            return _LocatorList([self.email_login_btn, self.continue_btn])
+        if selector == 'input[type="checkbox"]':
+            return _LocatorList([self.agree] if self._has_checkbox else [])
+        if selector in ("button.login-btn-primary", 'button[type="submit"]'):
+            return _LocatorList([self.continue_btn])
         if selector == "body":
             return _LocatorList([_Node(text=self._body, visible=True)])
-        nodes = [self.username, self.password, self.agree]
+        if selector == "button, a, [role='button']":
+            return _LocatorList([self.continue_btn])
+        nodes = [self.username, self.password]
         return _LocatorList([n for n in nodes if selector in n.selectors and n.visible])
 
     def evaluate(self, script: str, *args: Any) -> Any:
         if "localStorage.getItem" in script and "user" in script:
             return self._user_json
-        if "我已阅读并同意" in script or "I have read" in script:
+        if "querySelector('input[type=\"checkbox\"]')" in script:
             self.agree.checked = True
             return True
-        if "wanted" in script or "labels" in script:
-            labels = args[0] if args else []
-            wanted = {"".join(str(x).split()).lower() for x in labels}
-            for node in (self.email_login_btn, self.continue_btn):
-                text = "".join(node.text.split()).lower()
-                if any(w and (text == w or w in text) for w in wanted):
-                    node.click()
-                    return True
-            return False
         return None
 
     def wait_for_timeout(self, _ms: int) -> None:
@@ -611,28 +610,17 @@ def test_browser_login_success() -> None:
     assert result["cookie"] == "session=tok"
     assert page.username.typed == "a@x.com"
     assert page.password.typed == "pw"
+    # 协议 checkbox 被勾上（force click 穿过 Semi 的拦截层）
     assert page.agree.checked is True
     assert page.continue_btn.clicks == 1
 
 
-def test_browser_login_two_step_oauth_first() -> None:
-    page = _ScriptedPage(after_submit="ok", start_on_oauth=True)
+def test_browser_login_no_checkbox_still_works() -> None:
+    # 站点未启用协议时没有 checkbox，登录照常
+    page = _ScriptedPage(after_submit="ok", has_checkbox=False)
     result = _browser_login(page, "a@x.com", "pw")
     assert result["user_id"] == "u-123"
-    assert page.email_login_btn.clicks == 1
-    assert page.username.typed == "a@x.com"
-
-
-def test_browser_login_english_landing_clicks_signin() -> None:
-    """无头浏览器实测先落到英文首页，须点 Sign in 才出表单。"""
-    page = _ScriptedPage(after_submit="ok", start_on_oauth=True)
-    page.email_login_btn.text = "Sign in"
-    page.continue_btn.text = "Continue"
-    page.agree.text = "I have read and agree"
-    result = _browser_login(page, "a@x.com", "pw")
-    assert result["user_id"] == "u-123"
-    assert page.email_login_btn.clicks == 1
-    assert page.username.typed == "a@x.com"
+    assert page.continue_btn.clicks == 1
 
 
 def test_browser_login_2fa() -> None:

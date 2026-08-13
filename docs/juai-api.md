@@ -44,45 +44,54 @@
 
 `username` 字段填邮箱。前端还会可选附带 `browser_fingerprint`（canvas/webgl/audio，`source:"web-login"`）；服务端是否强制该字段待验证，插件走浏览器登录时由前端自行带上。
 
-### 浏览器登录页（已确认）
+### 浏览器登录页（已确认，2026-08-13 本地 CloakBrowser 实测调通）
 
-`/login` 是 SPA 壳（HTML 仅约 1.6KB），控件全靠 JS 渲染。无头浏览器（CloakBrowser，fingerprint-platform=windows）实测先渲染**英文首页**，正文可见 `Home / Console / Sign in / Sign up`，并不直接出账密表单。
+`/login` 是 SPA 壳（HTML 仅约 1.6KB），控件全靠 JS 渲染。**登录卡片直接渲染在 `/login`**：
+页面上同时有一段营销背景文案（`Home / Console / Model Marketplace / Sign in / Sign up`），
+那是同页的装饰内容，**不需要点任何 Sign in**——`input[name="username"]`、`input[name="password"]`、
+协议 checkbox、`button.login-btn-primary`（Continue）一开始就可见。之前误以为要先点 Sign in 进登录卡。
 
-1. 先点「Sign in」/「登录」进入登录卡。无头实测导航栏和主 CTA **各有一个** Sign in，点一次可能没反应，插件会反复点精确短文案直到账密框出现。
-2. 再点「使用 邮箱或用户名 登录」（无第三方 OAuth 时这一步可能已展开）。
-3. 协议开关开启时必须勾选「我已阅读并同意」/ 英文等价文案，否则前端 toast 并直接 return，不发请求。
-4. 点「继续」/「Continue」后前端先打 recaptcha（若 `recaptcha_check=true`），再 `POST /api/user/login?recaptcha=...`。
-5. 成功：`localStorage.user = JSON.stringify(data)`，跳转 `/console`。
-6. `data.require_2fa` 为真时出 2FA 弹窗，改走 `POST /api/user/login/2fa`。当前配置账号未观察到 2FA；插件遇 2FA 明确失败，不盲重试。
+真正卡点（已确认）：协议 checkbox 是 Semi Design 组件，原生 `input[type="checkbox"]` 上盖了一层
+`span.semi-checkbox-inner-display` 拦截指针事件，普通 `click()` / `.check()` 会被挡住超时，
+导致 Continue 一直 `disabled`、登录超时。**必须对 input 用 `force=True` 点击**才能触发 React onChange。
 
-`GET /api/status` 的 `recaptcha_check` 可能随站点配置开关：2026-08-13 早间为 `true`（纯 REST 报 token 为空），同日下午再测为 `false`。插件始终走浏览器登录，不依赖该开关。
+实测可用的登录序列：
+1. 打开 `/login`，等 networkidle + 约 2.5s 渲染。
+2. `input[type="checkbox"]` 用 `click(force=True)` 勾上协议。
+3. `input[name="username"]` / `input[name="password"]` 用真实键盘事件逐个输入。
+4. 点 `button.login-btn-primary`（Continue）。
+5. 成功：跳 `/console`，`localStorage.user = JSON.stringify(data)`，`Set-Cookie: session=<token>`。
+   从 `localStorage.user.id` 抽 `New-Api-User`，从 cookie 抽 `session`。
 
-### 成功响应（已确认）
+登录接口响应体被加密（已确认）：`POST /api/user/login` 返回 `{"data": "<base64 加密串>"}`，
+无明文 success/message。浏览器内部自行解密处理，插件不解析该响应，只抽 cookie + localStorage。
+**但签到相关接口返回明文**：`GET /api/user/checkin`、`GET /api/user/self` 用 session + `New-Api-User`
+请求均返回未加密 JSON（已实测），故签到/余额仍走 REST。
 
-HTTP 200：
+2FA：`data.require_2fa` 为真时出弹窗走 `POST /api/user/login/2fa`。当前配置账号未观察到；插件遇 2FA 文案明确失败，不盲重试。
+
+`GET /api/status` 的 `recaptcha_check` 随站点配置开关：2026-08-13 早间 `true`（纯 REST 报 token 为空），
+下午实测 `false`（登录 POST 不带 recaptcha 参数）。无论开关，浏览器登录都由前端自动处理 recaptcha，插件不依赖该开关。
+
+### 成功响应（部分确认）
+
+HTTP 响应体现已加密（见上），但登录成功后前端写入 `localStorage.user` 的是明文用户对象，
+插件从这里抽 `id`。结构与早期明文响应一致：
 
 ```json
 {
-  "success": true,
-  "message": "",
-  "data": {
-    "id": "<22 字符字符串，用作 New-Api-User 头>",
-    "username": "...", "display_name": "...",
-    "role": ..., "status": ..., "group": ...,
-    "public_id": "...", "country": "...", "country_code": "...", "connect_tx": ...
-  }
+  "id": "<24 字符字符串，用作 New-Api-User 头>",
+  "username": "...", "display_name": "...",
+  "role": "...", "status": "...", "group": "..."
 }
 ```
 
-失败响应：`{"success": false, "message": "<错误文案>"}`（HTTP 仍为 200）。
-响应体无 `access_token`（实测为 null），鉴权只走 session Cookie。
+失败文案（密码错误、2FA 等）由前端解密后以 toast 呈现；无头环境插件改为读页面文本匹配
+`用户名或密码错误 / 两步验证` 等关键词判断。鉴权只走 session Cookie，无 `access_token`。
 
 ### 待验证
 
-- 无头浏览器点完 Sign in 后 recaptcha v3 评分是否稳定过关（`recaptcha_check` 现为 false 时不强制）。
-- 浏览器抽出的 `session` Cookie 直接塞进 httpx `Cookie` 头，签到/余额接口是否一律接受。
-- `browser_fingerprint` 缺省时服务端是否拒绝。
-- 站点语言是否可在无头环境强制中文，避免每次都要走英文入口。
+- recaptcha v3 开关翻回 `true` 时，无头浏览器评分是否稳定过关（当前为 `false`，登录不带 token）。
 
 ## 查询签到状态（已确认）
 

@@ -28,10 +28,14 @@ import httpx
 __plugin__ = {
     "name": "JUAI 自动签到",
     "id": "juai_checkin",
-    "version": "1.3.4",
+    "version": "1.4.0",
     "author": "Yy",
     "description": "每日自动签到 juai 平台（多账号）：浏览器过 recaptcha 登录并缓存 30 天 session，签到仍走 REST。",
     "changelog": (
+        "v1.4.0 更新：\n"
+        "- 本地 CloakBrowser 实测调通登录：登录卡片本就在 /login，真正卡点是\n"
+        "  Semi Design 协议 checkbox 拦截普通点击导致 Continue 一直禁用。\n"
+        "  改为 force click 勾协议后正常登录并抽出 session；移除无效的 Sign in 点击逻辑\n"
         "v1.3.4 更新：\n"
         "- 首页同时有导航栏和主 CTA 两个 Sign in；不再点一次就停，"
         "改为精确短文案优先、反复点直到账密框出现\n"
@@ -295,36 +299,6 @@ def _click_first_visible(page: Any, selectors: tuple[str, ...]) -> bool:
     return False
 
 
-def _click_visible_button_text(page: Any, labels: tuple[str, ...], *, contains: bool = False) -> bool:
-    """按可见按钮/链接实际文字点击，忽略站点在「登 录」一类文案里插入的空格。"""
-    normalized_labels = {"".join(str(label).split()).lower() for label in labels}
-    try:
-        buttons = page.locator("button, a, [role='button']")
-        count = min(buttons.count(), 40)
-    except Exception:  # noqa: BLE001 - 页面切换时按未匹配处理
-        return False
-    matches = []
-    for index in range(count):
-        try:
-            candidate = buttons.nth(index)
-            if not candidate.is_visible(timeout=300):
-                continue
-            text = "".join(candidate.inner_text(timeout=1_000).split()).lower()
-            if text in normalized_labels or (contains and any(label and label in text for label in normalized_labels)):
-                matches.append((len(text), candidate))
-        except Exception:  # noqa: BLE001 - 尝试下一个按钮
-            continue
-    if not matches:
-        return False
-    # 精确短文案优先（Sign in），避免点到更长的导航/营销按钮
-    matches.sort(key=lambda item: item[0])
-    try:
-        matches[0][1].click(timeout=5_000)
-        return True
-    except Exception:  # noqa: BLE001
-        return False
-
-
 def _type_like_user(locator: Any, value: str) -> None:
     """触发真实键盘事件；React 受控表单不吃 Playwright.fill。"""
     locator.click(timeout=5_000)
@@ -377,39 +351,35 @@ def _page_user_id(page: Any) -> str:
     return ""
 
 
-def _accept_agreement(page: Any) -> None:
-    """勾选用户协议；开关开启时前端会拦下未勾选的提交。中英文文案都认。"""
-    if _click_first_visible(
-        page,
-        (
-            'input[type="checkbox"]',
-            '[role="checkbox"]',
-            'label:has-text("我已阅读并同意")',
-            'label:has-text("I have read")',
-            'label:has-text("Terms")',
-        ),
-    ):
-        return
+def _accept_agreement(page: Any) -> bool:
+    """勾选用户协议 checkbox。返回是否勾上（或本就无需勾选）。
+
+    Semi Design 的 checkbox 有一层 `semi-checkbox-inner-display` span 拦截指针事件，
+    普通 click / .check() 会被挡住超时。必须 force click 原生 input 才能触发 React onChange。
+    开关开启时前端会拦下未勾选的提交（Continue 保持 disabled）。
+    """
     try:
-        page.evaluate(
-            """() => {
-                const markers = [
-                    '我已阅读并同意', '用户协议', '隐私政策',
-                    'I have read', 'privacy policy', 'user agreement', 'Terms'
-                ];
-                const nodes = [...document.querySelectorAll('label,span,div,button')];
-                const target = nodes.find((n) => {
-                    const text = (n.innerText || '');
-                    return markers.some((m) => text.toLowerCase().includes(m.toLowerCase()));
-                });
-                if (!target) return false;
-                const box = target.querySelector('input, [role="checkbox"]') || target;
-                box.click();
-                return true;
-            }"""
+        boxes = page.locator('input[type="checkbox"]')
+        if boxes.count() == 0:
+            return True  # 站点没放协议框，视为无需勾选
+        boxes.first.click(force=True, timeout=5_000)
+        page.wait_for_timeout(400)
+        return True
+    except Exception:  # noqa: BLE001 - 兜底用 JS 直接点
+        pass
+    try:
+        return bool(
+            page.evaluate(
+                """() => {
+                    const box = document.querySelector('input[type="checkbox"]');
+                    if (!box) return true;
+                    box.click();
+                    return true;
+                }"""
+            )
         )
     except Exception:  # noqa: BLE001 - 站点未展示协议时无需处理
-        pass
+        return True
 
 
 _USERNAME_SELECTORS = (
@@ -417,10 +387,8 @@ _USERNAME_SELECTORS = (
     "#username",
     'input[placeholder*="用户名"]',
     'input[placeholder*="邮箱"]',
-    'input[placeholder*="邮箱地址"]',
     'input[placeholder*="username" i]',
     'input[placeholder*="email" i]',
-    'input[type="email"]',
     "input.semi-input",
 )
 _PASSWORD_SELECTORS = (
@@ -428,30 +396,10 @@ _PASSWORD_SELECTORS = (
     "#password",
     'input[type="password"]',
 )
-_SIGNIN_LABELS = (
-    "登录",
-    "signin",
-    "sign in",
-    "log in",
-    "login",
-)
-_EMAIL_LOGIN_LABELS = (
-    "使用邮箱或用户名登录",
-    "使用邮箱登录",
-    "邮箱或用户名",
-    "email",
-    "username",
-    "continue with email",
-    "sign in with email",
-)
-_SUBMIT_LABELS = (
-    "继续",
-    "continue",
-    "登录",
-    "signin",
-    "sign in",
-    "log in",
-    "login",
+# 登录卡片里的提交按钮（Semi Design，class 带 login-btn-primary）
+_SUBMIT_SELECTORS = (
+    "button.login-btn-primary",
+    'button[type="submit"]',
 )
 _TWO_FA_MARKERS = ("两步验证", "require_2fa", "认证器应用")
 _PASSWORD_ERROR_MARKERS = ("用户名或密码错误", "密码错误", "账号不存在", "账户不存在")
@@ -491,40 +439,6 @@ def _visible_clickables(page: Any) -> list[str]:
     return labels
 
 
-def _click_by_js_text(page: Any, labels: tuple[str, ...]) -> bool:
-    """用 DOM 文本匹配点击，避开 Playwright locator 对复合控件/空格文案的漏点。"""
-    try:
-        return bool(
-            page.evaluate(
-                """(labels) => {
-                    const wanted = labels.map((s) => s.replace(/\\s+/g, '').toLowerCase()).filter(Boolean);
-                    const nodes = [...document.querySelectorAll('a,button,[role="button"],span,div')];
-                    const scored = [];
-                    for (const node of nodes) {
-                        const text = (node.innerText || '').replace(/\\s+/g, '').toLowerCase();
-                        if (!text || text.length > 24) continue;
-                        const style = getComputedStyle(node);
-                        const rect = node.getBoundingClientRect();
-                        const visible = style.display !== 'none' && style.visibility !== 'hidden'
-                            && rect.width > 0 && rect.height > 0;
-                        if (!visible) continue;
-                        const exact = wanted.includes(text);
-                        const fuzzy = wanted.some((w) => text === w || text.includes(w));
-                        if (!exact && !fuzzy) continue;
-                        scored.push({node, text, exact, len: text.length});
-                    }
-                    scored.sort((a, b) => Number(b.exact) - Number(a.exact) || a.len - b.len);
-                    if (!scored.length) return false;
-                    scored[0].node.click();
-                    return true;
-                }""",
-                list(labels),
-            )
-        )
-    except Exception:  # noqa: BLE001
-        return False
-
-
 def _page_debug(page: Any) -> str:
     text = re.sub(r"\s+", " ", _page_text(page, timeout_ms=2_000)).strip()
     click_text = " | ".join(_visible_clickables(page)[:12])
@@ -532,42 +446,28 @@ def _page_debug(page: Any) -> str:
 
 
 def _browser_login(page: Any, email: str, password: str) -> dict[str, str]:
-    """同步浏览器动作：过 recaptcha 登录并抽出 session + user_id。"""
+    """同步浏览器动作：登录并抽出 session + user_id。
+
+    实测登录卡片直接渲染在 /login（营销文案只是同页背景，无需点 Sign in）。
+    关键：Semi Design 协议 checkbox 会拦截普通点击，必须 force click，
+    否则 Continue 一直 disabled、登录超时。recaptcha 由前端在提交时自动处理。
+    """
     if hasattr(page, "set_default_timeout"):
         page.set_default_timeout(15_000)
 
-    deadline = time.monotonic() + 40
-    username_input = None
-    while time.monotonic() < deadline:
-        username_input = _wait_for_any_visible(page, _USERNAME_SELECTORS, timeout_ms=800)
-        if username_input is not None:
-            break
-        # 无头浏览器落到英文首页：导航栏和主 CTA 都写着 Sign in。
-        # 不能点一次就锁死——第一次可能点到没反应的那个，必须反复点直到出表单。
-        clicked = _click_visible_button_text(page, _SIGNIN_LABELS) or _click_by_js_text(page, _SIGNIN_LABELS)
-        if not clicked:
-            clicked = _click_visible_button_text(page, _EMAIL_LOGIN_LABELS, contains=True) or _click_by_js_text(
-                page, _EMAIL_LOGIN_LABELS
-            )
-        page.wait_for_timeout(700 if clicked else 400)
+    username_input = _wait_for_any_visible(page, _USERNAME_SELECTORS, timeout_ms=20_000)
     if username_input is None:
         raise RuntimeError(f"登录页未找到用户名输入框，页面可能已更新；{_page_debug(page)}")
-
     password_input = _wait_for_any_visible(page, _PASSWORD_SELECTORS, timeout_ms=10_000)
     if password_input is None:
         raise RuntimeError(f"登录页未找到密码输入框，页面可能已更新；{_page_debug(page)}")
 
+    # 先勾协议再填表；force click 才能穿过 Semi 的 inner-display span
     _accept_agreement(page)
     _type_like_user(username_input, email)
     _type_like_user(password_input, password)
-    # 填完账密后再勾一次，避免 SPA 切步后把勾选状态丢掉
-    _accept_agreement(page)
 
-    submitted = _click_visible_button_text(page, ("继续", "continue", "登录", "login"))
-    if not submitted:
-        submitted = _click_visible_button_text(page, ("继续", "continue"), contains=True)
-    if not submitted:
-        submitted = _click_by_js_text(page, ("继续", "continue"))
+    submitted = _click_first_visible(page, _SUBMIT_SELECTORS)
     if not submitted:
         try:
             password_input.press("Enter")
@@ -579,16 +479,12 @@ def _browser_login(page: Any, email: str, password: str) -> dict[str, str]:
 
     wait_until = time.monotonic() + LOGIN_WAIT_SECONDS
     while time.monotonic() < wait_until:
-        text = _page_text(page, timeout_ms=2_000)
-        error = _login_error_from_text(text)
+        error = _login_error_from_text(_page_text(page, timeout_ms=2_000))
         if error:
             raise RuntimeError(error)
         user_id = _page_user_id(page)
         cookie = _session_cookie(page)
-        url = _current_url(page)
         if user_id and cookie and ("session=" in cookie):
-            return {"cookie": cookie, "user_id": user_id}
-        if "/console" in url and cookie and ("session=" in cookie) and user_id:
             return {"cookie": cookie, "user_id": user_id}
         page.wait_for_timeout(500)
 
