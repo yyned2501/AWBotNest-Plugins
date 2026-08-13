@@ -48,7 +48,7 @@
 
 `/login` 是 SPA 壳（HTML 仅约 1.6KB），控件全靠 JS 渲染。无头浏览器（CloakBrowser，fingerprint-platform=windows）实测先渲染**英文首页**，正文可见 `Home / Console / Sign in / Sign up`，并不直接出账密表单。
 
-1. 先点「Sign in」/「登录」进入登录卡。
+1. 先点「Sign in」/「登录」进入登录卡。无头实测导航栏和主 CTA **各有一个** Sign in，点一次可能没反应，插件会反复点精确短文案直到账密框出现。
 2. 再点「使用 邮箱或用户名 登录」（无第三方 OAuth 时这一步可能已展开）。
 3. 协议开关开启时必须勾选「我已阅读并同意」/ 英文等价文案，否则前端 toast 并直接 return，不发请求。
 4. 点「继续」/「Continue」后前端先打 recaptcha（若 `recaptcha_check=true`），再 `POST /api/user/login?recaptcha=...`。
