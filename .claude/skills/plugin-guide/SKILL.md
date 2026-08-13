@@ -1,6 +1,6 @@
 ---
 name: plugin-guide
-version: 3
+version: 4
 description: >-
   Use this skill whenever you write, modify, review, or debug an AWBotNest plugin.
   Single authoritative plugin-authoring skill for this repo — consolidates the platform
@@ -8,8 +8,9 @@ description: >-
   awbotnest-plugin-pitfalls skills. Covers the workflow (what to read first, local-first
   debugging, spec vs current-repo practice), the plugin contract, the full ctx interface,
   config_schema (all 12 field types), Vue mode, webhook/on_api, browser & AI,
-  requirements/deps, group isolation, multi-Bot routing, account scope, and marketplace
-  publishing. Load it for ANY task touching AWBotNest plugin code. On-demand references:
+  requirements/deps, cookie_domains/ctx.cookies, group isolation, multi-Bot routing,
+  account scope (user|bot|both|standalone), and marketplace publishing. Load it for ANY
+  task touching AWBotNest plugin code. On-demand references:
   references/pitfalls.md (common pitfalls + checklist — read when debugging),
   references/platform-api.md (remote-manage a live instance: enable/reload/config/kv/
   logs/send), references/minimal-plugin-template.py (starter plugin).
@@ -67,7 +68,7 @@ __plugin__ = {
     "name": "示例功能",            # 必填：前端显示名
     "id": "my_feature",           # 必填：必须等于文件名/目录名
     "version": "1.0.0",           # 必填
-    "scope": "user",              # 必填：user | bot | both
+    "scope": "user",              # 必填：user | bot | both | standalone
     "author": "",                 # 可选
     "description": "功能说明",     # 可选
     "changelog": "v1.0.0 初始版本\n- 功能说明",  # 可选：版本历史弹窗，多行用 \n
@@ -77,6 +78,7 @@ __plugin__ = {
     "render_mode": "vue",         # 可选：vue=自带配置界面；缺省 "schema"=自动表单
     "config_schema": { ... },     # 可选：前端据此生成配置表单
     "requirements": ["httpx>=0.27"],  # 可选：第三方依赖，启用时平台代装
+    "cookie_domains": ["example.com", "*.example.com"],  # 可选：ctx.cookies 可读的域名白名单
 }
 
 async def setup(ctx):
@@ -87,6 +89,10 @@ async def setup(ctx):
 
 async def teardown(ctx):
     """可选：释放插件自行申请的资源。ctx.on_*/ctx.schedule 注册的由平台自动清理。"""
+
+async def self_check(ctx):  # 可选：业务自检钩子（平台检查之外的业务前提）
+    """只读、快速（平台限时 15 秒），可 sync/async，返回单个 dict 或 list[dict]，
+    每项含 ok（常配 id/name/detail）。禁止在此登录、签到、发消息或改动插件数据。"""
 ```
 
 `__plugin__` 必须是**顶层纯字面量字典**——平台用 AST 静态解析读取，不执行插件代码。缺必填字段、`id` ≠ 文件名、`scope` 非法 → 前端标红禁止启用。
@@ -103,6 +109,17 @@ async def teardown(ctx):
 - 平台是**单进程热插拔**，所有插件共用一个解释器，**同一个包只能有一个版本**。冲突（已装不兼容版本）→ **拒绝启用**并报原因，绝不强行覆盖。
 - 装进 `data/plugin_deps/`（卷持久化，容器重建不丢）并加到 `sys.path` 末尾（平台自带依赖优先）。
 - **出站请求自动走平台代理**：平台导出 `HTTP(S)_PROXY`/`ALL_PROXY`，`httpx`/`requests`/`aiohttp`（默认 `trust_env=True`）自动走代理；`localhost`/`127.0.0.1` 已排除。
+
+### 3.2 cookie_domains 与 ctx.cookies（平台 Cookie）
+
+需要登录网站时，用 `ctx.cookies` 读取管理员经 CookieCloud 同步到平台的 Cookie。插件不保存 CookieCloud 的 UUID/加密密码/原始快照，也没有写入和删除权限。
+
+- `cookie_domains` **必须先声明**：列表形式，支持精确域名与 `*.example.com` 通配，最多 64 项；未声明的域名平台一律拒绝读取，插件不能枚举其它插件所需的 Cookie。
+- 读取（均 `async`；平台未启用同步/浏览器未上传时抛错，先判 `ctx.cookies.available`）：
+  - `cookie_header = await ctx.cookies.header("www.example.com", path="/account")` — 标准 `Cookie` 请求头串，适合 httpx/requests/aiohttp。
+  - `cookies = await ctx.cookies.get(domain, path="/", names=None)` — 限当前域名/路径的 Cookie 列表（可筛选名称），自动排除过期项。
+  - `browser_cookies = await ctx.cookies.playwright(domain)` — 转成 Playwright `add_cookies()` 可直接用的格式。
+- `await ctx.cookies.request_sync(domain)` — 无可用 Cookie 时在通知中心提醒管理员重新同步并返回 `False`（同插件同域名半小时限一次）；有则返回 `True`。定时任务可先调它兜底。
 
 ---
 
@@ -140,10 +157,15 @@ await ctx.bot.send(chat_id, "text")          # 本插件被平台分配的 Bot�
 await ctx.user.send(chat_id, "text")         # 用户账号（首个已连接）
 await ctx.bot.send_photo(chat_id, "url_or_path")
 bot2 = ctx.get_bot("some_bot_id")            # 高级：取指定 Bot 的发送代理（不存在回退默认）
+
+# Rich Message：Telegram 原生/普通账号自动降级兼容，避免发送失败
+await ctx.bot.send_rich(chat_id, "<h1>标题</h1><p>正文</p>")
+await ctx.user.send_rich(chat_id, "# 标题\n\n正文", format="markdown")
 ```
 
 - `ctx.user_apps`：所有已连接用户账号列表（多账号逐个操作时用）。
 - 目标账号未连接时发送方法抛 `RuntimeError`；可先判 `ctx.bot.connected` / `ctx.user.connected`。
+- `send_rich()` 统一发送 Rich Message：机器人和 Telegram Premium 用户账号走原生，普通用户账号自动降级为兼容消息；`await ctx.bot.supports_native_rich()` / `await ctx.user.supports_native_rich()` 可判断当前账号能否原生发送；`send_rich_draft()` 仅支持机器人和 Premium 用户账号。
 - **多 Bot 对插件透明**：平台在「系统设置→通知」为每个插件分配 Bot，`ctx.bot`/`ctx.notify`/`scope=bot` 的 handler 都自动走分配的那个。插件**不选择** Bot，写 `ctx.bot.send(...)` 即可。
 
 ### 4.3 通知管理员
@@ -153,13 +175,29 @@ await ctx.notify("有新订单")
 await ctx.notify("磁盘不足", level="warning")
 await ctx.notify("任务失败", level="error", category="备份")
 
+# 直接传结构化数据，平台自动推断表头生成表格
+await ctx.notify({"账号": "user@example.com", "结果": "签到成功"})
+await ctx.notify([
+    {"账号": "user-a", "结果": "成功", "积分": 120},
+    {"账号": "user-b", "结果": "失败", "积分": 0},
+])
+
+# 固定表头表格：Telegram Bot/会员账号显示原生表格，其他渠道自动转成分组文本
+await ctx.notify_table(
+    ["账号", "状态", "积分"],
+    [["账号一", "成功", 37298], ["账号二", "失败", 1260]],
+    caption="签到结果", level="success", category="每日签到", align=["left", "center", "right"],
+)
+
 @ctx.on_message(ctx.filters.text)
 async def h(client, message):
     await ctx.notify("已抢到红包", account=client)   # 多账号时标注来源账号名
 ```
 
 - `level`：`info`/`success`/`warning`/`error`；`category`：可选业务分类；`account`：传入 handler 的 `client`，平台自动标账号名。
-- 平台统一格式化并投递（优先分配给本插件的 Bot 私聊管理员，回退主账号收藏夹），同时记运行日志。
+- `format="rich"`：发送复杂富文本通知，安全白名单内的表格标签（`bordered`/`striped`/`caption`/`th`/对齐/`colspan`/`rowspan`/`b`/`i`/`mark`）与文字样式，脚本/事件属性/不支持标签会被平台移除。
+- `notify(dict/list, ...)` 适合直接交结果数据（自动推断表头）；`notify_table(headers, rows, ...)` 固定表头，默认带边框隔行底色，支持逐列对齐。现有插件提交的多账号结果/多个 `[项目] 结果`/重复「字段：内容」会被平台自动识别为表格，无法识别时按普通正文。
+- 平台统一格式化并投递（优先分配给本插件的 Bot 私聊管理员，回退主账号收藏夹），同时记运行日志。插件不要自行判断会员状态。
 - **一律走 `ctx.notify`，禁止自己拼 `ctx.bot.send` 发给 `owner_id`**。`ctx.owner_id` 是管理员 TG 数字 ID（无主账号为 0）。
 
 ### 4.4 读写配置
@@ -220,6 +258,10 @@ ctx.log.info("done"); ctx.log.warning("odd: %s", e); ctx.log.error("fail: %s", e
 
 ctx.schedule(tick, "interval", seconds=60)
 ctx.schedule(daily, "cron", hour=9, minute=0, id="每日早报")   # id 自动加 <id>:: 前缀
+
+# 定时任务内可上报进度（仅对正在执行的调度任务生效；任务外调用返回 False）
+ctx.report_progress(10, "正在读取数据")
+ctx.report_progress(70, "正在发送通知")   # 正常结束平台自动落 100%「执行完成」
 
 async def setup(ctx):
     conn = open_something()
@@ -355,6 +397,9 @@ vue 模式无平台「保存」按钮，由组件自己调 `host.saveConfig`。�
 | `user` | 用户账号 | 监听群消息、自动抢红包/抽奖 |
 | `bot` | 机器人账号 | 菜单、命令、应答 |
 | `both` | 两者 | 双端响应 |
+| `standalone` | 不挂载账号 | 定时任务、Webhook、外部接口、浏览器自动化等独立功能 |
+
+- **`standalone`**：界面显示为「独立运行」，仍可用配置、定时任务、Webhook、平台 AI、存储和 `ctx.notify`，只是不出现账号选择、`target="auto"` 也不挂载任何消息处理器。**需要监听 Telegram 消息的插件应用 `user`/`bot`/`both`，别为了隐藏账号选择用 `standalone`**。
 
 - **账号范围**：`scope=user`/`both` 默认挂到**所有**已连接用户账号；用户可在插件卡片「账号」里限定部分账号（`account_scope`）。该范围对 handler 挂载、`ctx.user`、`ctx.user_apps` **一致生效**。
 - **多 Bot**：平台为每个插件分配 Bot（`bot_choice`），对 `ctx.notify`/`ctx.bot`/`scope=bot` handler 一致生效。插件不感知、不选择。

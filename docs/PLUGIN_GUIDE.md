@@ -25,32 +25,32 @@
 
 ```python
 __plugin__ = {
-    "name": "示例功能",  # 显示名
-    "id": "my_feature",  # 必须等于文件名/目录名
+    "name": "示例功能",            # 显示名
+    "id": "my_feature",           # 必须等于文件名/目录名
     "version": "1.0.0",
     "author": "",
     "description": "功能说明",
     "changelog": "v1.0.0 初始版本\n- 实现基础功能\n- 添加配置项",  # 可选，版本更新说明
-    "icon": "",  # 可选，图标 URL；留空回退平台 logo
-    "scope": "user",  # user | bot | both
+    "icon": "",                   # 可选，图标 URL；留空回退平台 logo
+    "scope": "user",              # user | bot | both | standalone
     "default_enabled": False,
-    "config_schema": {  # 可选，前端据此生成配置表单
+    "config_schema": {            # 可选，前端据此生成配置表单
         "keyword": {"type": "string", "default": "hello", "label": "触发词"},
     },
-    "requirements": [  # 可选，第三方依赖；启用时由平台代装
+    "requirements": [             # 可选，第三方依赖；启用时由平台代装
         "httpx>=0.27",
+    ],
+    "cookie_domains": [           # 可选，只能读取这里声明的域名
+        "example.com", "*.example.com",
     ],
 }
 
-
 async def setup(ctx):
     """启用时调用，在此注册处理器与定时任务。"""
-
     @ctx.on_message(ctx.filters.text)
     async def handler(client, message):
         if ctx.config["keyword"] in (message.text or ""):
             await message.reply("matched")
-
 
 async def teardown(ctx):
     """停用时调用（可选），释放插件自行申请的资源。"""
@@ -89,16 +89,16 @@ async def teardown(ctx):
 async def h(client, message):
     await message.reply("ok")
 
-
 @ctx.on_message(ctx.filters.outgoing & ctx.filters.text, group=-10)
-async def h2(client, message): ...
+async def h2(client, message):
+    ...
 ```
 
 常用过滤器：`ctx.filters.text`、`ctx.filters.photo`、`ctx.filters.command("xxx")`、`ctx.filters.outgoing`、`ctx.filters.incoming`，支持 `&`、`|`、`~` 组合。
 
 `group` 为本插件内部多个处理器之间的相对执行优先级，数值越小越先执行。在处理器中 `raise ctx.StopPropagation` 可阻止该消息被后续处理器继续处理。
 
-`on_message` / `on_edited_message` / `on_callback` 还接受 `target` 参数，决定处理器挂载到哪类账号：`"auto"`（默认，按插件 `scope` 选择）、`"user"`、`"bot"`、`"both"`。`scope` 为 `both` 时可借此将不同处理器分别挂到用户账号或机器人账号。
+`on_message` / `on_edited_message` / `on_callback` 还接受 `target` 参数，决定处理器挂载到哪类账号：`"auto"`（默认，按插件 `scope` 选择）、`"user"`、`"bot"`、`"both"`。`scope` 为 `both` 时可借此将不同处理器分别挂到用户账号或机器人账号；`scope` 为 `standalone` 时，`auto` 不会挂载任何 Telegram 消息处理器。
 
 ### 注册编辑消息处理器
 
@@ -106,7 +106,8 @@ async def h2(client, message): ...
 
 ```python
 @ctx.on_edited_message(ctx.filters.text)
-async def on_edit(client, message): ...
+async def on_edit(client, message):
+    ...
 ```
 
 ### 注册回调处理器
@@ -123,12 +124,16 @@ async def on_click(client, callback_query):
 await ctx.bot.send(chat_id, "text")
 await ctx.user.send(chat_id, "text")
 await ctx.bot.send_photo(chat_id, "url_or_path")
+await ctx.bot.send_rich(chat_id, "<h1>标题</h1><p>正文</p>")
+await ctx.user.send_rich(chat_id, "# 标题\n\n正文", format="markdown")
 ```
 
 - `ctx.bot`：机器人账号发送代理。
 - `ctx.user`：用户账号发送代理（取首个已连接）。
 - `ctx.user_apps`：已连接用户账号的列表，多账号插件需逐个操作时使用。
 - 目标账号未连接时，对应代理的发送方法抛 `RuntimeError`；可先判 `ctx.bot.connected` / `ctx.user.connected`。
+- `send_rich()` 统一发送 Rich Message：机器人和 Telegram Premium 用户账号使用原生 Rich Message，普通用户账号自动降级为兼容消息，避免发送失败。
+- `await ctx.bot.supports_native_rich()` / `await ctx.user.supports_native_rich()` 可检查当前账号能否原生发送；`send_rich_draft()` 仅支持机器人和 Telegram Premium 用户账号。
 
 > **多 Bot**：平台可配置多个 Bot，并在「系统设置 → 通知」为每个插件指定用哪个 Bot（默认=默认 Bot）。这对插件是**透明**的——`ctx.bot`、`ctx.notify`、`scope=bot` 的 handler 会自动走平台为本插件分配的 Bot，插件代码无需改动、也不要自己选 Bot。
 
@@ -139,13 +144,13 @@ await ctx.bot.send_photo(chat_id, "url_or_path")
 ```python
 import httpx
 
-
 async def get_chat_name(chat_id):
     """通过 chat_id 获取群组/频道/私聊的名称"""
     async with httpx.AsyncClient() as client:
         # 平台 API，管理员登录态下可访问
         resp = await client.get(
-            f"http://localhost:18001/api/chats/{chat_id}", headers={"Authorization": f"Bearer {获取管理员令牌}"}
+            f"http://localhost:18001/api/chats/{chat_id}",
+            headers={"Authorization": f"Bearer {获取管理员令牌}"}
         )
         if resp.status_code == 200:
             data = resp.json()
@@ -164,15 +169,34 @@ async def get_chat_name(chat_id):
 - 查询失败时应有回退方案（如直接显示 ID）
 - 可以缓存结果避免重复查询
 
-### 通知平台管理员
+### 通知管理员
 
-监控、定时、告警类插件需向平台管理员推送时，调用 `ctx.notify` 提交给平台。平台负责分类、附加插件名与级别标签、统一格式与投递，插件无需关心收件人与格式。
+监控、定时、告警类插件需向管理员推送时，调用 `ctx.notify` 提交给平台。平台负责分类、附加插件名与级别标签、统一格式与投递，插件无需关心收件人与格式。
 
 ```python
 await ctx.notify("有新订单")
 await ctx.notify("磁盘空间不足", level="warning")
 await ctx.notify("任务失败", level="error", category="备份")
 
+# 直接传结构化数据，平台自动生成表格
+await ctx.notify({"账号": "user@example.com", "结果": "签到成功"})
+await ctx.notify([
+    {"账号": "user-a", "结果": "成功", "积分": 120},
+    {"账号": "user-b", "结果": "失败", "积分": 0},
+])
+
+# 结构化表格：Telegram Bot/会员账号显示原生表格，其他渠道自动转成分组文本
+await ctx.notify_table(
+    ["账号", "状态", "积分"],
+    [
+        ["账号一", "成功", 37298],
+        ["账号二", "失败", 1260],
+    ],
+    caption="签到结果",
+    level="success",
+    category="每日签到",
+    align=["left", "center", "right"],
+)
 
 @ctx.on_message(ctx.filters.text)
 async def h(client, message):
@@ -182,9 +206,33 @@ async def h(client, message):
 - `level`：`info` / `success` / `warning` / `error`，平台按级别加标签。
 - `category`：可选业务分类（如「订单」「签到」），显示于标签中。
 - `account`：多账号场景下传入处理器收到的 `client`，平台自动标注来源账号名。
+- `format="rich"`：发送复杂富文本通知，可使用安全白名单内的表格标签和文字样式。
+- `notify(dict/list, ...)`：适合直接提交现有结果数据，平台会自动推断表头并生成表格。
+- `notify_table(headers, rows, ...)`：需要固定表头时使用，默认带边框和隔行底色，支持每列对齐。
 - 平台优先经 Bot 私聊管理员（需管理员已 `/start` 过 Bot），不可用时回退至主账号收藏夹；每条通知同时写入运行日志。
 - 具体走哪个 Bot 由平台按插件分配（见上「多 Bot」），插件无需关心。
+- Telegram Bot 和 Premium 用户账号使用原生 Rich Message；普通用户账号、企业微信和 Bark 会由平台自动转换成清晰的兼容文本，插件不要自行判断会员状态。
+- 现有插件提交的多账号结果、多个 `[项目] 结果` 或重复的“字段：内容”明细，会由平台自动识别为表格；无法可靠识别时仍按普通正文显示。
 - 推送通知一律走 `ctx.notify`，不要自行调用 `ctx.bot.send` 实现。
+
+复杂表格可直接提交 Rich Message HTML：
+
+```python
+await ctx.notify(
+    """
+    <table bordered striped>
+      <caption>任务统计</caption>
+      <tr><th>任务</th><th align="right">数量</th></tr>
+      <tr><td><b>已完成</b></td><td align="right">20</td></tr>
+    </table>
+    """,
+    format="rich",
+)
+```
+
+允许的表格能力包括 `bordered`、`striped`、`caption`、`th`、水平/垂直对齐、
+`colspan`、`rowspan`，以及单元格内的 `b`、`i`、`mark`。平台会移除脚本、事件属性和
+不支持的标签，避免通知内容影响客户端安全。
 
 若需管理员的 Telegram 数字 ID（如直接发送至特定会话），用 `ctx.owner_id`（无主账号时为 `0`）。
 
@@ -230,7 +278,7 @@ async def setup(ctx):
 ```python
 @ctx.on_message(ctx.filters.photo)
 async def h(client, message):
-    path = await ctx.download(message, subdir="imgs")  # data/plugin_data/<id>/imgs/xxx
+    path = await ctx.download(message, subdir="imgs")   # data/plugin_data/<id>/imgs/xxx
     text = await ocr(path)
 ```
 
@@ -244,13 +292,10 @@ async def h(client, message):
 # 取渲染后的 HTML 源码
 html = await ctx.browser.page_source("https://example.com", timeout=60)
 
-
 # 需要交互时，传一个同步 action(page)，在浏览器线程里执行、返回结果
 def grab(page):
     page.click("#more")
     return page.inner_text("#list")
-
-
 data = await ctx.browser.run("https://example.com", grab, headless=True)
 ```
 
@@ -259,6 +304,42 @@ data = await ctx.browser.run("https://example.com", grab, headless=True)
 - `ctx.browser.run` 的 `action` 是**同步函数**，收到同步 `page` 对象（`goto`/`click`/`fill`/`content`/`inner_text`/`screenshot` 等），页面用完平台自动关闭。
 - `ctx.browser.engine` 返回当前引擎名（`"cloakbrowser"` / `"playwright"` / `None`）。
 - 为减小镜像体积，浏览器内核不随镜像发布，也不在启动时下载：**插件首次调用 `ctx.browser` 时**才下载到 `data/browser_cache`（随卷持久化，容器重建不必重下）。所以首次调用会多花一次下载时间，之后就快了；不用浏览器的部署零开销。出站默认走平台代理。
+
+### 平台 Cookie
+
+需要登录网站时，优先使用 `ctx.cookies` 读取管理员通过 CookieCloud 同步到平台的 Cookie。插件不保存 CookieCloud 的 UUID、加密密码或原始快照，也没有写入和删除权限。
+
+先在 `__plugin__` 中声明插件需要访问的域名：
+
+```python
+"cookie_domains": ["example.com", "*.example.com"],
+```
+
+然后按需读取：
+
+```python
+if ctx.cookies.available:
+    # 适合 httpx、requests、aiohttp 等 HTTP 客户端
+    cookie_header = await ctx.cookies.header("www.example.com", path="/account")
+
+    # 返回当前域名和路径可用的 Cookie 列表，不包含其它域名
+    cookies = await ctx.cookies.get("www.example.com")
+
+    # 转成 Playwright add_cookies() 可直接使用的格式
+    browser_cookies = await ctx.cookies.playwright("www.example.com")
+
+# 平台没有该网站的 Cookie 时，提醒管理员在本地浏览器登录并同步
+if not await ctx.cookies.request_sync("www.example.com"):
+    return
+```
+
+- `cookie_domains` 必须是列表，最多声明 64 项；支持精确域名和 `*.example.com` 通配形式。
+- 未声明的域名会被平台拒绝，插件不能枚举或读取其它插件所需的 Cookie。
+- `get(domain, path="/", names=None)` 可按路径和名称筛选，并自动排除过期或不匹配域名的 Cookie。
+- `header(...)` 返回标准 `Cookie` 请求头字符串；`playwright(...)` 返回浏览器 Cookie 列表。
+- 三个读取方法都是 `async`。平台未启用同步或浏览器尚未上传时，读取会抛出错误；调用前可先判断 `ctx.cookies.available`。
+- `request_sync(domain)` 会先检查该域名是否已有可用 Cookie：有则返回 `True`；没有则在通知中心提醒管理员同步并返回 `False`。同一插件和域名半小时内只提醒一次，插件可在下次定时执行时重新读取。
+- 管理员在「系统设置 → Cookie 同步」管理浏览器连接和数据，插件无需提供 CookieCloud 配置项。
 
 ### 平台 AI
 
@@ -307,7 +388,7 @@ ctx.kv.keys()
 `ctx.kv` 仅存键值。存储实际文件使用 `ctx.data_dir`，为本插件独享的可写目录（`Path`，首次访问自动创建）：
 
 ```python
-p = ctx.data_dir / "avatars" / "a.jpg"  # data/plugin_data/<id>/avatars/a.jpg
+p = ctx.data_dir / "avatars" / "a.jpg"   # data/plugin_data/<id>/avatars/a.jpg
 p.parent.mkdir(parents=True, exist_ok=True)
 p.write_bytes(img_bytes)
 ```
@@ -331,6 +412,31 @@ ctx.schedule(tick, "interval", seconds=60)
 ctx.schedule(tick, "cron", hour=3, minute=0)
 ctx.schedule(daily_report, "cron", hour=9, id="每日早报")
 ```
+
+定时任务执行时可以上报进度，平台会在「系统状态」和「定时服务」中实时显示：
+
+```python
+async def daily_report():
+    ctx.report_progress(10, "正在读取数据")
+    # ...
+    ctx.report_progress(70, "正在发送通知")
+    # 函数正常结束后平台自动标记为 100% 和“执行完成”
+```
+
+`ctx.report_progress()` 只能更新当前正在执行的定时任务；在普通消息处理器中调用会返回 `False`，不会报错。
+
+插件还可以选择提供业务自检。没有提供时，平台仍会检查插件文件、加载状态、账号和定时任务：
+
+```python
+async def self_check(ctx):
+    return [
+        {"id": "login", "name": "登录状态", "ok": True, "detail": "Cookie 有效"},
+        {"id": "config", "name": "业务配置", "ok": bool(ctx.config.get("site")),
+         "detail": "配置完整" if ctx.config.get("site") else "请先选择站点"},
+    ]
+```
+
+`self_check(ctx)` 可以是同步或异步函数，返回一个含 `ok` 的字典或字典列表。平台最多等待 15 秒，自检中不要执行签到、发送消息或修改数据。
 
 任务 `id` 自动附加 `<id>::` 前缀以归属到本插件；不传 `id` 时默认取函数名。已注册任务展示于「系统状态」页（任务名、所属插件、触发规则、下次运行时间）。
 
@@ -520,11 +626,8 @@ async def setup(ctx):
 
 ```python
 __plugin__ = {
-    "name": "我的插件",
-    "id": "my_plugin",
-    "version": "1.0.0",
-    "scope": "user",
-    "render_mode": "vue",  # ← 配置界面改由插件自带的 Vue 组件渲染
+    "name": "我的插件", "id": "my_plugin", "version": "1.0.0", "scope": "user",
+    "render_mode": "vue",     # ← 配置界面改由插件自带的 Vue 组件渲染
     # vue 模式无需 config_schema
 }
 ```
@@ -581,7 +684,7 @@ async def setup(ctx):
 
     @ctx.on_api("/save_rule", methods=["POST"])
     async def save_rule(req):
-        data = req.json or {}  # 前端 body
+        data = req.json or {}          # 前端 body
         ctx.kv.set("rules", data.get("rules", []))
         return {"ok": True}
 ```
@@ -606,6 +709,9 @@ async def setup(ctx):
 | `user` | 用户账号 | 监听群消息、自动抢红包、自动抽奖等 |
 | `bot` | 机器人账号 | 菜单、命令、面向用户应答 |
 | `both` | 两者 | 需双端响应的功能 |
+| `standalone` | 不挂载账号 | 定时任务、Webhook、外部接口、浏览器自动化等独立功能 |
+
+`standalone` 在界面中显示为“独立运行”。它仍可正常使用配置、定时任务、Webhook、平台 AI、数据存储和 `ctx.notify`，只是不会出现账号选择，也不会按 `target="auto"` 挂载 Telegram 消息处理器。需要监听 Telegram 消息的插件应使用 `user`、`bot` 或 `both`，不要为了隐藏账号选择而使用 `standalone`。
 
 ---
 

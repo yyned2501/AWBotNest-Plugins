@@ -53,6 +53,12 @@ async def handler(client, message):
 
 **发布时元数据只改了一处** — 卡片图标/版本/描述/changelog 在某些界面过期。发往 AWBotNest-Plugins 时同步 `__plugin__` 与 `manifest.json` 的重复元数据，尤其 version/icon/description/changelog。
 
+## Vue 前端类
+
+**Vue 配置页与后端默认值不一致** — 配置页显示一套字段/默认值，运行期用的是另一套。前端表单结构与后端 `DEFAULTS` 各自演进导致。修复：后端 `DEFAULTS` 保持权威、Vue 字段与之对齐、改配置后 `ctx.config.get(...)` 检查键是否被改名/删除。
+
+**改了 `frontend/src` 没重新构建 `dist`** — 源码看着更新了，装上去的 UI 还是旧行为。平台加载的是构建产物：Vue 改动后必须 `npm run build` 且提交 `frontend/dist`。
+
 ## 资源与依赖类
 
 **插件自有资源没清理** — 停用/重载后残留任务、连接、脏状态。平台只自动清理 ctx 注册的 handler/任务；自管理资源用 `ctx.add_cleanup(...)` 或在 `teardown(ctx)` 释放。
@@ -82,4 +88,5 @@ async def handler(client, message):
 - [ ] 运行状态用 `ctx.kv`/`ctx.data_dir`，自有资源有清理
 - [ ] Vue 默认值与构建产物已同步
 - [ ] 依赖已声明、兼容 3.13、未自装
+- [ ] 长时调度任务适当时 `ctx.report_progress` 报进度；有 `self_check(ctx)` 则只读、15 秒内完成
 - [ ] 发布时 `__plugin__` 与 `manifest.json` 元数据一致

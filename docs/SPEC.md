@@ -75,19 +75,21 @@ AWBotNest/
 
 ```python
 __plugin__ = {
-    "name": "举牌",  # 必填：前端显示名
-    "id": "jupai",  # 必填：必须等于文件名（去 .py）
-    "version": "1.0.0",  # 必填
-    "scope": "user",  # 必填：user | bot | both
-    "author": "AW",  # 可选
-    "description": "...",  # 可选：前端展示
+    "name": "举牌",            # 必填：前端显示名
+    "id": "jupai",             # 必填：必须等于文件名（去 .py）
+    "version": "1.0.0",        # 必填
+    "scope": "user",           # 必填：user | bot | both | standalone
+    "author": "AW",            # 可选
+    "description": "...",       # 可选：前端展示
     "changelog": "v1.0.0 初始版本\n- 功能说明",  # 可选：版本更新说明
-    "icon": "",  # 可选：图标 URL，前端卡片用；空则回退平台 logo
+    "icon": "",                # 可选：图标 URL，前端卡片用；空则回退平台 logo
     "default_enabled": False,  # 可选：上传后是否默认启用
-    "config_schema": {...},  # 可选：前端自动生成配置表单
-    "requirements": [  # 可选：第三方依赖(PEP 508)，启用时由平台代装
-        "httpx>=0.27",
-        "pillow>=10",
+    "config_schema": {...},    # 可选：前端自动生成配置表单
+    "requirements": [          # 可选：第三方依赖(PEP 508)，启用时由平台代装
+        "httpx>=0.27", "pillow>=10",
+    ],
+    "cookie_domains": [        # 可选：ctx.cookies 可读取的域名白名单
+        "example.com", "*.example.com",
     ],
 }
 ```
@@ -95,6 +97,7 @@ __plugin__ = {
 - 缺必填字段、`id` ≠ 文件名、`scope` 非法 → 前端标红，禁止启用。
 - `icon` 在「我的插件」与「插件市场」卡片展示；GitHub 发布时 `manifest.json` 的 `icon` 用于市场，二者保持一致。
 - `changelog` 会显示在插件卡片三点菜单的「版本历史」弹窗中，帮助用户了解版本变化。支持多行（用 `\n` 换行）。发布到 GitHub 插件仓库时，`manifest.json` 也要写入相同内容。
+- `cookie_domains` 是插件使用平台 Cookie 的域名白名单，支持精确域名与 `*.example.com`；未声明的域名一律拒绝读取。
 
 ### 3.2 `setup(ctx)`（必填）
 
@@ -103,7 +106,8 @@ __plugin__ = {
 ```python
 async def setup(ctx):
     @ctx.on_message(ctx.filters.text, group=-10)
-    async def handler(client, message): ...
+    async def handler(client, message):
+        ...
 ```
 
 ### 3.3 `teardown(ctx)`（可选）
@@ -256,9 +260,9 @@ async def setup(ctx):
 
 插件**不直接**发通知，而是提交给平台通知中心 `kernel/notifier.py`，由平台统一处理：
 
-1. 插件调 `await ctx.notify(text, level="info", category=None, account=client)` —— 只提供内容、级别、分类，以及（多账号时）触发的账号。
-2. 平台 `notifier.submit` 负责**分类与统一格式**：按 `level`（info/success/warning/error）打图标标签，前缀插件名 + 可选 `category`；**多账号场景标注账号名**（从传入的 `account` client 解析 `me.first_name`→session 名，与账号管理页一致），让管理员知道是哪个账号的消息。
-3. 平台**统一投递**给平台管理员：优先 **本插件被平台分配的 Bot**（见 §8.2 多 Bot）私聊（`MY_TGID`，需管理员 /start 过该 Bot），Bot 不可用时回退主账号「收藏夹」。
+1. 插件调 `await ctx.notify(text, level="info", category=None, account=client)` —— 只提供内容、级别、分类，以及（多账号时）触发的账号。`text` 可直接传 `dict`、`list[dict]`、二维 `list` 或普通 `list`，平台自动生成表格；也可用 `ctx.notify_table(headers, rows, ...)` 明确指定表头，复杂表格可用 `ctx.notify(..., format="rich")`。
+2. 平台 `notifier.submit` 负责**分类与统一格式**：按 `level`（info/success/warning/error）显示图标和标题，附加插件名、可选 `category`；**多账号场景标注账号名**（从传入的 `account` client 解析 `me.first_name`→session 名，与账号管理页一致），让管理员知道是哪个账号的消息。Telegram Bot/Premium 用户账号发送原生 Rich Message；普通用户账号、企业微信和 Bark 自动转换为清晰的分组文本。
+3. 平台**统一投递**给管理员：优先 **本插件被平台分配的 Bot**（见 §8.2 多 Bot）私聊（`MY_TGID`，需管理员 /start 过该 Bot），Bot 不可用时回退主账号「收藏夹」。
 4. 每条通知同时记入运行日志（带插件名）与通知中心历史环形缓冲（最近 200 条）。
 
 「发给谁、什么格式、怎么投递」是平台策略，插件不实现也不绕过——禁止插件为了发通知自己拼 `ctx.bot.send` 给 `owner_id`，统一走 `ctx.notify`。
@@ -362,21 +366,27 @@ async def setup(ctx):
 | 注册回调 | `@ctx.on_callback(filter, group=0, target="auto")` |
 | 中断传播 | `raise ctx.StopPropagation`（在 handler 内主动阻止后续插件处理这条消息） |
 | Bot 发送 | `await ctx.bot.send(chat_id, text)`（`ctx.bot` = 本插件被平台分配的 Bot，未分配=默认 Bot，见 §8.2） |
+| Rich Message | `await ctx.bot.send_rich(chat_id, content)` / `await ctx.user.send_rich(...)`（机器人和会员用户原生发送，普通用户自动降级为兼容消息） |
 | 指定 Bot | `ctx.get_bot(bot_id)`（高级：取某个 Bot 的发送代理，不传/不存在回退默认 Bot） |
 | 用户发送 | `await ctx.user.send(chat_id, text)` |
 | 多账号列表 | `ctx.user_apps`（所有已连接用户账号；未连接时发送代理抛 `RuntimeError`，可判 `ctx.bot/user.connected`） |
-| 通知管理员 | `await ctx.notify(text, level="info", category=None, account=client)`（提交给平台通知中心 → 平台分类+统一格式+标注账号 → Bot 发给管理员，回退主账号收藏夹） |
+| 通知管理员 | `await ctx.notify(...)` / `await ctx.notify_table(...)`（提交给平台通知中心 → 平台分类、统一格式和渠道降级 → Bot 发给管理员，回退主账号收藏夹） |
 | 平台 AI | `ctx.ai.chat/vision/generate_image`（平台统一保管密钥、选择主/备用模型、控制插件权限与并发） |
-| 管理员 ID | `ctx.owner_id`（平台管理员 Telegram 数字 ID，无主账号为 0） |
+| 平台 Cookie | `ctx.cookies.get/header/playwright/request_sync`（只读，仅限插件在 `cookie_domains` 声明的域名；缺少 Cookie 时可提醒管理员同步） |
+| 管理员 ID | `ctx.owner_id`（管理员 Telegram 数字 ID，无主账号为 0） |
 | 配置 | `ctx.config`（dict） |
 | 键值存储 | `ctx.kv.get/set/delete/keys`（每插件私有） |
 | 可写目录 | `ctx.data_dir`（`Path`，每插件独立 `data/plugin_data/<id>/`） |
 | 日志 | `ctx.log.info/debug/warning/error`（自动带 `[插件id]` 前缀，前端日志页可见） |
 | 定时任务 | `ctx.schedule(fn, "interval", seconds=60)`（可传 `id="名称"`，自动归属本插件并显示在系统状态页） |
+| 任务进度 | `ctx.report_progress(percent, step)`（仅在当前定时任务中生效） |
+| 插件自检 | 可选 `self_check(ctx)`，返回含 `ok/name/detail` 的字典或列表；平台同时执行基础检查 |
 | Webhook | `@ctx.on_webhook`（需 `__plugin__` 声明 `"webhook": True`；入站 `…/api/v1/plugin/<id>/webhook?apikey=<密钥>`，apikey 用平台统一的 `WEBHOOK_SECRET`，处理器收 `WebhookRequest`，返回 dict/str/None） |
 | 清理回调 | `ctx.add_cleanup(fn)` |
 
 `target`: `"user"` / `"bot"` / `"both"` / `"auto"`（按插件 scope 自动选择）。
+
+`scope=standalone` 表示插件不依赖用户账号或机器人，适合定时任务、Webhook、外部接口和浏览器自动化。它仍可使用配置、存储、平台 AI、通知和调度能力；`target="auto"` 不会挂载消息处理器，前端也不显示账号选择。若插件需要监听 Telegram 消息，必须改用 `user`、`bot` 或 `both`。
 
 **group 隔离（防止互相"吃消息"）**：Pyrogram 在同一 group 内只执行第一个匹配的 handler 即跳出该组。平台为**每个插件分配独立的 group 基址**（`PluginRuntime._group_base_for`，步长 1000），`ctx.on_message/on_callback` 把插件写的 `group=` 当作「**插件内相对优先级**」平移到该区间。因此：① 不同插件监听同类消息互不抢占，都能收到；② 单个插件内部仍可用多个相对 group 排序（数值越小越先）。插件作者无需关心其它插件的 group。若插件希望"我处理后不让后续插件再处理"，在 handler 内 `raise ctx.StopPropagation`。
 
