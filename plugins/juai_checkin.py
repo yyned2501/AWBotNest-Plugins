@@ -28,10 +28,13 @@ import httpx
 __plugin__ = {
     "name": "JUAI 自动签到",
     "id": "juai_checkin",
-    "version": "1.3.1",
+    "version": "1.3.2",
     "author": "Yy",
     "description": "每日自动签到 juai 平台（多账号）：浏览器过 recaptcha 登录并缓存 30 天 session，签到仍走 REST。",
     "changelog": (
+        "v1.3.2 更新：\n"
+        "- 实测无头浏览器落到英文首页，须先点 Sign in 才进登录表单；"
+        "同时识别中英文入口/协议/提交按钮，并在点「继续」前强制勾协议\n"
         "v1.3.1 更新：\n"
         "- 浏览器登录步骤全部加短超时，避免平台默认 240 秒把一次卡顿拖成假死；"
         "登录失败带页面摘要，邮箱入口按钮支持模糊匹配\n"
@@ -287,11 +290,11 @@ def _click_first_visible(page: Any, selectors: tuple[str, ...]) -> bool:
 
 
 def _click_visible_button_text(page: Any, labels: tuple[str, ...], *, contains: bool = False) -> bool:
-    """按可见按钮实际文字点击，忽略站点在「登 录」一类文案里插入的空格。"""
+    """按可见按钮/链接实际文字点击，忽略站点在「登 录」一类文案里插入的空格。"""
     normalized_labels = {"".join(str(label).split()).lower() for label in labels}
     try:
-        buttons = page.locator("button")
-        count = min(buttons.count(), 30)
+        buttons = page.locator("button, a, [role='button']")
+        count = min(buttons.count(), 40)
     except Exception:  # noqa: BLE001 - 页面切换时按未匹配处理
         return False
     matches = []
@@ -367,21 +370,30 @@ def _page_user_id(page: Any) -> str:
 
 
 def _accept_agreement(page: Any) -> None:
-    """勾选「我已阅读并同意」；协议开关开启时前端会拦下未勾选的提交。"""
+    """勾选用户协议；开关开启时前端会拦下未勾选的提交。中英文文案都认。"""
     if _click_first_visible(
         page,
         (
             'input[type="checkbox"]',
             '[role="checkbox"]',
             'label:has-text("我已阅读并同意")',
+            'label:has-text("I have read")',
+            'label:has-text("Terms")',
         ),
     ):
         return
     try:
         page.evaluate(
             """() => {
+                const markers = [
+                    '我已阅读并同意', '用户协议', '隐私政策',
+                    'I have read', 'privacy policy', 'user agreement', 'Terms'
+                ];
                 const nodes = [...document.querySelectorAll('label,span,div,button')];
-                const target = nodes.find((n) => (n.innerText || '').includes('我已阅读并同意'));
+                const target = nodes.find((n) => {
+                    const text = (n.innerText || '');
+                    return markers.some((m) => text.toLowerCase().includes(m.toLowerCase()));
+                });
                 if (!target) return false;
                 const box = target.querySelector('input, [role="checkbox"]') || target;
                 box.click();
@@ -408,11 +420,30 @@ _PASSWORD_SELECTORS = (
     "#password",
     'input[type="password"]',
 )
+_SIGNIN_LABELS = (
+    "登录",
+    "signin",
+    "sign in",
+    "log in",
+    "login",
+)
 _EMAIL_LOGIN_LABELS = (
     "使用邮箱或用户名登录",
     "使用邮箱登录",
     "邮箱或用户名",
     "email",
+    "username",
+    "continue with email",
+    "sign in with email",
+)
+_SUBMIT_LABELS = (
+    "继续",
+    "continue",
+    "登录",
+    "signin",
+    "sign in",
+    "log in",
+    "login",
 )
 _TWO_FA_MARKERS = ("两步验证", "require_2fa", "认证器应用")
 _PASSWORD_ERROR_MARKERS = ("用户名或密码错误", "密码错误", "账号不存在", "账户不存在")
@@ -426,7 +457,7 @@ def _login_error_from_text(text: str) -> str | None:
         return "用户名或密码错误"
     if any(marker in text for marker in _RECAPTCHA_ERROR_MARKERS):
         return "reCAPTCHA 校验失败，浏览器未能完成行为验证"
-    if "请先阅读并同意" in text:
+    if "请先阅读并同意" in text or "please read and agree" in text.casefold():
         return "未勾选用户协议，登录被前端拦截"
     return None
 
@@ -441,13 +472,20 @@ def _browser_login(page: Any, email: str, password: str) -> dict[str, str]:
     if hasattr(page, "set_default_timeout"):
         page.set_default_timeout(15_000)
 
-    deadline = time.monotonic() + 30
+    deadline = time.monotonic() + 40
     username_input = None
+    clicked_signin = False
     while time.monotonic() < deadline:
         username_input = _wait_for_any_visible(page, _USERNAME_SELECTORS, timeout_ms=800)
         if username_input is not None:
             break
+        # 无头浏览器实测先落到英文首页，必须点 Sign in 才出登录表单
+        if not clicked_signin and _click_visible_button_text(page, _SIGNIN_LABELS, contains=True):
+            clicked_signin = True
+            page.wait_for_timeout(600)
+            continue
         if _click_visible_button_text(page, _EMAIL_LOGIN_LABELS, contains=True):
+            page.wait_for_timeout(400)
             continue
         page.wait_for_timeout(400)
     if username_input is None:
@@ -460,8 +498,12 @@ def _browser_login(page: Any, email: str, password: str) -> dict[str, str]:
     _accept_agreement(page)
     _type_like_user(username_input, email)
     _type_like_user(password_input, password)
+    # 填完账密后再勾一次，避免 SPA 切步后把勾选状态丢掉
+    _accept_agreement(page)
 
-    submitted = _click_visible_button_text(page, ("继续", "Continue", "登录", "Login"))
+    submitted = _click_visible_button_text(page, ("继续", "continue", "登录", "login"))
+    if not submitted:
+        submitted = _click_visible_button_text(page, ("继续", "continue"), contains=True)
     if not submitted:
         try:
             password_input.press("Enter")
