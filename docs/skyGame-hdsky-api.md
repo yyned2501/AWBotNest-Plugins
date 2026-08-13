@@ -89,7 +89,10 @@
 - **比赛字段（competitions，2026-08-08 实测确认）**：`horse.competitions` 含 `official`（官方赛）与 `match`（玩家养马赛，Horse2）两类。
   - `official`：`date/status/signupOpen/settled/minEntrants/entrantCount/entrants[]/joined/eligibility{canRace,detail}/rewardPlan[]/yesterday`。报名动作 `official_join`，退出 `official_leave`，每日免费一次。
   - `match`：`active`（是否进行中/报名中）、`canStart`（本账号能否开房）、`limits{minAmount,maxAmount}`（100–10000）、`history[]`（历史结算：roundId/amount/host/cancelled/winner/ranking/selfDelta）、`active` 时含 `roundId/host/amount/closeAtMs/entrants[]/maxEntrants/actions[]/joined`。**加入条件 = `active && "join" in actions && !joined`**；加入请求体仅 `{action: "join", requestKey}`（报名额取服务端 `match.amount`，无需传 amount）；开房动作 `start` 才需 `amount`（在 limits 范围内）。加入有银元成本（报名额，落败扣除），前端确认文案「报名额为 X 银元，落败会扣除报名额」。
-- **喂食与冷却（2026-08-08 用户确认 + 实测）**：普通喂食（weed/fine）与仙草（divine）**独立计数、独立冷却**——`profile.daily_feed_count`（普通喂食，与 `stats.feedCountToday/feedMax` 对应）与 `profile.daily_divine_feed_count`（仙草）分开。喂食撞冷却时服务端返回「刚刚吃过了 xx分钟后再喂」（`result.code=="cooldown"` + `remainMs`），插件按 `remainMs` 退避不重复尝试；精草冷却中仍可喂仙草补体力。
+- **喂食与冷却（2026-08-08 用户确认 + 2026-08-13 实测补全）**：普通喂食（weed/fine）与仙草（divine）**独立计数、独立冷却**——`profile.daily_feed_count`（普通喂食，与 `stats.feedCountToday/feedMax` 对应，每日 5 次）与 `profile.daily_divine_feed_count`（仙草，每日 3 次，服务端文案「今日仙草喂养：3 / 3」已确认）分开。喂食撞冷却时服务端返回「刚刚吃过了 xx分钟后再喂」（`result.code=="cooldown"` + `remainMs`），插件按 `remainMs` 退避不重复尝试；精草冷却中仍可喂仙草补体力。
+- **草料目录 `horse.feeds`（2026-08-13 GET /api/portal/horse 已确认）**：`weed` 杂草 100 银元 +6 体力 / +12 饱腹；`fine` 精草 300 银元 +18 体力 / +30 饱腹；`divine` 仙草 1000 银元 +50 体力 / +60 饱腹。
+- **喂食成功响应（2026-08-13 POST feed divine 已确认）**：`result` 含 `ok/amount/feedType/feedLabel/expGain/progressGain/profile/message`。`message` 是十余行说明（规则/战绩/改名费），不适合原样推送；插件用结构化字段组表。`profile.last_feed_at_ms` 只在普通喂食时更新（当日 3 次仙草后该字段仍停在前一日普通喂食时间）。
+- **养护优先级（v1.16.24）**：玩家赛体力不够时先喂配置草料，配置草料不够达标 / 额度用完 / 冷却中才喂仙草；日常按每日普通额度喂配置草料，不再要求饱腹低于阈值（阈值只在草料选仙草时作下限）。线上 2026-08-13 全天 `feedCountToday=0`、`satiety` 80–94，旧逻辑因阈值挡住精草，只在参赛时喂仙草。
 
 ## 待现场验证
 

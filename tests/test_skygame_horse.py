@@ -8,7 +8,7 @@ import json
 
 import pytest
 
-from plugins.skyGame.games.horse import _care_once
+from plugins.skyGame.games.horse import _care_once, _format_feed_table
 
 
 def _now_ms() -> int:
@@ -35,6 +35,8 @@ def _horse_state(
     satiety: int = 100,
     stamina: int = 100,
     match: dict[str, object] | None = None,
+    feed_today: int = 5,
+    daily_divine: int = 0,
 ) -> dict[str, object]:
     """构造可触发遛马分支的门户状态（饱腹度拉满以跳过喂食分支）。"""
     state: dict[str, object] = {
@@ -44,8 +46,15 @@ def _horse_state(
                 "satiety": satiety,
                 "stamina": stamina,
                 "reviveCost": 300000,
+                "daily_feed_count": feed_today,
+                "daily_divine_feed_count": daily_divine,
             },
-            "stats": {"walkCountToday": walk_count, "walkMax": walk_max, "feedCountToday": 1, "feedMax": 5},
+            "stats": {
+                "walkCountToday": walk_count,
+                "walkMax": walk_max,
+                "feedCountToday": feed_today,
+                "feedMax": 5,
+            },
             "balance": 100000,
         }
     }
@@ -112,10 +121,22 @@ class _FakeCtx:
     def __init__(self) -> None:
         self.kv = _FakeKV()
         self.log = _FakeLog()
-        self.notifications: list[tuple[str, str]] = []
+        self.notifications: list[tuple[object, str]] = []
+        self.tables: list[tuple[list[str], list[list[object]], dict[str, object]]] = []
 
-    async def notify(self, message: str, *args: object, **kwargs: object) -> None:
+    async def notify(self, message: object, *args: object, **kwargs: object) -> None:
         self.notifications.append((message, str(kwargs.get("level", "info"))))
+
+    async def notify_table(
+        self,
+        headers: list[str],
+        rows: list[list[object]],
+        *args: object,
+        **kwargs: object,
+    ) -> None:
+        self.tables.append((list(headers), [list(row) for row in rows], dict(kwargs)))
+        table = ("table", list(headers), [list(row) for row in rows])
+        self.notifications.append((table, str(kwargs.get("level", "info"))))
 
 
 class _FakeClient:
@@ -279,32 +300,90 @@ async def test_match_race_joins_when_stamina_enough() -> None:
 
 
 @pytest.mark.asyncio
-async def test_match_race_feeds_divine_when_stamina_low() -> None:
-    # 正向：玩家赛可加入但体力不足（12 < 参赛最低 30）→ 先喂仙草补体力，不 join
+async def test_match_race_feeds_configured_grass_before_divine() -> None:
+    # 正向：玩家赛可加入但体力不足（20 < 30），精草还能喂且 +18 就能达标 → 先喂精草，不直接仙草
     ctx = _FakeCtx()
-    action = {"ok": True, "result": {"ok": True, "message": "仙草喂养成功"}}
-    client = _FakeClient(_horse_state(stamina=12, match=_active_match()), action)
+    action = {"ok": True, "result": {"ok": True, "feedType": "fine", "feedLabel": "精草", "amount": 300, "expGain": 8}}
+    client = _FakeClient(_horse_state(stamina=20, satiety=80, feed_today=0, match=_active_match()), action)
 
-    await _care_once(ctx, {}, client)
+    await _care_once(ctx, {"horse_feed_type": "fine"}, client)
+
+    assert len(client.posts) == 1
+    path, body = client.posts[0]
+    assert path == "/api/portal/horse/action"
+    assert body["action"] == "feed" and body["feedType"] == "fine"
+    assert not any("加入玩家养马赛" in msg for _, msg in ctx.log.records)
+    assert ctx.tables and ctx.tables[0][0] == ["项目", "内容"]
+    assert ["草料", "精草"] in ctx.tables[0][1]
+
+
+@pytest.mark.asyncio
+async def test_match_race_feeds_divine_when_fine_cannot_reach() -> None:
+    # 正向：体力 12，精草 +18 仍 < 30 → 才喂仙草补体力
+    ctx = _FakeCtx()
+    action = {
+        "ok": True,
+        "result": {
+            "ok": True,
+            "feedType": "divine",
+            "feedLabel": "仙草",
+            "amount": 1000,
+            "expGain": 20,
+            "progressGain": 0,
+            "profile": {
+                "horse_name": "Yy小号",
+                "level": 10,
+                "exp": 9442,
+                "stamina": 62,
+                "mood": 100,
+                "satiety": 100,
+                "daily_feed_count": 0,
+                "daily_divine_feed_count": 3,
+            },
+        },
+    }
+    client = _FakeClient(_horse_state(stamina=11, satiety=80, feed_today=0, match=_active_match()), action)
+
+    await _care_once(ctx, {"horse_feed_type": "fine"}, client)
 
     assert len(client.posts) == 1
     path, body = client.posts[0]
     assert path == "/api/portal/horse/action"
     assert body["action"] == "feed" and body["feedType"] == "divine"
-    assert not any("加入玩家养马赛" in msg for _, msg in ctx.log.records)
+    assert ctx.tables
+    headers, rows, kwargs = ctx.tables[0]
+    assert headers == ["项目", "内容"]
+    assert ["草料", "仙草"] in rows
+    assert ["体力", "62/100"] in rows
+    assert ["今日仙草", "3/3"] in rows
+    assert kwargs.get("caption") == "🐴 仙草喂养成功"
 
 
 @pytest.mark.asyncio
-async def test_match_race_divine_cooldown_skips_round() -> None:
-    # 异常路径：体力不足且仙草冷却中 → 本轮不动作（不遛马消耗体力），等待补体力
+async def test_match_race_feeds_divine_when_fine_on_cooldown() -> None:
+    # 异常路径：精草冷却中、仙草还能喂 → 退回仙草补体力
     ctx = _FakeCtx()
+    ctx.kv.set("horse:feed_cooldown_until", _now_ms() + 600000)
+    action = {"ok": True, "result": {"ok": True, "feedType": "divine", "feedLabel": "仙草", "amount": 1000}}
+    client = _FakeClient(_horse_state(stamina=20, satiety=80, feed_today=0, match=_active_match()), action)
+
+    await _care_once(ctx, {"horse_feed_type": "fine"}, client)
+
+    assert client.posts and client.posts[0][1]["feedType"] == "divine"
+
+
+@pytest.mark.asyncio
+async def test_match_race_skips_when_both_feeds_blocked() -> None:
+    # 异常路径：体力不足且精草/仙草都冷却 → 本轮不动作，不遛马消耗体力
+    ctx = _FakeCtx()
+    ctx.kv.set("horse:feed_cooldown_until", _now_ms() + 600000)
     ctx.kv.set("horse:divine_cooldown_until", _now_ms() + 600000)
     client = _FakeClient(_horse_state(stamina=12, match=_active_match()), {"ok": True, "result": {"ok": True}})
 
     await _care_once(ctx, {}, client)
 
     assert client.posts == []
-    assert any("仙草冷却中" in msg for _, msg in ctx.log.records)
+    assert any("等待补体力" in msg for _, msg in ctx.log.records)
 
 
 @pytest.mark.asyncio
@@ -315,13 +394,15 @@ async def test_match_race_divine_cooldown_response_stores_backoff() -> None:
         "ok": True,
         "result": {"ok": False, "code": "cooldown", "remainMs": 1800000, "message": "刚刚吃过了，30分钟 后再喂。"},
     }
-    client = _FakeClient(_horse_state(stamina=12, match=_active_match()), action)
+    # 精草额度用完，才会走到仙草
+    client = _FakeClient(_horse_state(stamina=12, feed_today=5, match=_active_match()), action)
     before = _now_ms()
 
     await _care_once(ctx, {}, client)
 
     assert ctx.kv.get("horse:divine_cooldown_until") == pytest.approx(before + 1800000, abs=5000)
     assert ctx.notifications == []  # 冷却静默，不打扰
+    assert ctx.tables == []
 
 
 @pytest.mark.asyncio
@@ -350,7 +431,7 @@ async def test_match_race_skips_when_joined_or_inactive() -> None:
 async def test_feed_cooldown_response_stores_backoff() -> None:
     # 正向：喂食撞冷却（「刚刚吃过了 xx分钟后再喂」）→ 记 remainMs 退避，静默不打扰
     ctx = _FakeCtx()
-    state = _horse_state(satiety=40)  # 饱腹 40 < 阈值 60 → 触发喂食
+    state = _horse_state(satiety=40, feed_today=1)  # 额度未用完 → 触发喂食
     action = {
         "ok": True,
         "result": {"ok": False, "code": "cooldown", "remainMs": 2700000, "message": "刚刚吃过了，45分钟 后再喂。"},
@@ -370,7 +451,7 @@ async def test_feed_in_cooldown_skips_without_posting() -> None:
     # 异常路径：喂食冷却未到 → 本轮不喂，继续做下一动作（遛马），不硬试
     ctx = _FakeCtx()
     ctx.kv.set("horse:feed_cooldown_until", _now_ms() + 600000)
-    client = _FakeClient(_horse_state(satiety=40), {"ok": True, "result": {"ok": True}})
+    client = _FakeClient(_horse_state(satiety=40, feed_today=1), {"ok": True, "result": {"ok": True}})
 
     await _care_once(ctx, {}, client)
 
@@ -384,7 +465,7 @@ async def test_feed_success_clears_cooldown() -> None:
     ctx = _FakeCtx()
     ctx.kv.set("horse:feed_cooldown_until", _now_ms() - 1000)  # 上次退避已过期
     action = {"ok": True, "result": {"ok": True, "message": "精草喂养成功"}}
-    client = _FakeClient(_horse_state(satiety=40), action)
+    client = _FakeClient(_horse_state(satiety=40, feed_today=1), action)
 
     await _care_once(ctx, {}, client)
 
@@ -399,9 +480,78 @@ async def test_feeds_share_cooldown_but_divine_is_independent() -> None:
     ctx = _FakeCtx()
     ctx.kv.set("horse:feed_cooldown_until", _now_ms() + 600000)  # 精草冷却中
     match_state = _horse_state(stamina=12, match=_active_match())  # 玩家赛体力不足
-    action = {"ok": True, "result": {"ok": True, "message": "仙草喂养成功"}}
+    action = {"ok": True, "result": {"ok": True, "feedType": "divine", "feedLabel": "仙草"}}
     client = _FakeClient(match_state, action)
 
     await _care_once(ctx, {}, client)
 
     assert client.posts and client.posts[0][1]["feedType"] == "divine"  # 精草冷却不影响仙草
+
+
+@pytest.mark.asyncio
+async def test_daily_feed_uses_quota_even_when_satiety_high() -> None:
+    # 正向：饱腹 82 高于阈值 70，但今日精草 0/5 → 仍喂精草用额度（攒体力/长期进度）
+    ctx = _FakeCtx()
+    action = {"ok": True, "result": {"ok": True, "feedType": "fine", "feedLabel": "精草", "amount": 300}}
+    client = _FakeClient(_horse_state(satiety=82, stamina=16, feed_today=0), action)
+
+    await _care_once(ctx, {"horse_feed_type": "fine", "horse_feed_threshold": 70}, client)
+
+    assert client.posts and client.posts[0][1]["feedType"] == "fine"
+    assert any("喂食 fine" in msg for _, msg in ctx.log.records)
+
+
+@pytest.mark.asyncio
+async def test_daily_feed_skips_when_quota_used() -> None:
+    # 异常路径：今日普通喂食已满 5/5，即使饱腹低也不再喂，转遛马
+    ctx = _FakeCtx()
+    client = _FakeClient(_horse_state(satiety=40, feed_today=5), {"ok": True, "result": {"ok": True}})
+
+    await _care_once(ctx, {"horse_feed_type": "fine"}, client)
+
+    assert client.posts and client.posts[0][1]["action"] == "walk"
+
+
+def test_format_feed_table_uses_structured_fields_not_server_blob() -> None:
+    # 正向：从 result 结构化字段组表，不把服务端长文案原样塞进表格
+    payload = {
+        "ok": True,
+        "result": {
+            "ok": True,
+            "amount": 1000,
+            "feedType": "divine",
+            "feedLabel": "仙草",
+            "expGain": 20,
+            "progressGain": 0,
+            "profile": {
+                "horse_name": "Yy小号",
+                "level": 10,
+                "exp": 9442,
+                "stamina": 70,
+                "mood": 100,
+                "satiety": 100,
+                "daily_feed_count": 0,
+                "daily_divine_feed_count": 3,
+            },
+            "message": "仙草成功：-1,000 银元，经验 +20，长期进度 +0\n🐴 Yy小号\n等级：Lv.10",
+        },
+    }
+    headers, rows, caption = _format_feed_table(payload, "喂仙草失败")
+    assert headers == ["项目", "内容"]
+    assert caption == "🐴 仙草喂养成功"
+    assert ["草料", "仙草"] in rows
+    assert ["花费", "1,000 银元"] in rows
+    assert ["经验", "+20"] in rows
+    assert ["体力", "70/100"] in rows
+    assert ["饱腹", "100/100"] in rows
+    assert ["今日普通喂养", "0/5"] in rows
+    assert ["今日仙草", "3/3"] in rows
+    assert all("满加成节奏" not in str(cell) for row in rows for cell in row)
+
+
+def test_format_feed_table_falls_back_when_result_empty() -> None:
+    # 异常路径：服务端没给结构化字段 → 用兜底文案，不抛
+    headers, rows, caption = _format_feed_table({"ok": False, "result": {}}, "喂食失败")
+    assert headers == ["项目", "内容"]
+    assert caption == "🐴 喂食失败"
+    assert rows == [["结果", "喂食失败"]]
