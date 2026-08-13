@@ -49,7 +49,7 @@
   },
   "juai_checkin": {
     "name": "JUAI 自动签到",
-    "version": "1.3.3",
+    "version": "1.3.4",
     "author": "Yy",
     "description": "每日自动签到 juai 平台（多账号）：浏览器过 recaptcha 登录并缓存 30 天 session，签到仍走 REST。",
     "icon": "https://www.juaiapi.com/favicon.png",

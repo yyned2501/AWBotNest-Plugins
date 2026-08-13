@@ -589,8 +589,9 @@ class _ScriptedPage:
         if "我已阅读并同意" in script or "I have read" in script:
             self.agree.checked = True
             return True
-        if "labels" in script and args:
-            wanted = {"".join(str(x).split()).lower() for x in args[0]}
+        if "wanted" in script or "labels" in script:
+            labels = args[0] if args else []
+            wanted = {"".join(str(x).split()).lower() for x in labels}
             for node in (self.email_login_btn, self.continue_btn):
                 text = "".join(node.text.split()).lower()
                 if any(w and (text == w or w in text) for w in wanted):

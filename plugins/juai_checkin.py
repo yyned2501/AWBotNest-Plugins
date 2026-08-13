@@ -28,10 +28,13 @@ import httpx
 __plugin__ = {
     "name": "JUAI 自动签到",
     "id": "juai_checkin",
-    "version": "1.3.3",
+    "version": "1.3.4",
     "author": "Yy",
     "description": "每日自动签到 juai 平台（多账号）：浏览器过 recaptcha 登录并缓存 30 天 session，签到仍走 REST。",
     "changelog": (
+        "v1.3.4 更新：\n"
+        "- 首页同时有导航栏和主 CTA 两个 Sign in；不再点一次就停，"
+        "改为精确短文案优先、反复点直到账密框出现\n"
         "v1.3.3 更新：\n"
         "- Sign in 改用 DOM 文本点击兜底，失败摘要带上可见按钮文字；"
         "1.3.2 只认 button locator，英文首页的 Sign in 链接触发不到\n"
@@ -308,13 +311,15 @@ def _click_visible_button_text(page: Any, labels: tuple[str, ...], *, contains: 
                 continue
             text = "".join(candidate.inner_text(timeout=1_000).split()).lower()
             if text in normalized_labels or (contains and any(label and label in text for label in normalized_labels)):
-                matches.append(candidate)
+                matches.append((len(text), candidate))
         except Exception:  # noqa: BLE001 - 尝试下一个按钮
             continue
     if not matches:
         return False
+    # 精确短文案优先（Sign in），避免点到更长的导航/营销按钮
+    matches.sort(key=lambda item: item[0])
     try:
-        matches[0].click(timeout=5_000)
+        matches[0][1].click(timeout=5_000)
         return True
     except Exception:  # noqa: BLE001
         return False
@@ -494,17 +499,23 @@ def _click_by_js_text(page: Any, labels: tuple[str, ...]) -> bool:
                 """(labels) => {
                     const wanted = labels.map((s) => s.replace(/\\s+/g, '').toLowerCase()).filter(Boolean);
                     const nodes = [...document.querySelectorAll('a,button,[role="button"],span,div')];
-                    const target = nodes.find((node) => {
+                    const scored = [];
+                    for (const node of nodes) {
                         const text = (node.innerText || '').replace(/\\s+/g, '').toLowerCase();
-                        if (!text || text.length > 40) return false;
+                        if (!text || text.length > 24) continue;
                         const style = getComputedStyle(node);
                         const rect = node.getBoundingClientRect();
                         const visible = style.display !== 'none' && style.visibility !== 'hidden'
                             && rect.width > 0 && rect.height > 0;
-                        return visible && wanted.some((w) => text === w || text.includes(w));
-                    });
-                    if (!target) return false;
-                    target.click();
+                        if (!visible) continue;
+                        const exact = wanted.includes(text);
+                        const fuzzy = wanted.some((w) => text === w || text.includes(w));
+                        if (!exact && !fuzzy) continue;
+                        scored.push({node, text, exact, len: text.length});
+                    }
+                    scored.sort((a, b) => Number(b.exact) - Number(a.exact) || a.len - b.len);
+                    if (!scored.length) return false;
+                    scored[0].node.click();
                     return true;
                 }""",
                 list(labels),
@@ -527,27 +538,18 @@ def _browser_login(page: Any, email: str, password: str) -> dict[str, str]:
 
     deadline = time.monotonic() + 40
     username_input = None
-    clicked_signin = False
     while time.monotonic() < deadline:
         username_input = _wait_for_any_visible(page, _USERNAME_SELECTORS, timeout_ms=800)
         if username_input is not None:
             break
-        # 无头浏览器实测先落到英文首页，必须点 Sign in 才出登录表单
-        if not clicked_signin:
-            clicked = _click_visible_button_text(page, _SIGNIN_LABELS, contains=True) or _click_by_js_text(
-                page, _SIGNIN_LABELS
+        # 无头浏览器落到英文首页：导航栏和主 CTA 都写着 Sign in。
+        # 不能点一次就锁死——第一次可能点到没反应的那个，必须反复点直到出表单。
+        clicked = _click_visible_button_text(page, _SIGNIN_LABELS) or _click_by_js_text(page, _SIGNIN_LABELS)
+        if not clicked:
+            clicked = _click_visible_button_text(page, _EMAIL_LOGIN_LABELS, contains=True) or _click_by_js_text(
+                page, _EMAIL_LOGIN_LABELS
             )
-            if clicked:
-                clicked_signin = True
-                page.wait_for_timeout(800)
-                continue
-        clicked_email = _click_visible_button_text(page, _EMAIL_LOGIN_LABELS, contains=True) or _click_by_js_text(
-            page, _EMAIL_LOGIN_LABELS
-        )
-        if clicked_email:
-            page.wait_for_timeout(400)
-            continue
-        page.wait_for_timeout(400)
+        page.wait_for_timeout(700 if clicked else 400)
     if username_input is None:
         raise RuntimeError(f"登录页未找到用户名输入框，页面可能已更新；{_page_debug(page)}")
 
