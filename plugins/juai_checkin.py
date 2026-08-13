@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from collections.abc import Iterator
 from datetime import datetime
@@ -27,10 +28,13 @@ import httpx
 __plugin__ = {
     "name": "JUAI 自动签到",
     "id": "juai_checkin",
-    "version": "1.3.0",
+    "version": "1.3.1",
     "author": "Yy",
     "description": "每日自动签到 juai 平台（多账号）：浏览器过 recaptcha 登录并缓存 30 天 session，签到仍走 REST。",
     "changelog": (
+        "v1.3.1 更新：\n"
+        "- 浏览器登录步骤全部加短超时，避免平台默认 240 秒把一次卡顿拖成假死；"
+        "登录失败带页面摘要，邮箱入口按钮支持模糊匹配\n"
         "v1.3.0 更新：\n"
         "- 登录现强制 Google reCAPTCHA v3，纯 REST 会报「reCAPTCHA token 为空」；"
         "改为用平台浏览器走登录页让前端自己打 token，抽出 session 缓存 30 天\n"
@@ -241,9 +245,9 @@ async def _fetch_balance(client: httpx.AsyncClient, user_id: str) -> int | float
     return quota if isinstance(quota, (int, float)) else None
 
 
-def _page_text(page: Any) -> str:
+def _page_text(page: Any, timeout_ms: int = 3_000) -> str:
     try:
-        return str(page.locator("body").inner_text(timeout=10_000))
+        return str(page.locator("body").inner_text(timeout=timeout_ms))
     except Exception:  # noqa: BLE001 - 兼容不同浏览器引擎
         try:
             return str(page.content())
@@ -282,7 +286,7 @@ def _click_first_visible(page: Any, selectors: tuple[str, ...]) -> bool:
     return False
 
 
-def _click_visible_button_text(page: Any, labels: tuple[str, ...]) -> bool:
+def _click_visible_button_text(page: Any, labels: tuple[str, ...], *, contains: bool = False) -> bool:
     """按可见按钮实际文字点击，忽略站点在「登 录」一类文案里插入的空格。"""
     normalized_labels = {"".join(str(label).split()).lower() for label in labels}
     try:
@@ -294,15 +298,17 @@ def _click_visible_button_text(page: Any, labels: tuple[str, ...]) -> bool:
     for index in range(count):
         try:
             candidate = buttons.nth(index)
-            text = "".join(candidate.inner_text().split()).lower()
-            if candidate.is_visible(timeout=1_000) and text in normalized_labels:
+            if not candidate.is_visible(timeout=300):
+                continue
+            text = "".join(candidate.inner_text(timeout=1_000).split()).lower()
+            if text in normalized_labels or (contains and any(label and label in text for label in normalized_labels)):
                 matches.append(candidate)
         except Exception:  # noqa: BLE001 - 尝试下一个按钮
             continue
     if not matches:
         return False
     try:
-        matches[0].click()
+        matches[0].click(timeout=5_000)
         return True
     except Exception:  # noqa: BLE001
         return False
@@ -310,9 +316,9 @@ def _click_visible_button_text(page: Any, labels: tuple[str, ...]) -> bool:
 
 def _type_like_user(locator: Any, value: str) -> None:
     """触发真实键盘事件；React 受控表单不吃 Playwright.fill。"""
-    locator.click()
+    locator.click(timeout=5_000)
     locator.press("Control+A")
-    locator.type(str(value), delay=20)
+    locator.type(str(value), delay=20, timeout=10_000)
 
 
 def _wait_for_any_visible(page: Any, selectors: tuple[str, ...], timeout_ms: int = 20_000) -> Any:
@@ -388,13 +394,25 @@ def _accept_agreement(page: Any) -> None:
 
 _USERNAME_SELECTORS = (
     'input[name="username"]',
+    "#username",
     'input[placeholder*="用户名"]',
     'input[placeholder*="邮箱"]',
     'input[placeholder*="邮箱地址"]',
+    'input[placeholder*="username" i]',
+    'input[placeholder*="email" i]',
+    'input[type="email"]',
+    "input.semi-input",
 )
 _PASSWORD_SELECTORS = (
     'input[name="password"]',
+    "#password",
     'input[type="password"]',
+)
+_EMAIL_LOGIN_LABELS = (
+    "使用邮箱或用户名登录",
+    "使用邮箱登录",
+    "邮箱或用户名",
+    "email",
 )
 _TWO_FA_MARKERS = ("两步验证", "require_2fa", "认证器应用")
 _PASSWORD_ERROR_MARKERS = ("用户名或密码错误", "密码错误", "账号不存在", "账户不存在")
@@ -413,23 +431,31 @@ def _login_error_from_text(text: str) -> str | None:
     return None
 
 
+def _page_debug(page: Any) -> str:
+    text = re.sub(r"\s+", " ", _page_text(page, timeout_ms=2_000)).strip()
+    return f"url={_current_url(page)} text={text[:180]!r}"
+
+
 def _browser_login(page: Any, email: str, password: str) -> dict[str, str]:
     """同步浏览器动作：过 recaptcha 登录并抽出 session + user_id。"""
+    if hasattr(page, "set_default_timeout"):
+        page.set_default_timeout(15_000)
+
     deadline = time.monotonic() + 30
     username_input = None
     while time.monotonic() < deadline:
         username_input = _wait_for_any_visible(page, _USERNAME_SELECTORS, timeout_ms=800)
         if username_input is not None:
             break
-        if _click_visible_button_text(page, ("使用邮箱或用户名登录", "使用邮箱登录")):
+        if _click_visible_button_text(page, _EMAIL_LOGIN_LABELS, contains=True):
             continue
         page.wait_for_timeout(400)
     if username_input is None:
-        raise RuntimeError("登录页未找到用户名输入框，页面可能已更新")
+        raise RuntimeError(f"登录页未找到用户名输入框，页面可能已更新；{_page_debug(page)}")
 
     password_input = _wait_for_any_visible(page, _PASSWORD_SELECTORS, timeout_ms=10_000)
     if password_input is None:
-        raise RuntimeError("登录页未找到密码输入框，页面可能已更新")
+        raise RuntimeError(f"登录页未找到密码输入框，页面可能已更新；{_page_debug(page)}")
 
     _accept_agreement(page)
     _type_like_user(username_input, email)
@@ -443,11 +469,11 @@ def _browser_login(page: Any, email: str, password: str) -> dict[str, str]:
         except Exception:  # noqa: BLE001
             submitted = False
     if not submitted:
-        raise RuntimeError("登录表单无法提交，网站页面可能已更新")
+        raise RuntimeError(f"登录表单无法提交，网站页面可能已更新；{_page_debug(page)}")
 
     wait_until = time.monotonic() + LOGIN_WAIT_SECONDS
     while time.monotonic() < wait_until:
-        text = _page_text(page)
+        text = _page_text(page, timeout_ms=2_000)
         error = _login_error_from_text(text)
         if error:
             raise RuntimeError(error)
@@ -456,15 +482,14 @@ def _browser_login(page: Any, email: str, password: str) -> dict[str, str]:
         url = _current_url(page)
         if user_id and cookie and ("session=" in cookie):
             return {"cookie": cookie, "user_id": user_id}
-        if "/console" in url and cookie and ("session=" in cookie):
-            if user_id:
-                return {"cookie": cookie, "user_id": user_id}
+        if "/console" in url and cookie and ("session=" in cookie) and user_id:
+            return {"cookie": cookie, "user_id": user_id}
         page.wait_for_timeout(500)
 
-    leftover = _login_error_from_text(_page_text(page))
+    leftover = _login_error_from_text(_page_text(page, timeout_ms=2_000))
     if leftover:
         raise RuntimeError(leftover)
-    raise RuntimeError("登录超时，未进入控制台")
+    raise RuntimeError(f"登录超时，未进入控制台；{_page_debug(page)}")
 
 
 async def _session_alive(client: httpx.AsyncClient, user_id: str) -> bool:

@@ -482,7 +482,7 @@ class _Node:
     def inner_text(self, timeout: int = 0) -> str:
         return self.text
 
-    def click(self) -> None:
+    def click(self, timeout: int = 0) -> None:
         self.clicks += 1
         if self.on_click:
             self.on_click()
@@ -494,7 +494,7 @@ class _Node:
     def press(self, key: str) -> None:
         self.pressed.append(key)
 
-    def type(self, value: str, delay: int = 0) -> None:
+    def type(self, value: str, delay: int = 0, timeout: int = 0) -> None:
         self.typed = value
 
 
@@ -550,6 +550,7 @@ class _ScriptedPage:
             text="使用 邮箱或用户名 登录",
             on_click=self._reveal_form,
         )
+        # 占位：验证按钮文字模糊匹配（「邮箱或用户名」是完整文案的子串）
         self.continue_btn = _Node(kind="button", text="继续", on_click=self._submit)
         self.context = self
 
