@@ -10,6 +10,7 @@ import asyncio
 import time
 from typing import Any
 
+import httpx
 import pytest
 
 from plugins.skyGame.games.hdsky import read_portal_session
@@ -176,3 +177,106 @@ async def test_renew_missing_config_returns_false() -> None:
     renewer = CookieRenewer(ctx)
     assert await renewer.renew() is False
     assert any("未配置" in msg for level_msg in ctx.log.records for msg in [level_msg[1]])
+
+
+# ── 门户网关瞬时故障重试（_portal_post）────────────────────────
+
+
+class _FakePortalResp:
+    """模拟 httpx 响应：payload 为 None 时 json() 抛错（模拟非 JSON 错误页）。"""
+
+    def __init__(self, status_code: int, payload: dict[str, Any] | None, headers: dict[str, str] | None = None) -> None:
+        self.status_code = status_code
+        self._payload = payload
+        self.headers = headers or {}
+
+    def json(self) -> dict[str, Any]:
+        if self._payload is None:
+            raise ValueError("非 JSON 响应")
+        return self._payload
+
+
+class _FakePortalHttp:
+    """按调用顺序返回预设响应；可植入异常模拟连接失败。"""
+
+    def __init__(self, results: list[_FakePortalResp | Exception]) -> None:
+        self._results = list(results)
+        self.calls = 0
+
+    async def post(
+        self, url: str, json: dict[str, Any] | None = None, headers: dict[str, str] | None = None
+    ) -> _FakePortalResp:
+        self.calls += 1
+        if not self._results:
+            raise AssertionError("请求次数超出预设响应数量")
+        item = self._results.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+
+@pytest.fixture
+def no_sleep(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """替换 asyncio.sleep 记录退避秒数，测试不真实等待。"""
+    waits: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        waits.append(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    return waits
+
+
+async def test_portal_post_retries_502_then_succeeds(no_sleep: list[float]) -> None:
+    """发送验码首撞 502 网关错误页 → 退避重试 → 第二次成功（正向）。"""
+    ctx = FakeCtx()
+    renewer = CookieRenewer(ctx)
+    http = _FakePortalHttp(
+        [
+            _FakePortalResp(502, None),  # 网关 HTML 错误页
+            _FakePortalResp(200, {"ok": True, "displayName": "测试用户"}),
+        ]
+    )
+    resp = await renewer._portal_post(http, "https://p/api/portal/auth/start", {"hdskyUid": "1"}, {}, "发送验证码")
+    assert resp.json() == {"ok": True, "displayName": "测试用户"}
+    assert http.calls == 2
+    assert no_sleep == [3.0]
+    assert any("重试" in msg for _, msg in ctx.log.records)
+
+
+async def test_portal_post_retries_connect_error_then_succeeds(no_sleep: list[float]) -> None:
+    """连接抖动（TransportError）同样退避重试后成功（正向）。"""
+    ctx = FakeCtx()
+    renewer = CookieRenewer(ctx)
+    http = _FakePortalHttp(
+        [
+            httpx.ConnectError("connection refused"),
+            _FakePortalResp(200, {"ok": True}),
+        ]
+    )
+    resp = await renewer._portal_post(http, "https://p/api/portal/auth/verify", {"hdskyUid": "1"}, {}, "验证码确认")
+    assert resp.json()["ok"] is True
+    assert http.calls == 2
+    assert any("连接失败" in msg for _, msg in ctx.log.records)
+
+
+async def test_portal_post_persistent_502_raises_after_retries(no_sleep: list[float]) -> None:
+    """持续 502 → 重试耗尽后抛 RenewError，错误信息带状态码与重试次数（异常）。"""
+    ctx = FakeCtx()
+    renewer = CookieRenewer(ctx)
+    http = _FakePortalHttp([_FakePortalResp(502, None)] * 3)
+    with pytest.raises(RenewError, match="HTTP 502.*已重试 3 次"):
+        await renewer._portal_post(http, "https://p/api/portal/auth/start", {"hdskyUid": "1"}, {}, "发送验证码")
+    assert http.calls == 3
+    assert no_sleep == [3.0, 6.0]
+
+
+async def test_portal_post_non_transient_non_json_no_retry(no_sleep: list[float]) -> None:
+    """非 5xx 的非 JSON（如 403 HTML 错误页）视为明确失败：立即抛错不重试（异常）。"""
+    ctx = FakeCtx()
+    renewer = CookieRenewer(ctx)
+    http = _FakePortalHttp([_FakePortalResp(403, None)])
+    with pytest.raises(RenewError, match="服务端返回非 JSON（HTTP 403）"):
+        await renewer._portal_post(http, "https://p/api/portal/auth/start", {"hdskyUid": "1"}, {}, "发送验证码")
+    assert http.calls == 1
+    assert no_sleep == []

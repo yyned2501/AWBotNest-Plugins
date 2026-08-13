@@ -50,6 +50,11 @@ _MIN_RENEW_INTERVAL = 600.0
 _FAIL_NOTIFY_INTERVAL = 1800.0
 # 快照内门户会话剩余不足此值则走验证码流程
 _MIN_CACHED_REMAIN = 3600.0
+# 门户网关瞬时故障（502/503/504 HTML 错误页、连接抖动）：短退避重试，
+# 避免几秒的网关抖动让整轮续期失败、游戏 401 干等下一轮防抖/看门狗
+_TRANSIENT_STATUS = {502, 503, 504}
+_PORTAL_RETRY_ATTEMPTS = 3
+_PORTAL_RETRY_BACKOFF = (3.0, 6.0)  # 第 1/2 次失败后的等待秒数
 
 _CODE_RE = re.compile(r"验证码\D{0,10}?(\d{4,8})")
 _MSG_LINK_RE = re.compile(r"messages\.php\?action=viewmessage&id=(\d+)")
@@ -207,20 +212,24 @@ class CookieRenewer:
         ):
             before = set(latest_message_ids((await self._pt_get(pt_http, f"{PT_BASE}/messages.php", pt_headers)).text))
 
-            resp = await portal_http.post(
-                f"{base}/api/portal/auth/start", json={"hdskyUid": uid}, headers=portal_headers
+            resp = await self._portal_post(
+                portal_http, f"{base}/api/portal/auth/start", {"hdskyUid": uid}, portal_headers, "发送验证码"
             )
-            data = self._json_or_raise(resp, "发送验证码")
+            data: dict[str, Any] = resp.json()
             if not data.get("ok"):
                 raise RenewError(f"发送验证码失败: {data.get('error', '未知')}")
             self._ctx.log.info("验证码已发送（用户 %s），等待站内信…", data.get("displayName", uid))
 
             code = await self._wait_for_code(pt_http, pt_headers, before)
 
-            resp = await portal_http.post(
-                f"{base}/api/portal/auth/verify", json={"hdskyUid": uid, "code": code}, headers=portal_headers
+            resp = await self._portal_post(
+                portal_http,
+                f"{base}/api/portal/auth/verify",
+                {"hdskyUid": uid, "code": code},
+                portal_headers,
+                "验证码确认",
             )
-            data = self._json_or_raise(resp, "验证码确认")
+            data = resp.json()
             if not data.get("ok"):
                 raise RenewError(f"验证码确认失败: {data.get('error', '未知')}")
             set_cookie = resp.headers.get("set-cookie", "")
@@ -235,14 +244,42 @@ class CookieRenewer:
             self._ctx.log.info("门户 Cookie 续期成功（有效期 %.0f 小时）", max_age / 3600)
             await self._notify(f"续期成功：已自动登录门户，新会话有效期 {max_age / 3600:.0f} 小时")
 
-    @staticmethod
-    def _json_or_raise(resp: httpx.Response, step: str) -> dict[str, Any]:
-        """解析 JSON 响应，非 JSON 视为服务端异常。"""
-        try:
-            data: dict[str, Any] = resp.json()
-            return data
-        except Exception as e:
-            raise RenewError(f"{step}：服务端返回非 JSON（HTTP {resp.status_code}）") from e
+    async def _portal_post(
+        self,
+        http: httpx.AsyncClient,
+        url: str,
+        payload: dict[str, str],
+        headers: dict[str, str],
+        step: str,
+    ) -> httpx.Response:
+        """POST 门户 API，网关瞬时故障（5xx 非 JSON / 连接抖动）自动退避重试。
+
+        返回 body 已校验为 JSON 的响应，业务判断（ok=false、Set-Cookie）留给调用方；
+        非瞬时的非 JSON（如 403 HTML 错误页）视为明确失败，立即抛错不重试。
+        """
+        last_error = ""
+        for attempt in range(1, _PORTAL_RETRY_ATTEMPTS + 1):
+            try:
+                resp = await http.post(url, json=payload, headers=headers)
+            except httpx.TransportError as e:
+                last_error = f"{step}：门户连接失败（{e.__class__.__name__}）"
+            else:
+                try:
+                    resp.json()
+                except Exception:
+                    if resp.status_code in _TRANSIENT_STATUS:
+                        last_error = f"{step}：门户网关故障（HTTP {resp.status_code} 非 JSON）"
+                    else:
+                        raise RenewError(f"{step}：服务端返回非 JSON（HTTP {resp.status_code}）") from None
+                else:
+                    return resp
+            if attempt < _PORTAL_RETRY_ATTEMPTS:
+                backoff = _PORTAL_RETRY_BACKOFF[attempt - 1]
+                self._ctx.log.warning(
+                    "%s，%.0f 秒后重试（%d/%d）", last_error, backoff, attempt, _PORTAL_RETRY_ATTEMPTS
+                )
+                await asyncio.sleep(backoff)
+        raise RenewError(f"{last_error}，已重试 {_PORTAL_RETRY_ATTEMPTS} 次")
 
     async def _pt_get(self, http: httpx.AsyncClient, url: str, headers: dict[str, str]) -> httpx.Response:
         """请求 PT 站页面；非 200 或不像收件箱页面视为登录态失效。"""
