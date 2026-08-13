@@ -8,7 +8,7 @@ import json
 
 import pytest
 
-from plugins.skyGame.games.horse import _care_once, _format_feed_table, _is_cooldown, _remain_ms
+from plugins.skyGame.games.horse import _care_once, _format_feed_table, _format_walk_table, _is_cooldown, _remain_ms
 
 
 def _now_ms() -> int:
@@ -194,7 +194,20 @@ async def test_walk_success_logs_once_and_clears_state() -> None:
     # 正向：真成功才打「遛马成功」，清零失败计数并清除冷却标记
     ctx = _FakeCtx()
     ctx.kv.set("horse:walk_consecutive_failures", _fail_state(2, _today()))
-    action = {"ok": True, "result": {"ok": True, "message": "遛马收获 126 银元"}}
+    action = {
+        "ok": True,
+        "result": {
+            "ok": True,
+            "expGain": 30,
+            "progressGain": 25,
+            "bonusAmount": 197,
+            "penaltyAmount": 0,
+            "eventKind": "reward",
+            "eventNote": "心情高涨，遛马时拣到了一点银元马粪。",
+            "profile": {"horse_name": "Yy小号", "stamina": 52, "mood": 96, "satiety": 69},
+        },
+        "horse": {"stats": {"walkCountToday": 4, "walkMax": 4}},
+    }
     client = _FakeClient(_horse_state(walk_count=3, walk_max=4), action)
 
     await _care_once(ctx, {}, client)
@@ -202,8 +215,14 @@ async def test_walk_success_logs_once_and_clears_state() -> None:
     assert any(level == "INFO" and "遛马成功（今日 4/4）" in msg for level, msg in ctx.log.records)
     assert ctx.kv.get("horse:walk_consecutive_failures") == _fail_state(0, _today())
     assert "horse:walk_cooldown_until" not in ctx.kv
-    assert len(ctx.notifications) == 1
-    assert ctx.notifications[0][1] == "info"
+    assert ctx.tables
+    headers, rows, kwargs = ctx.tables[0]
+    assert headers == ["项目", "内容"]
+    assert ["随机事件", "心情高涨，遛马时拣到了一点银元马粪。"] in rows
+    assert ["奖励", "+197 银元"] in rows
+    assert ["今日遛马", "4/4"] in rows
+    assert kwargs.get("caption") == "🐴 遛马成功"
+    assert ctx.notifications[0][1] == "success"
 
 
 @pytest.mark.asyncio
@@ -496,6 +515,7 @@ def test_remain_ms_falls_back_to_message_minutes() -> None:
     # 异常路径：没有 remainMs 时从文案里抠分钟数
     assert _remain_ms({"result": {"remainMs": 3127469}}) == 3127469
     assert _remain_ms({"result": {"message": "你的马刚吃过，20分钟 后再喂。"}}) == 20 * 60 * 1000
+    assert _remain_ms({"result": {"message": "你的马刚遛过，2小时58分钟 后再来。"}}) == (2 * 60 + 58) * 60 * 1000
     assert _remain_ms({"result": {}}) == 0
 
 
@@ -581,3 +601,50 @@ def test_format_feed_table_falls_back_when_result_empty() -> None:
     assert headers == ["项目", "内容"]
     assert caption == "🐴 喂食失败"
     assert rows == [["结果", "喂食失败"]]
+
+
+def test_format_walk_table_uses_structured_fields_not_server_blob() -> None:
+    # 正向：从 walk 成功响应组表，随机事件和银元奖励单独成行，不塞长文案
+    payload = {
+        "ok": True,
+        "result": {
+            "ok": True,
+            "expGain": 30,
+            "progressGain": 25,
+            "bonusAmount": 197,
+            "penaltyAmount": 0,
+            "eventKind": "reward",
+            "eventNote": "心情高涨，遛马时拣到了一点银元马粪。",
+            "profile": {
+                "horse_name": "Yy小号",
+                "level": 10,
+                "exp": 9780,
+                "stamina": 52,
+                "mood": 96,
+                "satiety": 69,
+                "daily_feed_count": 0,
+                "daily_divine_feed_count": 0,
+            },
+            "message": "遛马成功：经验 +30，长期进度 +25\n🐴 Yy小号\n随机事件：心情高涨",
+        },
+        "horse": {"stats": {"walkCountToday": 1, "walkMax": 4}},
+    }
+    headers, rows, caption = _format_walk_table(payload, "遛马失败")
+    assert headers == ["项目", "内容"]
+    assert caption == "🐴 遛马成功"
+    assert ["经验", "+30"] in rows
+    assert ["长期进度", "+25"] in rows
+    assert ["奖励", "+197 银元"] in rows
+    assert ["随机事件", "心情高涨，遛马时拣到了一点银元马粪。"] in rows
+    assert ["体力", "52/100"] in rows
+    assert ["今日遛马", "1/4"] in rows
+    assert all("满加成节奏" not in str(cell) for row in rows for cell in row)
+    assert all(row[0] != "惩罚" for row in rows)
+
+
+def test_format_walk_table_falls_back_when_result_empty() -> None:
+    # 异常路径：服务端没给结构化字段 → 用兜底文案，不抛
+    headers, rows, caption = _format_walk_table({"ok": False, "result": {}}, "遛马失败")
+    assert headers == ["项目", "内容"]
+    assert caption == "🐴 遛马失败"
+    assert rows == [["结果", "遛马失败"]]

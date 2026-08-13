@@ -23,7 +23,7 @@ from .games import hdsky_auth
 __plugin__ = {
     "name": "天空游戏",
     "id": "skyGame",
-    "version": "1.16.25",
+    "version": "1.16.26",
     "author": "Yy",
     "description": "天空系列游戏统一入口：炸金花自动参与、养马自动养护，左侧按游戏分组配置。",
     "scope": "user",
@@ -422,6 +422,9 @@ __plugin__ = {
         },
     },
     "changelog": (
+        "v1.16.26 修复：\n"
+        "- 遛马成功推送也改结构化表格：从 expGain/progressGain/bonusAmount/eventNote/profile"
+        "组「项目/内容」两列（含随机事件和银元奖励），不再把服务端十余行说明原文塞进 notify；\n"
         "v1.16.25 修复：\n"
         "- 喂食冷却识别错码：门户喂食拒绝是 feed_cooldown 不是 cooldown（2026-08-14 实测，"
         "文案「你的马刚吃过，xx分钟 后再喂」+ remainMs）。旧逻辑只认 cooldown，冷却键从不写入，"
