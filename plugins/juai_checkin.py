@@ -1,12 +1,14 @@
 # =============================================================================
 # AWBotNest 插件：JUAI 自动签到
 #
-# 每日自动签到 juai（https://www.juaiapi.com），纯 REST API 签到无需浏览器。
-# 契约见 docs/juai-api.md（已实测确认）：
-#   1. POST /api/user/login 登录，Set-Cookie: session（30 天）
-#   2. GET  /api/user/checkin 查签到状态（需 session cookie + New-Api-User 头）
-#   3. POST /api/user/checkin 执行签到；「今日已签到」错误视为已完成
-#   4. GET  /api/user/self 读剩余额度；GET /api/status 读额度单位换算
+# 每日自动签到 juai（https://www.juaiapi.com）。登录已强制 reCAPTCHA v3，
+# 用平台托管浏览器走一遍登录页让前端自己 grecaptcha.execute，抽出 30 天
+# session 写入 ctx.kv；之后签到 / 余额仍走 REST。契约见 docs/juai-api.md。
+#   1. 浏览器打开 /login → 勾协议 → 填账密 → 点「继续」过 recaptcha
+#   2. 抽出 session Cookie + localStorage.user.id（New-Api-User）
+#   3. GET  /api/user/checkin 查签到状态（需 session cookie + New-Api-User 头）
+#   4. POST /api/user/checkin 执行签到；「今日已签到」错误视为已完成
+#   5. GET  /api/user/self 读剩余额度；GET /api/status 读额度单位换算
 #      （quota_per_unit=500000，quota_display_type=USD，即 50 万额度 = $1）
 # 支持多账号列表、定时签到、手动触发、结果汇总（含每账号剩余额度）通知。
 # =============================================================================
@@ -14,6 +16,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import time
+from collections.abc import Iterator
 from datetime import datetime
 from typing import Any
 
@@ -22,10 +27,15 @@ import httpx
 __plugin__ = {
     "name": "JUAI 自动签到",
     "id": "juai_checkin",
-    "version": "1.2.0",
+    "version": "1.3.0",
     "author": "Yy",
-    "description": "每日自动签到 juai 平台（多账号），纯 REST API 签到无需浏览器。",
+    "description": "每日自动签到 juai 平台（多账号）：浏览器过 recaptcha 登录并缓存 30 天 session，签到仍走 REST。",
     "changelog": (
+        "v1.3.0 更新：\n"
+        "- 登录现强制 Google reCAPTCHA v3，纯 REST 会报「reCAPTCHA token 为空」；"
+        "改为用平台浏览器走登录页让前端自己打 token，抽出 session 缓存 30 天\n"
+        "- 缓存有效则跳过浏览器，直接 REST 签到；失效自动重登。"
+        "两步登录（邮箱入口）与用户协议勾选已覆盖；2FA 明确失败不盲重试\n"
         "v1.2.0 更新：\n"
         "- 额度按平台实际单位显示：从 /api/status 读换算系数（quota_per_unit），"
         "签到所得不再显示内部原始值（如 1183945 额度），改按美元显示（$2.37）\n"
@@ -66,7 +76,7 @@ __plugin__ = {
             "default": [],
             "label": "签到账号",
             "item_label": "账号",
-            "help": "逐个添加 juai 账号，依次签到。",
+            "help": "逐个添加 juai 账号。首次登录走平台浏览器过 recaptcha，session 缓存约 30 天，之后签到走 REST。",
             "section": "账号",
             "cols": 12,
             "order": 10,
@@ -133,9 +143,13 @@ __plugin__ = {
 }
 
 BASE_URL = "https://www.juaiapi.com"
+LOGIN_URL = f"{BASE_URL}/login"
 HISTORY_KEY = "checkin_history"
 HISTORY_LIMIT = 30
+SESSION_KEY = "account_sessions"
 REQUEST_TIMEOUT = 30.0
+BROWSER_TIMEOUT = 240
+LOGIN_WAIT_SECONDS = 45.0
 
 _run_lock: asyncio.Lock | None = None
 _background_tasks: set[asyncio.Task[dict[str, Any]]] = set()
@@ -227,23 +241,301 @@ async def _fetch_balance(client: httpx.AsyncClient, user_id: str) -> int | float
     return quota if isinstance(quota, (int, float)) else None
 
 
+def _page_text(page: Any) -> str:
+    try:
+        return str(page.locator("body").inner_text(timeout=10_000))
+    except Exception:  # noqa: BLE001 - 兼容不同浏览器引擎
+        try:
+            return str(page.content())
+        except Exception:  # noqa: BLE001
+            return ""
+
+
+def _current_url(page: Any) -> str:
+    value = getattr(page, "url", "")
+    return str(value() if callable(value) else value)
+
+
+def _matching_locators(page: Any, selector: str) -> Iterator[Any]:
+    try:
+        locator = page.locator(selector)
+        count = min(locator.count(), 20)
+    except Exception:  # noqa: BLE001 - 页面切换时 locator 可能短暂失效
+        return
+    for index in range(count):
+        try:
+            yield locator.nth(index)
+        except Exception:  # noqa: BLE001 - 尝试同一选择器的下一个元素
+            continue
+
+
+def _click_first_visible(page: Any, selectors: tuple[str, ...]) -> bool:
+    for selector in selectors:
+        for candidate in _matching_locators(page, selector):
+            try:
+                if not candidate.is_visible(timeout=1_000):
+                    continue
+                candidate.click()
+                return True
+            except Exception:  # noqa: BLE001 - 尝试下一个可见元素或选择器
+                continue
+    return False
+
+
+def _click_visible_button_text(page: Any, labels: tuple[str, ...]) -> bool:
+    """按可见按钮实际文字点击，忽略站点在「登 录」一类文案里插入的空格。"""
+    normalized_labels = {"".join(str(label).split()).lower() for label in labels}
+    try:
+        buttons = page.locator("button")
+        count = min(buttons.count(), 30)
+    except Exception:  # noqa: BLE001 - 页面切换时按未匹配处理
+        return False
+    matches = []
+    for index in range(count):
+        try:
+            candidate = buttons.nth(index)
+            text = "".join(candidate.inner_text().split()).lower()
+            if candidate.is_visible(timeout=1_000) and text in normalized_labels:
+                matches.append(candidate)
+        except Exception:  # noqa: BLE001 - 尝试下一个按钮
+            continue
+    if not matches:
+        return False
+    try:
+        matches[0].click()
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _type_like_user(locator: Any, value: str) -> None:
+    """触发真实键盘事件；React 受控表单不吃 Playwright.fill。"""
+    locator.click()
+    locator.press("Control+A")
+    locator.type(str(value), delay=20)
+
+
+def _wait_for_any_visible(page: Any, selectors: tuple[str, ...], timeout_ms: int = 20_000) -> Any:
+    """等待 SPA 渲染出任一目标控件，返回第一个可见 locator。"""
+    deadline = time.monotonic() + timeout_ms / 1000
+    while time.monotonic() < deadline:
+        for selector in selectors:
+            for candidate in _matching_locators(page, selector):
+                try:
+                    if candidate.is_visible(timeout=500):
+                        return candidate
+                except Exception:  # noqa: BLE001 - SPA 导航过程中 locator 可能短暂失效
+                    continue
+        page.wait_for_timeout(500)
+    return None
+
+
+def _session_cookie(page: Any) -> str:
+    try:
+        context = getattr(page, "context", None)
+        cookies = context.cookies() if context is not None else page.context.cookies()
+        return "; ".join(
+            f"{item['name']}={item['value']}" for item in cookies if item.get("name") and item.get("value")
+        )
+    except Exception:  # noqa: BLE001 - Cookie 抽取失败由调用方判无效会话
+        return ""
+
+
+def _page_user_id(page: Any) -> str:
+    """从 localStorage.user 读登录成功后写入的 data.id。"""
+    try:
+        raw = page.evaluate("() => window.localStorage.getItem('user') || ''")
+    except Exception:  # noqa: BLE001
+        return ""
+    if isinstance(raw, dict):
+        return str(raw.get("id") or "")
+    if not raw:
+        return ""
+    try:
+        data = json.loads(str(raw))
+    except (TypeError, ValueError):
+        return ""
+    if isinstance(data, dict):
+        return str(data.get("id") or "")
+    return ""
+
+
+def _accept_agreement(page: Any) -> None:
+    """勾选「我已阅读并同意」；协议开关开启时前端会拦下未勾选的提交。"""
+    if _click_first_visible(
+        page,
+        (
+            'input[type="checkbox"]',
+            '[role="checkbox"]',
+            'label:has-text("我已阅读并同意")',
+        ),
+    ):
+        return
+    try:
+        page.evaluate(
+            """() => {
+                const nodes = [...document.querySelectorAll('label,span,div,button')];
+                const target = nodes.find((n) => (n.innerText || '').includes('我已阅读并同意'));
+                if (!target) return false;
+                const box = target.querySelector('input, [role="checkbox"]') || target;
+                box.click();
+                return true;
+            }"""
+        )
+    except Exception:  # noqa: BLE001 - 站点未展示协议时无需处理
+        pass
+
+
+_USERNAME_SELECTORS = (
+    'input[name="username"]',
+    'input[placeholder*="用户名"]',
+    'input[placeholder*="邮箱"]',
+    'input[placeholder*="邮箱地址"]',
+)
+_PASSWORD_SELECTORS = (
+    'input[name="password"]',
+    'input[type="password"]',
+)
+_TWO_FA_MARKERS = ("两步验证", "require_2fa", "认证器应用")
+_PASSWORD_ERROR_MARKERS = ("用户名或密码错误", "密码错误", "账号不存在", "账户不存在")
+_RECAPTCHA_ERROR_MARKERS = ("reCAPTCHA token 为空", "reCAPTCHA 校验初始化失败")
+
+
+def _login_error_from_text(text: str) -> str | None:
+    if any(marker in text for marker in _TWO_FA_MARKERS):
+        return "账号已开启两步验证，插件暂不支持，请先在网站关闭 2FA"
+    if any(marker in text for marker in _PASSWORD_ERROR_MARKERS):
+        return "用户名或密码错误"
+    if any(marker in text for marker in _RECAPTCHA_ERROR_MARKERS):
+        return "reCAPTCHA 校验失败，浏览器未能完成行为验证"
+    if "请先阅读并同意" in text:
+        return "未勾选用户协议，登录被前端拦截"
+    return None
+
+
+def _browser_login(page: Any, email: str, password: str) -> dict[str, str]:
+    """同步浏览器动作：过 recaptcha 登录并抽出 session + user_id。"""
+    deadline = time.monotonic() + 30
+    username_input = None
+    while time.monotonic() < deadline:
+        username_input = _wait_for_any_visible(page, _USERNAME_SELECTORS, timeout_ms=800)
+        if username_input is not None:
+            break
+        if _click_visible_button_text(page, ("使用邮箱或用户名登录", "使用邮箱登录")):
+            continue
+        page.wait_for_timeout(400)
+    if username_input is None:
+        raise RuntimeError("登录页未找到用户名输入框，页面可能已更新")
+
+    password_input = _wait_for_any_visible(page, _PASSWORD_SELECTORS, timeout_ms=10_000)
+    if password_input is None:
+        raise RuntimeError("登录页未找到密码输入框，页面可能已更新")
+
+    _accept_agreement(page)
+    _type_like_user(username_input, email)
+    _type_like_user(password_input, password)
+
+    submitted = _click_visible_button_text(page, ("继续", "Continue", "登录", "Login"))
+    if not submitted:
+        try:
+            password_input.press("Enter")
+            submitted = True
+        except Exception:  # noqa: BLE001
+            submitted = False
+    if not submitted:
+        raise RuntimeError("登录表单无法提交，网站页面可能已更新")
+
+    wait_until = time.monotonic() + LOGIN_WAIT_SECONDS
+    while time.monotonic() < wait_until:
+        text = _page_text(page)
+        error = _login_error_from_text(text)
+        if error:
+            raise RuntimeError(error)
+        user_id = _page_user_id(page)
+        cookie = _session_cookie(page)
+        url = _current_url(page)
+        if user_id and cookie and ("session=" in cookie):
+            return {"cookie": cookie, "user_id": user_id}
+        if "/console" in url and cookie and ("session=" in cookie):
+            if user_id:
+                return {"cookie": cookie, "user_id": user_id}
+        page.wait_for_timeout(500)
+
+    leftover = _login_error_from_text(_page_text(page))
+    if leftover:
+        raise RuntimeError(leftover)
+    raise RuntimeError("登录超时，未进入控制台")
+
+
+async def _session_alive(client: httpx.AsyncClient, user_id: str) -> bool:
+    """用签到状态接口探活缓存 session；未登录 / 网络失败视为失效。"""
+    if not user_id:
+        return False
+    try:
+        data = _safe_json(await client.get("/api/user/checkin", headers={"New-Api-User": user_id}))
+    except httpx.HTTPError:
+        return False
+    return bool(data.get("success"))
+
+
+def _cached_session(sessions: dict[str, Any], email: str) -> dict[str, str] | None:
+    raw = sessions.get(email.casefold())
+    if not isinstance(raw, dict):
+        return None
+    cookie = str(raw.get("cookie") or "")
+    user_id = str(raw.get("user_id") or "")
+    if cookie and user_id:
+        return {"cookie": cookie, "user_id": user_id}
+    return None
+
+
+async def _ensure_session(ctx: Any, email: str, password: str) -> dict[str, str]:
+    """复用 kv 里的 session；失效或不存在则浏览器登录并写回。"""
+    sessions = ctx.kv.get(SESSION_KEY, {}) or {}
+    if not isinstance(sessions, dict):
+        sessions = {}
+    cached = _cached_session(sessions, email)
+    if cached:
+        async with httpx.AsyncClient(
+            base_url=BASE_URL,
+            timeout=REQUEST_TIMEOUT,
+            headers={"Cookie": cached["cookie"]},
+        ) as client:
+            if await _session_alive(client, cached["user_id"]):
+                ctx.log.info("[登录][%s] 复用缓存 session", _masked_email(email))
+                return cached
+        ctx.log.info("[登录][%s] 缓存 session 已失效，改走浏览器登录", _masked_email(email))
+
+    browser = getattr(ctx, "browser", None)
+    if browser is None:
+        raise RuntimeError("平台托管浏览器不可用，无法完成 recaptcha 登录")
+
+    ctx.log.info("[登录][%s] 打开浏览器登录（过 recaptcha）", _masked_email(email))
+
+    def action(page: Any) -> dict[str, str]:
+        return _browser_login(page, email, password)
+
+    result = await browser.run(LOGIN_URL, action, headless=True, timeout=BROWSER_TIMEOUT)
+    cookie = str((result or {}).get("cookie") or "")
+    user_id = str((result or {}).get("user_id") or "")
+    if not cookie or not user_id:
+        raise RuntimeError("浏览器登录未拿到有效会话")
+    sessions[email.casefold()] = {"cookie": cookie, "user_id": user_id}
+    ctx.kv.set(SESSION_KEY, sessions)
+    ctx.log.info("[登录][%s] 已写入 session 缓存", _masked_email(email))
+    return {"cookie": cookie, "user_id": user_id}
+
+
 async def _checkin_one(
     client: httpx.AsyncClient,
-    email: str,
-    password: str,
+    user_id: str,
     per_unit: float = 0.0,
     display_type: str = "",
 ) -> dict[str, Any]:
-    """单账号签到：登录 → 查状态 → 未签到才 POST → 读剩余额度。
+    """单账号签到：查状态 → 未签到才 POST → 读剩余额度。客户端须已带 session Cookie。
 
     返回 {ok, already, message}，登录成功的账号另附 balance（剩余额度原始值）。
     """
-    login_resp = await client.post("/api/user/login", json={"username": email, "password": password})
-    login_data = _safe_json(login_resp)
-    if not login_data.get("success"):
-        message = str(login_data.get("message") or "未知错误")
-        return {"ok": False, "already": False, "message": f"登录失败：{message}"}
-    user_id = str((login_data.get("data") or {}).get("id") or "")
     if not user_id:
         return {"ok": False, "already": False, "message": "登录成功但未返回用户 ID，接口可能已变更"}
     headers = {"New-Api-User": user_id}
@@ -288,7 +580,7 @@ async def _checkin_one(
 
 
 async def _run(ctx: Any, source: str) -> dict[str, Any]:
-    """完整签到流程：逐账号签到、记录历史、汇总通知（含每账号剩余额度）。"""
+    """完整签到流程：逐账号登录（缓存优先）→ REST 签到、记录历史、汇总通知。"""
     global _run_lock
     if _run_lock is None:
         _run_lock = asyncio.Lock()
@@ -309,11 +601,19 @@ async def _run(ctx: Any, source: str) -> dict[str, Any]:
                 masked = _masked_email(email)
                 ctx.log.info("[签到][%s/%s][%s] 开始", index, len(accounts), masked)
                 try:
-                    async with httpx.AsyncClient(base_url=BASE_URL, timeout=REQUEST_TIMEOUT) as client:
-                        item = await _checkin_one(client, email, account["password"], per_unit, display_type)
+                    session = await _ensure_session(ctx, email, account["password"])
+                    async with httpx.AsyncClient(
+                        base_url=BASE_URL,
+                        timeout=REQUEST_TIMEOUT,
+                        headers={"Cookie": session["cookie"]},
+                    ) as client:
+                        item = await _checkin_one(client, session["user_id"], per_unit, display_type)
                 except httpx.HTTPError as exc:
                     item = {"ok": False, "already": False, "message": f"网络请求失败：{exc}"}
                     ctx.log.error("[签到][%s] 请求异常：%r", masked, exc)
+                except Exception as exc:  # noqa: BLE001 - 登录/浏览器失败收敛到单账号结果
+                    item = {"ok": False, "already": False, "message": f"登录失败：{exc}"}
+                    ctx.log.error("[签到][%s] 登录失败：%r", masked, exc)
                 account_results.append(item)
                 ctx.log.info("[签到][%s] 结果：%s", masked, item["message"])
 

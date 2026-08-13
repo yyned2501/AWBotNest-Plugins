@@ -11,14 +11,52 @@
   2. 请求头 `New-Api-User: <登录响应 data.id>`。
 - 只有 Cookie 无 `New-Api-User` 头 → `{"success": false, "message": "Unauthorized, New-Api-User header not provided"}`。
 - 两者都无 → `{"success": false, "message": "Unauthorized, not logged in and no access token provided"}`。
+- 浏览器登录成功后前端还会把整份 `data` 写入 `localStorage.user`（含 `id`），插件从这里抽 `New-Api-User`。
 
-## 登录（已确认）
+## 登录（已确认，2026-08-13 起强制 reCAPTCHA）
 
-`POST /api/user/login`，`Content-Type: application/json`
+`POST /api/user/login`，`Content-Type: application/json`。
 
-请求体：`{"username": "<注册邮箱>", "password": "<密码>"}`（username 字段填邮箱）。
+### reCAPTCHA v3（已确认）
 
-成功响应（HTTP 200）：
+`GET /api/status` 公开字段（2026-08-13 实测）：
+
+- `recaptcha_check=true`
+- `recaptcha_version=v3`
+- `recaptcha_site_key=6LdqrSYtAAAAAB2y2I7P1sAj6DRd1KIOtyuPWo21`
+- `turnstile_check=false`（未启用；`turnstile_site_key` 有值但前端不带）
+- `user_agreement_enabled=true`、`privacy_policy_enabled=true`
+
+前端 `LoginForm` + `Recaptcha` 模块已确认：
+
+- token **不在 JSON body**，走查询串：`POST /api/user/login?recaptcha=<token>`（可选 `&turnstile=`）
+- 生成：加载 `https://www.recaptcha.net/recaptcha/api.js?render=<siteKey>`，再 `grecaptcha.execute(siteKey, {action: "login"})`
+- 无 token 或空字符串 → HTTP 200 + `{"success": false, "message": "reCAPTCHA token 为空"}`
+- 服务端要的是浏览器里 Google 打分后的有效 v3 token，**不能靠纯 REST 伪造**
+
+因此插件不直打登录接口，改为平台托管浏览器打开 `/login`，让前端自己 `grecaptcha.execute`，再抽出 `session` Cookie 给后续 REST。
+
+### 请求体（已确认）
+
+```json
+{"username": "<注册邮箱>", "password": "<密码>"}
+```
+
+`username` 字段填邮箱。前端还会可选附带 `browser_fingerprint`（canvas/webgl/audio，`source:"web-login"`）；服务端是否强制该字段待验证，插件走浏览器登录时由前端自行带上。
+
+### 浏览器登录页（已确认）
+
+`/login` 是 SPA 壳（HTML 仅约 1.6KB），控件全靠 JS 渲染：
+
+1. 先点「使用 邮箱或用户名 登录」才出 username/password 表单（两步 UI）。
+2. 协议开关开启时必须勾选「我已阅读并同意」，否则前端 toast「请先阅读并同意用户协议和隐私政策」并直接 return，不发请求。
+3. 点「继续」后前端先打 recaptcha，再 `POST /api/user/login?recaptcha=...`。
+4. 成功：`localStorage.user = JSON.stringify(data)`，跳转 `/console`。
+5. `data.require_2fa` 为真时出 2FA 弹窗，改走 `POST /api/user/login/2fa`。当前配置账号未观察到 2FA；插件遇 2FA 明确失败，不盲重试。
+
+### 成功响应（已确认）
+
+HTTP 200：
 
 ```json
 {
@@ -35,6 +73,12 @@
 
 失败响应：`{"success": false, "message": "<错误文案>"}`（HTTP 仍为 200）。
 响应体无 `access_token`（实测为 null），鉴权只走 session Cookie。
+
+### 待验证
+
+- 无头浏览器（CloakBrowser / Playwright headless）打出的 v3 评分是否稳定过关。
+- 浏览器抽出的 `session` Cookie 直接塞进 httpx `Cookie` 头，签到/余额接口是否一律接受（按 cookie 属性应接受；部署后用已配置账号实测）。
+- `browser_fingerprint` 缺省时服务端是否拒绝。
 
 ## 查询签到状态（已确认）
 
@@ -62,6 +106,7 @@
 - `enabled=false` 表示站点临时关闭签到功能。
 - `max_quota`/`min_quota` 推断为单次签到可得额度的上下限（随机区间），未直接验证发放逻辑。
 - `checkin_count` 与 `total_checkins` 语义差异未确认（前者疑似连续签到天数）。
+- 插件用该接口探活缓存 session：`success=true` 视为仍有效，未登录文案视为失效并重走浏览器。
 
 ## 执行签到（部分确认）
 
@@ -82,6 +127,7 @@
 
 - 内部额度值 ÷ `quota_per_unit` = 平台展示金额；本站 50 万额度 = $1（USD）。
 - 插件每次运行读一次该接口，金额按 `$X.XX` 展示；接口异常时退回原始额度值。
+- 同一接口现也承载 recaptcha / 协议开关（见登录章节）。
 
 ## 用户信息与剩余额度（已确认）
 
@@ -92,5 +138,6 @@
 
 ## 其他
 
-- 站点无 Cloudflare 拦截（直接 nginx 响应）；登录接口未观测到频率限制，多账号串行登录即可。
+- 站点无 Cloudflare 拦截（直接 nginx 响应）。登录现强制 recaptcha，不能再靠多账号串行裸登。
 - 前端入口 `/console/personal` 为 SPA 页面，签到按钮背后的请求即上述接口。
+- `ctx.browser` 无状态：每次 `run` 起独立上下文用完即关。session 必须由插件抽 cookie 存 `ctx.kv`（`account_sessions`），下次 REST 自带。
