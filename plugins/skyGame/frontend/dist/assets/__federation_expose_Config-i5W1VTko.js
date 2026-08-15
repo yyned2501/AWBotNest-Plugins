@@ -521,7 +521,7 @@ return (_ctx, _cache) => {
                               { number: true }
                             ]
                           ]),
-                          _cache[79] || (_cache[79] = _createElementVNode("span", { class: "help" }, "普通草料按每日 5 次额度喂；仅草料选仙草时才看此饱腹阈值", -1))
+                          _cache[79] || (_cache[79] = _createElementVNode("span", { class: "help" }, "饱腹低于此值才喂配置草料（每日额度内：普通草 5 次/仙草 3 次）", -1))
                         ])
                       ])
                     ]),
@@ -925,6 +925,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const Config = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-c1f9bac3"]]);
+const Config = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-d828706c"]]);
 
 export { Config as default };

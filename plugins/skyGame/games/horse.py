@@ -16,7 +16,7 @@
 #       死亡 → （可选）复活
 #       玩家赛可加入且体力足 → 加入（配置开关）
 #       玩家赛可加入但体力不足 → 先喂配置草料（精草/杂草），不够再仙草
-#       今日普通喂食额度未用完 → 喂配置草料（不再只看饱腹阈值）
+#       饱腹 < 阈值 → 在每日额度内喂配置草料（普通 5 次/仙草 3 次）
 #       可遛 且未达上限 → 遛马（赚银元+经验）
 #       官方赛可报名 →（可选）免费报名
 #   - 喂食/遛马通知用结构化表格（notify_table），不把服务端长文案原样推送
@@ -372,23 +372,23 @@ async def _care_once(ctx: object, cfg: dict, client: HdskyClient) -> None:
         )
         return
 
-    # 日常喂食：今日普通额度没用完就喂配置草料（用满 5 次攒体力/长期进度）。
-    # 饱腹阈值只作下限提示，不再挡住额度未用完的精草。
+    # 日常喂食：饱腹 < 阈值才喂，且在每日额度内（普通 5 次/仙草 3 次）。
     satiety = int(profile.get("satiety", 100) or 0)
     threshold = int(cfg.get("horse_feed_threshold", 60) or 0)
     feed_count = int(stats.get("feedCountToday", profile.get("daily_feed_count", 0)) or 0)
     feed_max = int(stats.get("feedMax", 5) or 5)
     feed_type = _configured_feed_type(cfg)
-    if feed_type == "divine":
-        if _divine_feed_ready(st, profile, now_ms, ctx) and satiety < threshold:
-            await _do_feed(ctx, cfg, client, "divine", f"饱腹 {satiety} < {threshold}")
+    if satiety < threshold:
+        if feed_type == "divine":
+            if _divine_feed_ready(st, profile, now_ms, ctx):
+                await _do_feed(ctx, cfg, client, "divine", f"饱腹 {satiety} < {threshold}")
+                return
+        elif _regular_feed_ready(st, stats, profile, now_ms, ctx):
+            await _do_feed(ctx, cfg, client, feed_type, f"今日普通喂养 {feed_count}/{feed_max}，饱腹 {satiety}")
             return
-    elif _regular_feed_ready(st, stats, profile, now_ms, ctx):
-        await _do_feed(ctx, cfg, client, feed_type, f"今日普通喂养 {feed_count}/{feed_max}，饱腹 {satiety}")
-        return
-    elif st.get("canFeed") and feed_count < feed_max and _in_cooldown(ctx, _FEED_CD_KEY, now_ms):
-        remain = (int(ctx.kv.get(_FEED_CD_KEY, 0) or 0) - now_ms) // 60000
-        ctx.log.debug("喂食冷却中，剩余 %d 分钟，本轮跳过不重复尝试", remain)
+        elif st.get("canFeed") and feed_count < feed_max and _in_cooldown(ctx, _FEED_CD_KEY, now_ms):
+            remain = (int(ctx.kv.get(_FEED_CD_KEY, 0) or 0) - now_ms) // 60000
+            ctx.log.debug("喂食冷却中，剩余 %d 分钟，本轮跳过不重复尝试", remain)
 
     # 遛马：消耗体力赚银元+经验，用完每日额度
     walk_count = int(stats.get("walkCountToday", 0) or 0)
