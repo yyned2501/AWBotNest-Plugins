@@ -140,9 +140,10 @@ class _FakeCtx:
 
 
 class _FakeClient:
-    def __init__(self, state: dict[str, object], action: dict[str, object]) -> None:
+    def __init__(self, state: dict[str, object], action: dict[str, object] | list[dict[str, object]]) -> None:
         self._state = state
-        self._action = action
+        # 传 list 时按请求顺序依次返回（同轮多动作如喂仙草+参赛各需不同响应），否则所有 post 返回同一响应
+        self._actions = list(action) if isinstance(action, list) else [action]
         self.posts: list[tuple[str, dict[str, object]]] = []
 
     async def get(self, path: str) -> dict[str, object]:
@@ -150,7 +151,9 @@ class _FakeClient:
 
     async def post(self, path: str, body: dict[str, object]) -> dict[str, object]:
         self.posts.append((path, body))
-        return self._action
+        if len(self._actions) > 1:
+            return self._actions.pop(0)
+        return self._actions[0]
 
     def reset_csrf(self) -> None:
         pass
@@ -319,28 +322,53 @@ async def test_match_race_joins_when_stamina_enough() -> None:
 
 
 @pytest.mark.asyncio
-async def test_match_race_feeds_configured_grass_before_divine() -> None:
-    # 正向：玩家赛可加入但体力不足（20 < 30），精草还能喂且 +18 就能达标 → 先喂精草，不直接仙草
+async def test_match_race_feeds_divine_then_joins_immediately() -> None:
+    # 正向：体力 20 < 30 → 喂一个仙草(+50)，喂成功后同轮立即参赛，不等下一轮轮询；
+    # 即使配置草料是精草且额度可用，参赛补体力也只走仙草
     ctx = _FakeCtx()
-    action = {"ok": True, "result": {"ok": True, "feedType": "fine", "feedLabel": "精草", "amount": 300, "expGain": 8}}
-    client = _FakeClient(_horse_state(stamina=20, satiety=80, feed_today=0, match=_active_match()), action)
+    feed_ok = {"ok": True, "result": {"ok": True, "feedType": "divine", "feedLabel": "仙草", "amount": 1000}}
+    join_ok = {"ok": True, "result": {"ok": True, "message": "已加入养马赛 #1083"}}
+    client = _FakeClient(_horse_state(stamina=20, satiety=80, feed_today=0, match=_active_match()), [feed_ok, join_ok])
 
     await _care_once(ctx, {"horse_feed_type": "fine"}, client)
 
-    assert len(client.posts) == 1
-    path, body = client.posts[0]
-    assert path == "/api/portal/horse/action"
-    assert body["action"] == "feed" and body["feedType"] == "fine"
-    assert not any("加入玩家养马赛" in msg for _, msg in ctx.log.records)
-    assert ctx.tables and ctx.tables[0][0] == ["项目", "内容"]
-    assert ["草料", "精草"] in ctx.tables[0][1]
+    assert len(client.posts) == 2
+    assert client.posts[0][1]["action"] == "feed" and client.posts[0][1]["feedType"] == "divine"
+    path, body = client.posts[1]
+    assert path == "/api/portal/horse/race/action" and body["action"] == "join"
+    assert any("仙草补体力后加入玩家养马赛" in msg for _, msg in ctx.log.records)
 
 
 @pytest.mark.asyncio
-async def test_match_race_feeds_divine_when_fine_cannot_reach() -> None:
-    # 正向：体力 12，精草 +18 仍 < 30 → 才喂仙草补体力
+async def test_match_race_waits_when_divine_cannot_reach() -> None:
+    # 异常路径：体力 10，参赛门槛 70，一个仙草(+50)也不达标 → 不浪费额度，等体力自然恢复
     ctx = _FakeCtx()
-    action = {
+    client = _FakeClient(_horse_state(stamina=10, match=_active_match()), {"ok": True, "result": {"ok": True}})
+
+    await _care_once(ctx, {"horse_race_min_stamina": 70}, client)
+
+    assert client.posts == []
+    assert any("等待体力恢复" in msg for _, msg in ctx.log.records)
+
+
+@pytest.mark.asyncio
+async def test_match_race_no_join_when_divine_feed_fails() -> None:
+    # 异常路径：仙草喂失败（如服务端拒绝）→ 不参赛，等下轮
+    ctx = _FakeCtx()
+    feed_fail = {"ok": False, "result": {"ok": False, "code": "exhausted", "message": "仙草额度已用完"}}
+    client = _FakeClient(_horse_state(stamina=20, match=_active_match()), feed_fail)
+
+    await _care_once(ctx, {}, client)
+
+    assert len(client.posts) == 1 and client.posts[0][1]["action"] == "feed"
+    assert not any(body.get("action") == "join" for _, body in client.posts)
+
+
+@pytest.mark.asyncio
+async def test_match_race_feeds_divine_then_joins_low_stamina() -> None:
+    # 正向：体力 11 很低，一个仙草(+50)能达标 → 喂仙草并同轮参赛；推送表格含结构化字段
+    ctx = _FakeCtx()
+    feed_ok = {
         "ok": True,
         "result": {
             "ok": True,
@@ -353,7 +381,7 @@ async def test_match_race_feeds_divine_when_fine_cannot_reach() -> None:
                 "horse_name": "Yy小号",
                 "level": 10,
                 "exp": 9442,
-                "stamina": 62,
+                "stamina": 61,
                 "mood": 100,
                 "satiety": 100,
                 "daily_feed_count": 0,
@@ -361,53 +389,54 @@ async def test_match_race_feeds_divine_when_fine_cannot_reach() -> None:
             },
         },
     }
-    client = _FakeClient(_horse_state(stamina=11, satiety=80, feed_today=0, match=_active_match()), action)
+    join_ok = {"ok": True, "result": {"ok": True, "message": "已加入养马赛 #1083"}}
+    client = _FakeClient(_horse_state(stamina=11, satiety=80, feed_today=0, match=_active_match()), [feed_ok, join_ok])
 
     await _care_once(ctx, {"horse_feed_type": "fine"}, client)
 
-    assert len(client.posts) == 1
-    path, body = client.posts[0]
-    assert path == "/api/portal/horse/action"
-    assert body["action"] == "feed" and body["feedType"] == "divine"
+    assert len(client.posts) == 2
+    assert client.posts[0][1]["action"] == "feed" and client.posts[0][1]["feedType"] == "divine"
+    assert client.posts[1][0] == "/api/portal/horse/race/action"
     assert ctx.tables
     headers, rows, kwargs = ctx.tables[0]
     assert headers == ["项目", "内容"]
     assert ["草料", "仙草"] in rows
-    assert ["体力", "62/100"] in rows
+    assert ["体力", "61/100"] in rows
     assert ["今日仙草", "3/3"] in rows
     assert kwargs.get("caption") == "🐴 仙草喂养成功"
 
 
 @pytest.mark.asyncio
-async def test_match_race_feeds_divine_when_fine_on_cooldown() -> None:
-    # 异常路径：精草冷却中、仙草还能喂 → 退回仙草补体力
+async def test_match_race_feeds_divine_even_when_fine_on_cooldown() -> None:
+    # 正向：参赛补体力只看仙草，普通草料（精草）冷却中不影响 → 喂仙草后参赛
     ctx = _FakeCtx()
     ctx.kv.set("horse:feed_cooldown_until", _now_ms() + 600000)
-    action = {"ok": True, "result": {"ok": True, "feedType": "divine", "feedLabel": "仙草", "amount": 1000}}
-    client = _FakeClient(_horse_state(stamina=20, satiety=80, feed_today=0, match=_active_match()), action)
+    feed_ok = {"ok": True, "result": {"ok": True, "feedType": "divine", "feedLabel": "仙草", "amount": 1000}}
+    join_ok = {"ok": True, "result": {"ok": True, "message": "已加入养马赛 #1083"}}
+    client = _FakeClient(_horse_state(stamina=20, satiety=80, feed_today=0, match=_active_match()), [feed_ok, join_ok])
 
     await _care_once(ctx, {"horse_feed_type": "fine"}, client)
 
-    assert client.posts and client.posts[0][1]["feedType"] == "divine"
+    assert client.posts[0][1]["feedType"] == "divine"
+    assert client.posts[1][1]["action"] == "join"
 
 
 @pytest.mark.asyncio
-async def test_match_race_skips_when_both_feeds_blocked() -> None:
-    # 异常路径：体力不足且精草/仙草都冷却 → 本轮不动作，不遛马消耗体力
+async def test_match_race_skips_when_divine_blocked() -> None:
+    # 异常路径：体力不足且仙草冷却 → 本轮不动作，不遛马消耗体力
     ctx = _FakeCtx()
-    ctx.kv.set("horse:feed_cooldown_until", _now_ms() + 600000)
     ctx.kv.set("horse:divine_cooldown_until", _now_ms() + 600000)
     client = _FakeClient(_horse_state(stamina=12, match=_active_match()), {"ok": True, "result": {"ok": True}})
 
     await _care_once(ctx, {}, client)
 
     assert client.posts == []
-    assert any("等待补体力" in msg for _, msg in ctx.log.records)
+    assert any("仙草暂不可喂" in msg for _, msg in ctx.log.records)
 
 
 @pytest.mark.asyncio
 async def test_match_race_divine_cooldown_response_stores_backoff() -> None:
-    # 正向：喂仙草撞冷却（「刚刚吃过了 xx分钟后再喂」）→ 记录 remainMs 退避，不一直尝试
+    # 参赛补体力只走仙草；喂仙草撞冷却（「刚刚吃过了 xx分钟后再喂」）→ 记录 remainMs 退避，不一直尝试
     ctx = _FakeCtx()
     action = {
         "ok": True,
@@ -418,7 +447,6 @@ async def test_match_race_divine_cooldown_response_stores_backoff() -> None:
             "message": "你的马刚吃过，30分钟 后再喂。",
         },
     }
-    # 精草额度用完，才会走到仙草
     client = _FakeClient(_horse_state(stamina=12, feed_today=5, match=_active_match()), action)
     before = _now_ms()
 

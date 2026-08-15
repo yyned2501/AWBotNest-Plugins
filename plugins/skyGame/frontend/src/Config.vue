@@ -286,7 +286,7 @@ async function renewNow() {
             <div class="fld">
               <span class="lbl">参赛最低体力</span>
               <input v-model.number="cfg.horse_race_min_stamina" class="inp" type="number" min="0" max="100" step="5" />
-              <span class="help">体力不够先喂配置草料，不够再喂仙草（仙草每日 3 次）</span>
+              <span class="help">体力不够时喂一个仙草(+50)立即参赛（仙草每日 3 次）</span>
             </div>
             <label class="row switch">
               <input v-model="cfg.horse_auto_official_race" type="checkbox" />
