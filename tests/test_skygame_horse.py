@@ -535,16 +535,29 @@ async def test_feeds_share_cooldown_but_divine_is_independent() -> None:
 
 
 @pytest.mark.asyncio
-async def test_daily_feed_uses_quota_even_when_satiety_high() -> None:
-    # 正向：饱腹 82 高于阈值 70，但今日精草 0/5 → 仍喂精草用额度（攒体力/长期进度）
+async def test_daily_feed_skips_when_satiety_above_threshold() -> None:
+    # 回归：饱腹 82 高于阈值 70，即使今日精草 0/5 也不喂（v1.16.24 曾改成
+    # 用满额度无视阈值，用户报 bug 后恢复阈值拦截），转遛马
     ctx = _FakeCtx()
-    action = {"ok": True, "result": {"ok": True, "feedType": "fine", "feedLabel": "精草", "amount": 300}}
+    action = {"ok": True, "result": {"ok": True}}
     client = _FakeClient(_horse_state(satiety=82, stamina=16, feed_today=0), action)
 
     await _care_once(ctx, {"horse_feed_type": "fine", "horse_feed_threshold": 70}, client)
 
+    assert client.posts and client.posts[0][1]["action"] == "walk"
+    assert not any("喂食" in msg for _, msg in ctx.log.records)
+
+
+@pytest.mark.asyncio
+async def test_daily_feed_feeds_when_satiety_below_threshold() -> None:
+    # 正向：饱腹 40 低于阈值 70 且额度未用完 → 喂配置精草
+    ctx = _FakeCtx()
+    action = {"ok": True, "result": {"ok": True, "feedType": "fine", "feedLabel": "精草", "amount": 300}}
+    client = _FakeClient(_horse_state(satiety=40, feed_today=1), action)
+
+    await _care_once(ctx, {"horse_feed_type": "fine", "horse_feed_threshold": 70}, client)
+
     assert client.posts and client.posts[0][1]["feedType"] == "fine"
-    assert any("喂食 fine" in msg for _, msg in ctx.log.records)
 
 
 @pytest.mark.asyncio
