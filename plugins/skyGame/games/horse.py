@@ -16,7 +16,7 @@
 #       死亡 → （可选）复活
 #       玩家赛可加入且体力足 → 加入（配置开关）
 #       玩家赛可加入但体力不足 → 喂一个仙草(+50)，喂成功后同轮立即参赛
-#       饱腹 < 阈值 → 在每日额度内喂配置草料（普通 5 次/仙草 3 次）
+#       体力 < 阈值 → 额度内优先喂配置草料，冷却/额度用尽才喂仙草
 #       可遛 且未达上限 → 遛马（赚银元+经验）
 #       官方赛可报名 →（可选）免费报名
 #   - 喂食/遛马通知用结构化表格（notify_table），不把服务端长文案原样推送
@@ -376,21 +376,25 @@ async def _care_once(ctx: object, cfg: dict, client: HdskyClient) -> None:
         await _notify_result(ctx, cfg, r, "玩家赛加入失败")
         return
 
-    # 日常喂食：饱腹 < 阈值才喂，且在每日额度内（普通 5 次/仙草 3 次）。
-    satiety = int(profile.get("satiety", 100) or 0)
+    # 日常喂食：体力 < 阈值才喂。优先喂配置草料（weed/fine），普通额度用尽或
+    # 冷却中才退回仙草；体力才是参赛/遛马的主要消耗项，饱腹平时基本够吃。
     threshold = int(cfg.get("horse_feed_threshold", 60) or 0)
     feed_count = int(stats.get("feedCountToday", profile.get("daily_feed_count", 0)) or 0)
     feed_max = int(stats.get("feedMax", 5) or 5)
     feed_type = _configured_feed_type(cfg)
-    if satiety < threshold:
-        if feed_type == "divine":
-            if _divine_feed_ready(st, profile, now_ms, ctx):
-                await _do_feed(ctx, cfg, client, "divine", f"饱腹 {satiety} < {threshold}")
-                return
-        elif _regular_feed_ready(st, stats, profile, now_ms, ctx):
-            await _do_feed(ctx, cfg, client, feed_type, f"今日普通喂养 {feed_count}/{feed_max}，饱腹 {satiety}")
+    if stamina < threshold:
+        if feed_type != "divine" and _regular_feed_ready(st, stats, profile, now_ms, ctx):
+            await _do_feed(ctx, cfg, client, feed_type, f"今日普通喂养 {feed_count}/{feed_max}，体力 {stamina}")
             return
-        elif st.get("canFeed") and feed_count < feed_max and _in_cooldown(ctx, _FEED_CD_KEY, now_ms):
+        if _divine_feed_ready(st, profile, now_ms, ctx):
+            await _do_feed(ctx, cfg, client, "divine", f"普通草料不可用，体力 {stamina} < {threshold}，喂仙草")
+            return
+        if (
+            feed_type != "divine"
+            and st.get("canFeed")
+            and feed_count < feed_max
+            and _in_cooldown(ctx, _FEED_CD_KEY, now_ms)
+        ):
             remain = (int(ctx.kv.get(_FEED_CD_KEY, 0) or 0) - now_ms) // 60000
             ctx.log.debug("喂食冷却中，剩余 %d 分钟，本轮跳过不重复尝试", remain)
 

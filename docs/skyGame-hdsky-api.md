@@ -85,7 +85,7 @@
 - 遛马动作：冷却拒绝时返回外层 `ok: true`、`result.code == "cooldown"`、`result.remainMs`、`result.message`（2026-08-14 实测文案「你的马刚遛过，2小时58分钟 后再来」，冷却约 3 小时而非旧记的 45 分钟，实测波动大以 remainMs 为准），期间 `state.canWalk` 仍为 `true`。插件记下 `remainMs` 换算的到期时间退避，未到不再尝试；`cooldown` 不计入失败计数，连续真失败 3 次后跳过本轮。
 - **遛马成功响应（2026-08-14 实测确认）**：`result` 含 `ok/expGain/progressGain/bonusAmount/penaltyAmount/eventKind/eventNote/profile/message`。`eventKind=reward` 时 `bonusAmount` 为随机捡到的银元，`eventNote` 是事件说明（如「心情高涨，遛马时拣到了一点银元马粪。」）。`message` 仍是十余行说明+随机事件，插件用结构化字段组表，不原样推送。
 - **遛马失败熔断按「天」自动重置（v1.16.7 修正）**：旧实现失败计数只在成功遛马时清零——但计数到 3 后就不再发遛马请求，形成**永久死锁**（线上 08-01 遗留 count=3，此后每日 4 次遛马额度全浪费、体力始终满，用户误以为「满体力却只喂草」）。现失败计数带日期存储（kv 值 `{"count": N, "date": "YYYY-MM-DD"}`），跨天自动重置为 0 重新尝试；旧版纯数字遗留值（无日期）视为跨天立即恢复。同日连续失败 3 次仍熔断当日，次日自动恢复。
-- **体力与饱腹是独立字段**：`profile.stamina`（体力，100 满，24 小时自然回满，遛马消耗）与 `profile.satiety`（饱腹度，喂食恢复，低于 `horse_feed_threshold` 才喂）。「体力满却不遛马」是遛马熔断的症状而非喂食逻辑错误——喂食只在 satiety < 阈值时发生（实测 08-06 00:00 satiety=53 喂 weed，喂后 65）。
+- **体力与饱腹是独立字段**：`profile.stamina`（体力，100 满，24 小时自然回满，遛马消耗）与 `profile.satiety`（饱腹度，喂食恢复）。插件喂食阈值自 v1.16.29 起按**体力**判断（饱腹平时基本够吃，体力才是参赛/遛马的主要消耗项）。「体力满却不遛马」是遛马熔断的症状而非喂食逻辑错误。
 - 养马实测字段：`stats.walkCountToday/walkMax`（每日遛马上限）、`stats.feedCountToday/feedMax`、`profile.satiety`（饱腹度）、`profile.stamina`（体力，100 满，遛马消耗、喂食恢复）、`horse.balance`（银元）、`profile.state.{isDead,canWalk,canFeed,canRace}`。
 - **比赛字段（competitions，2026-08-08 实测确认）**：`horse.competitions` 含 `official`（官方赛）与 `match`（玩家养马赛，Horse2）两类。
   - `official`：`date/status/signupOpen/settled/minEntrants/entrantCount/entrants[]/joined/eligibility{canRace,detail}/rewardPlan[]/yesterday`。报名动作 `official_join`，退出 `official_leave`，每日免费一次。
@@ -93,7 +93,7 @@
 - **喂食与冷却（2026-08-08 用户确认 + 2026-08-13/14 实测补全）**：普通喂食（weed/fine）与仙草（divine）**独立计数、独立冷却**——`profile.daily_feed_count`（普通喂食，与 `stats.feedCountToday/feedMax` 对应，每日 5 次）与 `profile.daily_divine_feed_count`（仙草，每日 3 次，服务端文案「今日仙草喂养：3 / 3」已确认）分开。喂食撞冷却时服务端返回「你的马刚吃过，xx分钟 后再喂」（**`result.code=="feed_cooldown"`** + `remainMs`，2026-08-14 实测；遛马仍是 `cooldown`），插件按 `remainMs` 退避不重复尝试。喂食成功响应**不带** remainMs，但门户立刻再喂仍会拒绝——插件成功后先本地预退避 60 分钟（实测约 1 小时）。精草冷却中仍可喂仙草补体力。
 - **草料目录 `horse.feeds`（2026-08-13 GET /api/portal/horse 已确认）**：`weed` 杂草 100 银元 +6 体力 / +12 饱腹；`fine` 精草 300 银元 +18 体力 / +30 饱腹；`divine` 仙草 1000 银元 +50 体力 / +60 饱腹。
 - **喂食成功响应（2026-08-13 POST feed divine 已确认）**：`result` 含 `ok/amount/feedType/feedLabel/expGain/progressGain/profile/message`。`message` 是十余行说明（规则/战绩/改名费），不适合原样推送；插件用结构化字段组表。`profile.last_feed_at_ms` 只在普通喂食时更新（当日 3 次仙草后该字段仍停在前一日普通喂食时间）。
-- **养护优先级（v1.16.28）**：玩家赛体力不够时喂一个仙草(+50)，喂成功后同轮立即参赛（不等下一轮）；一个仙草仍不达标就不喂、等体力自然恢复；仙草额度/冷却不可用则本轮空手。日常喂食只在饱腹 < 阈值时喂配置草料（v1.16.27 恢复阈值拦截，v1.16.24 曾用满额度无视阈值被用户报 bug）。玩家赛每轮轮询检测，可加入就参加；官方赛每日免费报名一次（kv 记日期去重）。
+- **养护优先级（v1.16.29）**：玩家赛体力不够时喂一个仙草(+50)，喂成功后同轮立即参赛（不等下一轮）；一个仙草仍不达标就不喂、等体力自然恢复；仙草额度/冷却不可用则本轮空手。日常喂食只在**体力** < 阈值时触发（v1.16.29 起阈值从饱腹改按体力），优先喂配置草料（weed/fine），普通草冷却中或额度用尽才退回仙草。玩家赛每轮轮询检测，可加入就参加；官方赛每日免费报名一次（kv 记日期去重）。
 
 ## 待现场验证
 
