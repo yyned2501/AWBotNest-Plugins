@@ -38,7 +38,7 @@ def _horse_state(
     feed_today: int = 5,
     daily_divine: int = 0,
 ) -> dict[str, object]:
-    """构造可触发遛马分支的门户状态（饱腹度拉满以跳过喂食分支）。"""
+    """构造可触发遛马分支的门户状态（体力拉满以跳过喂食分支）。"""
     state: dict[str, object] = {
         "horse": {
             "profile": {
@@ -483,7 +483,7 @@ async def test_match_race_skips_when_joined_or_inactive() -> None:
 async def test_feed_cooldown_response_stores_backoff() -> None:
     # 正向：喂食撞冷却（「刚刚吃过了 xx分钟后再喂」）→ 记 remainMs 退避，静默不打扰
     ctx = _FakeCtx()
-    state = _horse_state(satiety=40, feed_today=1)  # 额度未用完 → 触发喂食
+    state = _horse_state(stamina=40, feed_today=1)  # 体力低于阈值 60 且额度未用完 → 触发喂食
     action = {
         "ok": True,
         "result": {
@@ -504,16 +504,29 @@ async def test_feed_cooldown_response_stores_backoff() -> None:
 
 
 @pytest.mark.asyncio
-async def test_feed_in_cooldown_skips_without_posting() -> None:
-    # 异常路径：喂食冷却未到 → 本轮不喂，继续做下一动作（遛马），不硬试
+async def test_feed_in_cooldown_falls_back_to_divine() -> None:
+    # 正向：体力低于阈值但普通草料冷却中、仙草可用 → 退回喂仙草
     ctx = _FakeCtx()
     ctx.kv.set("horse:feed_cooldown_until", _now_ms() + 600000)
-    client = _FakeClient(_horse_state(satiety=40, feed_today=1), {"ok": True, "result": {"ok": True}})
+    action = {"ok": True, "result": {"ok": True, "feedType": "divine", "feedLabel": "仙草", "amount": 1000}}
+    client = _FakeClient(_horse_state(stamina=40, feed_today=1), action)
 
     await _care_once(ctx, {}, client)
 
-    assert client.posts and client.posts[0][1]["action"] == "walk"  # 冷却中不喂，转遛马
-    assert not any("喂食" in body.get("action", "") for _, body in client.posts)
+    assert len(client.posts) == 1 and client.posts[0][1]["feedType"] == "divine"
+
+
+@pytest.mark.asyncio
+async def test_feed_all_blocked_skips_without_posting() -> None:
+    # 异常路径：普通草料冷却中且仙草额度用尽 → 本轮不喂，继续做下一动作（遛马），不硬试
+    ctx = _FakeCtx()
+    ctx.kv.set("horse:feed_cooldown_until", _now_ms() + 600000)
+    client = _FakeClient(_horse_state(stamina=40, feed_today=1, daily_divine=3), {"ok": True, "result": {"ok": True}})
+
+    await _care_once(ctx, {}, client)
+
+    assert client.posts and client.posts[0][1]["action"] == "walk"  # 都喂不了，转遛马
+    assert not any(body.get("action") == "feed" for _, body in client.posts)
 
 
 @pytest.mark.asyncio
@@ -522,7 +535,7 @@ async def test_feed_success_sets_local_backoff() -> None:
     ctx = _FakeCtx()
     ctx.kv.set("horse:feed_cooldown_until", _now_ms() - 1000)  # 上次退避已过期
     action = {"ok": True, "result": {"ok": True, "feedType": "fine", "feedLabel": "精草"}}
-    client = _FakeClient(_horse_state(satiety=40, feed_today=1), action)
+    client = _FakeClient(_horse_state(stamina=40, feed_today=1), action)
     before = _now_ms()
 
     await _care_once(ctx, {}, client)
@@ -563,12 +576,12 @@ async def test_feeds_share_cooldown_but_divine_is_independent() -> None:
 
 
 @pytest.mark.asyncio
-async def test_daily_feed_skips_when_satiety_above_threshold() -> None:
-    # 回归：饱腹 82 高于阈值 70，即使今日精草 0/5 也不喂（v1.16.24 曾改成
-    # 用满额度无视阈值，用户报 bug 后恢复阈值拦截），转遛马
+async def test_daily_feed_skips_when_stamina_above_threshold() -> None:
+    # 回归：体力 82 高于阈值 70，即使今日精草 0/5 也不喂（v1.16.24 曾改成
+    # 用满额度无视阈值被报 bug；v1.16.29 起阈值改按体力判断），转遛马
     ctx = _FakeCtx()
     action = {"ok": True, "result": {"ok": True}}
-    client = _FakeClient(_horse_state(satiety=82, stamina=16, feed_today=0), action)
+    client = _FakeClient(_horse_state(stamina=82, feed_today=0), action)
 
     await _care_once(ctx, {"horse_feed_type": "fine", "horse_feed_threshold": 70}, client)
 
@@ -577,11 +590,11 @@ async def test_daily_feed_skips_when_satiety_above_threshold() -> None:
 
 
 @pytest.mark.asyncio
-async def test_daily_feed_feeds_when_satiety_below_threshold() -> None:
-    # 正向：饱腹 40 低于阈值 70 且额度未用完 → 喂配置精草
+async def test_daily_feed_feeds_configured_grass_when_stamina_below_threshold() -> None:
+    # 正向：体力 40 低于阈值 70 且普通额度未用完 → 优先喂配置精草，不动仙草
     ctx = _FakeCtx()
     action = {"ok": True, "result": {"ok": True, "feedType": "fine", "feedLabel": "精草", "amount": 300}}
-    client = _FakeClient(_horse_state(satiety=40, feed_today=1), action)
+    client = _FakeClient(_horse_state(stamina=40, feed_today=1), action)
 
     await _care_once(ctx, {"horse_feed_type": "fine", "horse_feed_threshold": 70}, client)
 
@@ -589,12 +602,24 @@ async def test_daily_feed_feeds_when_satiety_below_threshold() -> None:
 
 
 @pytest.mark.asyncio
-async def test_daily_feed_skips_when_quota_used() -> None:
-    # 异常路径：今日普通喂食已满 5/5，即使饱腹低也不再喂，转遛马
+async def test_daily_feed_falls_back_to_divine_when_quota_used() -> None:
+    # 正向：体力低于阈值但普通额度已满 5/5、仙草还有额度 → 退回喂仙草
     ctx = _FakeCtx()
-    client = _FakeClient(_horse_state(satiety=40, feed_today=5), {"ok": True, "result": {"ok": True}})
+    action = {"ok": True, "result": {"ok": True, "feedType": "divine", "feedLabel": "仙草", "amount": 1000}}
+    client = _FakeClient(_horse_state(stamina=40, feed_today=5), action)
 
-    await _care_once(ctx, {"horse_feed_type": "fine"}, client)
+    await _care_once(ctx, {"horse_feed_type": "fine", "horse_feed_threshold": 70}, client)
+
+    assert client.posts and client.posts[0][1]["feedType"] == "divine"
+
+
+@pytest.mark.asyncio
+async def test_daily_feed_skips_when_all_quota_used() -> None:
+    # 异常路径：普通 5/5 且仙草 3/3 都用尽，即使体力低也不再喂，转遛马
+    ctx = _FakeCtx()
+    client = _FakeClient(_horse_state(stamina=40, feed_today=5, daily_divine=3), {"ok": True, "result": {"ok": True}})
+
+    await _care_once(ctx, {"horse_feed_type": "fine", "horse_feed_threshold": 70}, client)
 
     assert client.posts and client.posts[0][1]["action"] == "walk"
 

@@ -264,9 +264,9 @@ async function renewNow() {
                 </select>
               </div>
               <div class="fld">
-                <span class="lbl">饱腹度阈值</span>
+                <span class="lbl">体力阈值</span>
                 <input v-model.number="cfg.horse_feed_threshold" class="inp" type="number" min="0" max="100" step="5" />
-                <span class="help">饱腹低于此值才喂配置草料（每日额度内：普通草 5 次/仙草 3 次）</span>
+                <span class="help">体力低于此值才喂；优先配置草料，普通草冷却/额度用尽才喂仙草</span>
               </div>
             </div>
           </section>

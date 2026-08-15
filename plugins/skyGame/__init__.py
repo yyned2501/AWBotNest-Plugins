@@ -1,5 +1,5 @@
 # =============================================================================
-# AWBotNest 插件：天空游戏 (skyGame) v1.16.28
+# AWBotNest 插件：天空游戏 (skyGame) v1.16.29
 #
 # 天空系列游戏的统一入口：Vue 配置界面左侧按游戏分组，各游戏逻辑拆到
 # games/ 子模块，互不干扰。当前收录：
@@ -23,7 +23,7 @@ from .games import hdsky_auth
 __plugin__ = {
     "name": "天空游戏",
     "id": "skyGame",
-    "version": "1.16.28",
+    "version": "1.16.29",
     "author": "Yy",
     "description": "天空系列游戏统一入口：炸金花自动参与、养马自动养护，左侧按游戏分组配置。",
     "scope": "user",
@@ -193,12 +193,12 @@ __plugin__ = {
         "horse_feed_threshold": {
             "type": "slider",
             "default": 60,
-            "label": "喂食饱腹度阈值",
+            "label": "喂食体力阈值",
             "section": "养马",
             "min": 0,
             "max": 100,
             "step": 5,
-            "help": "饱腹低于此值才喂配置草料（每日额度内：普通草 5 次/仙草 3 次）",
+            "help": "体力低于此值才喂；优先配置草料，普通草冷却/额度用尽才喂仙草",
             "order": 13,
         },
         "horse_auto_walk": {

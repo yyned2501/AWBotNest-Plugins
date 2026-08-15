@@ -505,7 +505,7 @@ return (_ctx, _cache) => {
                           ])
                         ]),
                         _createElementVNode("div", _hoisted_41, [
-                          _cache[78] || (_cache[78] = _createElementVNode("span", { class: "lbl" }, "饱腹度阈值", -1)),
+                          _cache[78] || (_cache[78] = _createElementVNode("span", { class: "lbl" }, "体力阈值", -1)),
                           _withDirectives(_createElementVNode("input", {
                             "onUpdate:modelValue": _cache[17] || (_cache[17] = $event => ((cfg.horse_feed_threshold) = $event)),
                             class: "inp",
@@ -521,7 +521,7 @@ return (_ctx, _cache) => {
                               { number: true }
                             ]
                           ]),
-                          _cache[79] || (_cache[79] = _createElementVNode("span", { class: "help" }, "饱腹低于此值才喂配置草料（每日额度内：普通草 5 次/仙草 3 次）", -1))
+                          _cache[79] || (_cache[79] = _createElementVNode("span", { class: "help" }, "体力低于此值才喂；优先配置草料，普通草冷却/额度用尽才喂仙草", -1))
                         ])
                       ])
                     ]),
@@ -925,6 +925,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const Config = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-29f11a93"]]);
+const Config = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-30ba056c"]]);
 
 export { Config as default };
