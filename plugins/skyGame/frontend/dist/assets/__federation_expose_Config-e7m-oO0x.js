@@ -570,7 +570,7 @@ return (_ctx, _cache) => {
                             { number: true }
                           ]
                         ]),
-                        _cache[84] || (_cache[84] = _createElementVNode("span", { class: "help" }, "体力不够先喂配置草料，不够再喂仙草（仙草每日 3 次）", -1))
+                        _cache[84] || (_cache[84] = _createElementVNode("span", { class: "help" }, "体力不够时喂一个仙草(+50)立即参赛（仙草每日 3 次）", -1))
                       ]),
                       _createElementVNode("label", _hoisted_46, [
                         _withDirectives(_createElementVNode("input", {
@@ -925,6 +925,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const Config = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-d828706c"]]);
+const Config = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-29f11a93"]]);
 
 export { Config as default };

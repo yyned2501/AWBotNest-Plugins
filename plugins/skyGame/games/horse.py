@@ -15,7 +15,7 @@
 #   - 每轮轮询最多执行一个养护动作，节奏拟人：
 #       死亡 → （可选）复活
 #       玩家赛可加入且体力足 → 加入（配置开关）
-#       玩家赛可加入但体力不足 → 先喂配置草料（精草/杂草），不够再仙草
+#       玩家赛可加入但体力不足 → 喂一个仙草(+50)，喂成功后同轮立即参赛
 #       饱腹 < 阈值 → 在每日额度内喂配置草料（普通 5 次/仙草 3 次）
 #       可遛 且未达上限 → 遛马（赚银元+经验）
 #       官方赛可报名 →（可选）免费报名
@@ -347,29 +347,33 @@ async def _care_once(ctx: object, cfg: dict, client: HdskyClient) -> None:
         await _notify_result(ctx, cfg, r, "玩家赛加入失败")
         return
 
-    # 补体力：玩家赛可加入但体力不足。优先喂配置草料（精草/杂草），只有配置草料
-    # 不够达标 / 额度用完 / 冷却中才动仙草。两边都喂不了则本轮空手，等冷却，不遛马耗体力。
+    # 补体力：玩家赛可加入但体力不足 → 喂一个仙草(+50)，喂成功后同轮立即参赛，
+    # 不等下一轮轮询。一个仙草仍不达标就不浪费额度，等体力自然恢复；
+    # 仙草额度/冷却不可用则本轮空手，不遛马耗体力。
     if match_joinable and stamina < min_stamina:
-        feed_type = _configured_feed_type(cfg)
-        if feed_type != "divine" and _regular_feed_ready(st, stats, profile, now_ms, ctx):
-            gain = _FEED_STAMINA.get(feed_type, 0)
-            if stamina + gain >= min_stamina:
-                await _do_feed(
-                    ctx,
-                    cfg,
-                    client,
-                    feed_type,
-                    f"玩家赛体力不足（{stamina} < {min_stamina}），{_feed_label(feed_type)}+{gain} 可达标",
-                )
-                return
-        if _divine_feed_ready(st, profile, now_ms, ctx):
-            await _do_feed(ctx, cfg, client, "divine", f"玩家赛体力不足（{stamina} < {min_stamina}），喂仙草补体力")
+        divine_gain = _FEED_STAMINA["divine"]
+        if stamina + divine_gain < min_stamina:
+            ctx.log.debug(
+                "玩家赛体力不足（%d < %d）且一个仙草(+%d)也不达标，等待体力恢复", stamina, min_stamina, divine_gain
+            )
             return
-        ctx.log.debug(
-            "玩家赛体力不足（%d < %d）且草料暂不可喂，等待补体力",
-            stamina,
-            min_stamina,
+        if not _divine_feed_ready(st, profile, now_ms, ctx):
+            ctx.log.debug("玩家赛体力不足（%d < %d）但仙草暂不可喂（额度/冷却），等待补体力", stamina, min_stamina)
+            return
+        r = await _do_feed(
+            ctx, cfg, client, "divine", f"玩家赛体力不足（{stamina} < {min_stamina}），喂仙草+{divine_gain} 后参赛"
         )
+        feed_result = r.get("result", {}) or {}
+        if not feed_result.get("ok", r.get("ok", False)):
+            return
+        r = await client.post("/api/portal/horse/race/action", {"action": "join", "requestKey": request_key()})
+        ctx.log.info(
+            "仙草补体力后加入玩家养马赛 #%s（体力 %d → %d）",
+            match.get("roundId"),
+            stamina,
+            stamina + divine_gain,
+        )
+        await _notify_result(ctx, cfg, r, "玩家赛加入失败")
         return
 
     # 日常喂食：饱腹 < 阈值才喂，且在每日额度内（普通 5 次/仙草 3 次）。
