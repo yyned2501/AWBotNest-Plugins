@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
 
 import pytest
@@ -16,6 +18,7 @@ from plugins.skyGame.games.tenhalf import (
     _join_amount,
     _once,
     _threshold_for,
+    start,
 )
 
 
@@ -103,6 +106,10 @@ class _FakeCtx:
         self.log = _FakeLog()
         self.notifications: list[tuple[object, str]] = []
         self.tables: list[tuple[list[str], list[list[object]], dict[str, object]]] = []
+        self.schedules: list[tuple[object, str, dict[str, object]]] = []
+
+    def schedule(self, fn: object, mode: str, **kwargs: object) -> None:
+        self.schedules.append((fn, mode, dict(kwargs)))
 
     async def notify(self, message: object, *args: object, **kwargs: object) -> None:
         self.notifications.append((message, str(kwargs.get("level", "info"))))
@@ -141,6 +148,23 @@ class _FakeClient:
 
 _OK = {"ok": True, "result": {"ok": True}}
 _FAIL = {"ok": True, "result": {"ok": False, "message": "银元不足"}}
+
+
+# ── 调度接线：回调必须零参可调 ──
+
+
+def test_start_registers_zero_arg_tick() -> None:
+    """平台对 ctx.schedule 回调是零参调用；带参签名会每轮 TypeError 并触发调度降级（v1.17.1）。"""
+    ctx = _FakeCtx()
+    ctx.config = {"tenhalf_poll_interval": 5}
+    start(ctx)
+    assert len(ctx.schedules) == 1
+    fn, mode, kwargs = ctx.schedules[0]
+    assert mode == "interval"
+    assert kwargs.get("id") == "tenhalf_poll"
+    assert kwargs.get("seconds") == 5
+    assert len(inspect.signature(fn).parameters) == 0
+    asyncio.run(fn())  # 未启用时零参调用直接返回，不抛异常
 
 
 # ── 纯函数：下注额夹取 / 爆牌概率 / 决策 / 阈值微调 ──
