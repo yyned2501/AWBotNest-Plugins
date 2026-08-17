@@ -48,6 +48,11 @@ _DEALERS_KEY = "tenhalf:dealers"
 _LAST_ROUND_KEY = "tenhalf:last_round"
 _LAST_ACTION_KEY = "tenhalf:last_action"
 _JOIN_FAIL_KEY = "tenhalf:join_fail_round"
+# 最近一次报名成功的局号：停牌后若活跃局已翻篇而结算没被 lastResult 抓到
+# （快速局 settled 窗口短于轮询间隔），按它去 history[] 补扫结算。
+_JOINED_ROUND_KEY = "tenhalf:joined_round"
+# history 补扫只看最近几条（漏掉的总是紧邻的上一局，不用全量扫）
+_HISTORY_SCAN_CAP = 10
 # 庄家手牌张数暂存：结算里只有点数没有张数，轮询时按 roundId 记观察到的最大张数，
 # 结算时配对计入「按张数分桶」的画像（只增不减，最大值即终局张数）。
 _DEALER_CARDS_KEY = "tenhalf:dealer_cards"
@@ -309,14 +314,8 @@ def _update_stats(ctx: object, delta: int) -> tuple[dict, dict]:
     return total, daily
 
 
-async def _handle_settlement(ctx: object, cfg: dict, game: dict) -> None:
-    """lastResult 每局只处理一次：记庄家画像；我方参局才入账战绩并推送。"""
-    last = game.get("lastResult") or {}
-    rid = last.get("roundId")
-    if rid in (None, "") or str(ctx.kv.get(_LAST_ROUND_KEY, "")) == str(rid):
-        return
-    ctx.kv.set(_LAST_ROUND_KEY, str(rid))
-    settlement = last.get("settlement") or {}
+async def _settle_round(ctx: object, cfg: dict, rid: object, settlement: dict) -> None:
+    """入账一局结算：记庄家画像；我方参局才入账战绩并推送（输赢统一 success）。"""
     dealer_cards = _pop_dealer_cards(ctx, rid)
     dealer_name = _record_dealer(ctx, settlement, cards=dealer_cards)
     me = settlement.get("self") or {}
@@ -343,6 +342,43 @@ async def _handle_settlement(ctx: object, cfg: dict, game: dict) -> None:
     await ctx.notify_table(["项目", "内容"], rows, caption=caption, level="success", category="十点半")
 
 
+async def _handle_settlement(ctx: object, cfg: dict, game: dict) -> None:
+    """lastResult 每局只处理一次（roundId 去重），委托 _settle_round 入账。"""
+    last = game.get("lastResult") or {}
+    rid = last.get("roundId")
+    if rid in (None, "") or str(ctx.kv.get(_LAST_ROUND_KEY, "")) == str(rid):
+        return
+    ctx.kv.set(_LAST_ROUND_KEY, str(rid))
+    await _settle_round(ctx, cfg, rid, last.get("settlement") or {})
+
+
+async def _catch_up_settlement(ctx: object, cfg: dict, game: dict) -> None:
+    """用 history[] 补扫被 lastResult 漏掉的结算（v1.19.1）。
+
+    快速局停牌后 5 秒内就开下一局报名，settled 窗口可能短于轮询间隔：
+    lastResult 只在窗口内可见，错过就永久错过（线上 08-18 连丢 5 局结算推送）。
+    history[] 带完整结算数据，按最近报名局号回查；history 也没有时降级推送
+    兜底（盈亏未知，战绩不入账），保证每局报名后必有结束推送。
+    """
+    joined = ctx.kv.get(_JOINED_ROUND_KEY, "")
+    if not joined or str(ctx.kv.get(_LAST_ROUND_KEY, "")) == str(joined):
+        return
+    active_rid = game.get("roundId") if game.get("active") else None
+    if active_rid is not None and str(active_rid) == str(joined):
+        return  # 报名的局还在进行中
+    for entry in (game.get("history") or [])[-_HISTORY_SCAN_CAP:]:
+        if not isinstance(entry, dict) or str(entry.get("roundId")) != str(joined):
+            continue
+        ctx.kv.set(_LAST_ROUND_KEY, str(joined))
+        await _settle_round(ctx, cfg, joined, entry.get("settlement") or {})
+        return
+    # history 也没有该条（窗口太短/响应缺字段）：标记已处理并降级推送
+    ctx.kv.set(_LAST_ROUND_KEY, str(joined))
+    ctx.log.warning("十点半 #%s 已翻篇但 lastResult/history 均未见结算，推送兜底", joined)
+    if cfg.get("tenhalf_notify", True):
+        await ctx.notify(f"🎲 十点半 #{joined} 已结算（未抓到结算详情，盈亏未知）", category="十点半")
+
+
 async def _try_join(ctx: object, cfg: dict, client: HdskyClient, game: dict, limits: dict) -> None:
     """报名下注。失败后本局不再重试（避免每轮轮询撞同一个拒绝）。"""
     rid = game.get("roundId")
@@ -350,6 +386,7 @@ async def _try_join(ctx: object, cfg: dict, client: HdskyClient, game: dict, lim
     r = await client.post(_ACTION_PATH, {"action": "join", "amount": amount, "requestKey": request_key()})
     result = r.get("result", {}) or {}
     if result.get("ok", r.get("ok", False)):
+        ctx.kv.set(_JOINED_ROUND_KEY, str(rid))  # 记录报名局号，供结算补扫定位
         ctx.log.info("加入十点半 #%s（下注 %s，单桌上限 %s）", rid, amount, game.get("amount"))
         if cfg.get("tenhalf_notify", True):
             await ctx.notify(
@@ -390,6 +427,8 @@ async def _once(ctx: object, cfg: dict, client: HdskyClient) -> None:
         return
     game = data.get("game") or {}
     await _handle_settlement(ctx, cfg, game)
+    # lastResult 漏掉的结算用 history[] 回查（快速局 settled 窗口短于轮询间隔）
+    await _catch_up_settlement(ctx, cfg, game)
     if not game.get("active"):
         return
 
