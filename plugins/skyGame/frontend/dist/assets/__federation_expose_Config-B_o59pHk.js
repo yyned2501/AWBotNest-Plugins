@@ -1027,10 +1027,10 @@ return (_ctx, _cache) => {
                                   { number: true }
                                 ]
                               ]),
-                              _cache[142] || (_cache[142] = _createElementVNode("span", { class: "help" }, "画像样本不足时的回退基准；样本足够时完全由庄家画像推导（均点+0.5 按爆率让利）", -1))
+                              _cache[142] || (_cache[142] = _createElementVNode("span", { class: "help" }, "画像样本不足时的回退基准；样本足够时由庄家画像推导（均点+0.5 按爆率让利），受爆牌红线夹取 ≤6.5", -1))
                             ])
                           ]),
-                          _cache[144] || (_cache[144] = _createElementVNode("span", { class: "help" }, " 决策优先序：庄家爆牌→停牌 ｜ 庄家点数可见→领先即停、落后仅反败牌数多于爆牌数才要牌 ｜ 否则按停牌阈值。从不认输（fold 与停牌同样损失下注）。爆牌概率随点数陡增：8→62%、9→69% ", -1))
+                          _cache[144] || (_cache[144] = _createElementVNode("span", { class: "help" }, " 决策优先序：庄家爆牌→停牌 ｜ 庄家点数可见→领先即停、落后仅反败牌数多于爆牌数才要牌 ｜ 否则按停牌阈值。从不认输（fold 与停牌同样损失下注）。爆牌概率随点数陡增：7→54%、8→62%， 故画像阈值最多 6.5，早停赌庄家自爆（另有五小 ×5 倍数放大爆牌代价） ", -1))
                         ]),
                         _createElementVNode("div", _hoisted_95, [
                           _createElementVNode("button", {
@@ -1048,6 +1048,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const Config = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-ca02298c"]]);
+const Config = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-63af746a"]]);
 
 export { Config as default };

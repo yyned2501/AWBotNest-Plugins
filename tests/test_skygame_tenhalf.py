@@ -221,22 +221,23 @@ def test_decide_no_available_actions() -> None:
 
 
 def test_threshold_for_derived_from_dealer_profile() -> None:
-    # 样本足够时完全由画像推导：均点 9.5 无爆 → 9.5+0.5=10（夹到 10）
+    # 样本足够时由画像推导，但受爆牌红线夹取（≤6.5）：均点 9.5 无爆 → 10 夹到 6.5
     dealers = {"涛": {"rounds": 9, "totals": [9.5] * 9}}
-    assert _threshold_for({"tenhalf_stand_threshold": 8}, dealers, "涛") == 10
-    # 样本不足不采信，退回配置基准
+    assert _threshold_for({"tenhalf_stand_threshold": 8}, dealers, "涛") == 6.5
+    # 样本不足不采信，退回配置基准（基准不受红线限制，用户显式选择优先）
     assert _threshold_for({"tenhalf_stand_threshold": 8}, {"涛": {"rounds": 3, "totals": [9.5] * 3}}, "涛") == 8
-    # 爆率 50% 让利 3 点：均点 8 → 8+0.5-3 = 5.5
+    assert _threshold_for({"tenhalf_stand_threshold": 9}, {}, "涛") == 9
+    # 爆率 50% 让利 2 点：均点 8 → 8+0.5-2 = 6.5
     dealers = {"涛": {"rounds": 10, "busts": 5, "totals": [8.0] * 8}}
-    assert _threshold_for({"tenhalf_stand_threshold": 8}, dealers, "涛") == 5.5
-    # 爆率 80%：8+0.5-4.8=3.7 → 夹到下限 4（爆率高 4 点也敢停，堵庄家爆）
+    assert _threshold_for({"tenhalf_stand_threshold": 8}, dealers, "涛") == 6.5
+    # 爆率 80%：8+0.5-3.2=5.3→5.5（爆率高 5.5 点就停，赌庄家爆）
     dealers = {"涛": {"rounds": 10, "busts": 8, "totals": [8.0] * 6}}
-    assert _threshold_for({"tenhalf_stand_threshold": 8}, dealers, "涛") == 4.0
+    assert _threshold_for({"tenhalf_stand_threshold": 8}, dealers, "涛") == 5.5
     # 只有爆牌样本（totals 为空）不推导，退回基准
     assert _threshold_for({"tenhalf_stand_threshold": 8}, {"涛": {"rounds": 12, "busts": 12}}, "涛") == 8
-    # 旧版脏数据清洗：>10.5 的样本改计爆牌（爆率 20%）：均点 8 → 8+0.5-1.2=7.3→7.5
+    # 旧版脏数据清洗：>10.5 的样本改计爆牌（爆率 20%）：均点 8 → 8+0.5-0.8=7.7→7.5 夹到 6.5
     dealers = {"涛": {"rounds": 10, "totals": [11.5, 11.0, 8.0, 8.0, 8.0, 8.0, 8.0, 8.0, 8.0, 8.0]}}
-    assert _threshold_for({"tenhalf_stand_threshold": 8}, dealers, "涛") == 7.5
+    assert _threshold_for({"tenhalf_stand_threshold": 8}, dealers, "涛") == 6.5
 
 
 def test_record_dealer_counts_over_target_as_bust() -> None:
@@ -265,11 +266,11 @@ def test_record_dealer_buckets_by_card_count() -> None:
 
 
 def test_threshold_prefers_card_bucket_then_aggregate() -> None:
-    # 张数桶样本足（≥3）→ 用桶：3 张桶均 9 点无爆 → 9+0.5=9.5（聚合均 5 不用）
-    dealers = {"涛": {"rounds": 9, "totals": [5.0] * 9, "cards": {"3": {"rounds": 3, "totals": [9.0] * 3}}}}
-    assert _threshold_for({"tenhalf_stand_threshold": 8}, dealers, "涛", dealer_cards=3) == 9.5
+    # 张数桶样本足（≥3）→ 用桶：3 张桶均 4 点 → 4.5（聚合均 5 → 5.5 不用）
+    dealers = {"涛": {"rounds": 9, "totals": [5.0] * 9, "cards": {"3": {"rounds": 3, "totals": [4.0] * 3}}}}
+    assert _threshold_for({"tenhalf_stand_threshold": 8}, dealers, "涛", dealer_cards=3) == 4.5
     # 该张数桶样本不足 → 退回聚合（均 5 → 5.5）
-    dealers = {"涛": {"rounds": 9, "totals": [5.0] * 9, "cards": {"3": {"rounds": 1, "totals": [9.0]}}}}
+    dealers = {"涛": {"rounds": 9, "totals": [5.0] * 9, "cards": {"3": {"rounds": 1, "totals": [4.0]}}}}
     assert _threshold_for({"tenhalf_stand_threshold": 8}, dealers, "涛", dealer_cards=3) == 5.5
     # 未提供张数 → 直接用聚合
     assert _threshold_for({"tenhalf_stand_threshold": 8}, dealers, "涛") == 5.5
