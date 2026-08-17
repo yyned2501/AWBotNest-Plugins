@@ -16,7 +16,10 @@ from plugins.skyGame.games.tenhalf import (
     _bust_prob,
     _decide,
     _join_amount,
+    _observe_dealer_cards,
     _once,
+    _pop_dealer_cards,
+    _record_dealer,
     _threshold_for,
     start,
 )
@@ -230,6 +233,79 @@ def test_threshold_for_derived_from_dealer_profile() -> None:
     assert _threshold_for({"tenhalf_stand_threshold": 8}, dealers, "涛") == 4.0
     # 只有爆牌样本（totals 为空）不推导，退回基准
     assert _threshold_for({"tenhalf_stand_threshold": 8}, {"涛": {"rounds": 12, "busts": 12}}, "涛") == 8
+    # 旧版脏数据清洗：>10.5 的样本改计爆牌（爆率 20%）：均点 8 → 8+0.5-1.2=7.3→7.5
+    dealers = {"涛": {"rounds": 10, "totals": [11.5, 11.0, 8.0, 8.0, 8.0, 8.0, 8.0, 8.0, 8.0, 8.0]}}
+    assert _threshold_for({"tenhalf_stand_threshold": 8}, dealers, "涛") == 7.5
+
+
+def test_record_dealer_counts_over_target_as_bust() -> None:
+    """实测爆牌局 handLabel 不含「爆」字（如「11点」）：>10.5 计爆牌不入点数样本。"""
+    ctx = _FakeCtx()
+    _record_dealer(ctx, {"dealerDisplayName": "涛", "dealerHandLabel": "11点"})
+    _record_dealer(ctx, {"dealerDisplayName": "涛", "dealerHandLabel": "爆牌"})
+    _record_dealer(ctx, {"dealerDisplayName": "涛", "dealerHandLabel": "8.5点"})
+    dealers = json.loads(str(ctx.kv.get("tenhalf:dealers")))
+    assert dealers["涛"] == {"rounds": 3, "busts": 2, "totals": [8.5]}
+
+
+# ── 庄家画像按手牌张数分桶 ──
+
+
+def test_record_dealer_buckets_by_card_count() -> None:
+    """传 cards 时同步计入按张数分桶；爆牌计入桶的 busts、不入桶点数样本。"""
+    ctx = _FakeCtx()
+    _record_dealer(ctx, {"dealerDisplayName": "涛", "dealerHandLabel": "8点"}, cards=3)
+    _record_dealer(ctx, {"dealerDisplayName": "涛", "dealerHandLabel": "11点"}, cards=3)  # 爆牌
+    _record_dealer(ctx, {"dealerDisplayName": "涛", "dealerHandLabel": "9点"}, cards=4)
+    entry = json.loads(str(ctx.kv.get("tenhalf:dealers")))["涛"]
+    assert entry["rounds"] == 3 and entry["busts"] == 1
+    assert entry["cards"]["3"] == {"rounds": 2, "busts": 1, "totals": [8.0]}
+    assert entry["cards"]["4"] == {"rounds": 1, "totals": [9.0]}
+
+
+def test_threshold_prefers_card_bucket_then_aggregate() -> None:
+    # 张数桶样本足（≥3）→ 用桶：3 张桶均 9 点无爆 → 9+0.5=9.5（聚合均 5 不用）
+    dealers = {"涛": {"rounds": 9, "totals": [5.0] * 9, "cards": {"3": {"rounds": 3, "totals": [9.0] * 3}}}}
+    assert _threshold_for({"tenhalf_stand_threshold": 8}, dealers, "涛", dealer_cards=3) == 9.5
+    # 该张数桶样本不足 → 退回聚合（均 5 → 5.5）
+    dealers = {"涛": {"rounds": 9, "totals": [5.0] * 9, "cards": {"3": {"rounds": 1, "totals": [9.0]}}}}
+    assert _threshold_for({"tenhalf_stand_threshold": 8}, dealers, "涛", dealer_cards=3) == 5.5
+    # 未提供张数 → 直接用聚合
+    assert _threshold_for({"tenhalf_stand_threshold": 8}, dealers, "涛") == 5.5
+
+
+def test_observe_and_pop_dealer_cards() -> None:
+    """按 roundId 取最大张数暂存（只增不减）；弹出后清空；无 cardCount 不记录。"""
+    ctx = _FakeCtx()
+    _observe_dealer_cards(ctx, 777, {"cardCount": 2})
+    _observe_dealer_cards(ctx, 777, {"cardCount": 3})
+    _observe_dealer_cards(ctx, 777, {"cardCount": 1})  # 不回退
+    assert _pop_dealer_cards(ctx, 777) == 3
+    assert _pop_dealer_cards(ctx, 777) is None  # 已弹出
+    _observe_dealer_cards(ctx, 778, {})  # 无 cardCount 不记录
+    assert _pop_dealer_cards(ctx, 778) is None
+
+
+@pytest.mark.asyncio
+async def test_settlement_pairs_observed_card_count() -> None:
+    """活跃局观察庄家 3 张 → 结算配对计入分桶并清空暂存。"""
+    ctx = _FakeCtx()
+    active = _game(
+        active=True,
+        phase="player_draw",
+        round_id=777,
+        players=[
+            {"isSelf": True, "betAmount": 100, "cardCount": 2},
+            {"dealer": True, "displayName": "麦克格雷涛", "cardCount": 3},
+        ],
+        self_total=9,
+    )
+    await _once(ctx, {}, _FakeClient(active, _OK))
+    settled = _game(active=False, last_result=_last_result(rid=777, delta=198, dealer_label="11点"))
+    await _once(ctx, {}, _FakeClient(settled, _OK))
+    entry = json.loads(str(ctx.kv.get("tenhalf:dealers")))["麦克格雷涛"]
+    assert entry["cards"]["3"]["busts"] == 1  # 11点>10.5 计爆
+    assert json.loads(str(ctx.kv.get("tenhalf:dealer_cards"))) == {}
 
 
 # ── 报名阶段 ──

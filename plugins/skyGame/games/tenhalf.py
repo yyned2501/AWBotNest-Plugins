@@ -19,8 +19,10 @@
 #     否则按停牌阈值：点数 ≥ 阈值停牌，否则要牌
 #   fold（认输）从不使用：认输与停牌同样损失下注，无收益。
 #
-# 庄家画像：按庄家名统计结算点数/爆牌率（kv 持久化）；样本 ≥ 8 时停牌阈值完全由
-# 画像推导——平局算输，目标需压过庄家均点；庄家爆率高则低点数即可停牌（赌庄家爆）。
+# 庄家画像：按庄家名统计结算点数/爆牌率（kv 持久化），并按庄家终局手牌张数分桶
+# （结算只有点数没有张数，张数靠轮询观察 players[].cardCount 按 roundId 暂存配对）。
+# 停牌阈值优先用「当前庄家张数」对应分桶（样本≥3），其次聚合画像（样本≥8）——
+# 平局算输，目标需压过庄家均点；庄家爆率高则低点数即可停牌（赌庄家爆）。
 #
 # 牌堆先验（未实测，按十点半系惯例）：标准 52 张，A=1、2-10 按面值、J/Q/K=0.5（12 张），
 # 仅用于爆牌概率与反败牌数估算，供决策与通知展示。
@@ -46,8 +48,13 @@ _DEALERS_KEY = "tenhalf:dealers"
 _LAST_ROUND_KEY = "tenhalf:last_round"
 _LAST_ACTION_KEY = "tenhalf:last_action"
 _JOIN_FAIL_KEY = "tenhalf:join_fail_round"
-# 庄家画像样本门槛：不足不采信，直接用配置阈值
+# 庄家手牌张数暂存：结算里只有点数没有张数，轮询时按 roundId 记观察到的最大张数，
+# 结算时配对计入「按张数分桶」的画像（只增不减，最大值即终局张数）。
+_DEALER_CARDS_KEY = "tenhalf:dealer_cards"
+_CARDS_STASH_CAP = 30
+# 庄家画像样本门槛：不足不采信，直接用配置阈值（按张数桶样本更稀，门槛放低）
 _MIN_DEALER_SAMPLES = 8
+_MIN_CARD_SAMPLES = 3
 _DEALER_TOTALS_CAP = 60
 # 画像推导阈值的夹取范围：爆率再高也至少 4 点，不爆的庄家最多追到 10
 _THRESHOLD_MIN = 4.0
@@ -132,59 +139,145 @@ def _load_json(kv: object, key: str) -> dict:
     return {}
 
 
-def _record_dealer(ctx: object, settlement: dict) -> str:
-    """累计一条庄家结算（局数/爆牌数/近期点数样本），返回庄家名。"""
+def _record_dealer(ctx: object, settlement: dict, cards: int | None = None) -> str:
+    """累计一条庄家结算（局数/爆牌数/近期点数样本），返回庄家名。
+
+    爆牌判定：文案含「爆」或点数 > 10.5（实测爆牌局的 handLabel 常不含「爆」字、
+    直接显示超点点数，如「11点」），爆牌不入点数样本。
+
+    传入 cards（本局庄家终局手牌张数）时，同步计入按张数分桶的画像。
+    """
     name = str(settlement.get("dealerDisplayName") or settlement.get("dealer") or "").strip()
     if not name:
         return ""
+    label = settlement.get("dealerHandLabel")
+    total = _parse_total(label)
+    bust = "爆" in str(label or "") or (total is not None and total > _TARGET)
     dealers = _load_json(ctx.kv, _DEALERS_KEY)
     entry = dealers.get(name) or {}
     entry["rounds"] = int(entry.get("rounds", 0) or 0) + 1
-    label = settlement.get("dealerHandLabel")
-    if "爆" in str(label or ""):
+    if bust:
         entry["busts"] = int(entry.get("busts", 0) or 0) + 1
-    else:
-        total = _parse_total(label)
-        if total is not None:
-            totals = list(entry.get("totals") or [])
-            totals.append(total)
-            entry["totals"] = totals[-_DEALER_TOTALS_CAP:]
+    elif total is not None:
+        totals = list(entry.get("totals") or [])
+        totals.append(total)
+        entry["totals"] = totals[-_DEALER_TOTALS_CAP:]
+    if isinstance(cards, int) and cards > 0:
+        cards_map = dict(entry.get("cards") or {})
+        bucket = dict(cards_map.get(str(cards)) or {})
+        bucket["rounds"] = int(bucket.get("rounds", 0) or 0) + 1
+        if bust:
+            bucket["busts"] = int(bucket.get("busts", 0) or 0) + 1
+        elif total is not None:
+            bt = list(bucket.get("totals") or [])
+            bt.append(total)
+            bucket["totals"] = bt[-_DEALER_TOTALS_CAP:]
+        cards_map[str(cards)] = bucket
+        entry["cards"] = cards_map
     dealers[name] = entry
     ctx.kv.set(_DEALERS_KEY, json.dumps(dealers, ensure_ascii=False))
     return name
 
 
-def _threshold_for(cfg: dict, dealers: dict, dealer_name: str) -> float:
-    """停牌阈值：样本足够时完全由庄家画像推导（不再基准±限幅）。
+def _observe_dealer_cards(ctx: object, rid: object, dealer_p: dict | None) -> None:
+    """轮询中观察庄家手牌张数，按 roundId 取最大值暂存（只增不减，即终局张数）。"""
+    if rid in (None, "") or not dealer_p:
+        return
+    cc = dealer_p.get("cardCount")
+    if not isinstance(cc, (int, float)) or isinstance(cc, bool) or cc <= 0:
+        return
+    stash = _load_json(ctx.kv, _DEALER_CARDS_KEY)
+    key = str(rid)
+    prev = stash.get(key)
+    if not isinstance(prev, (int, float)) or cc > prev:
+        stash[key] = int(cc)
+        if len(stash) > _CARDS_STASH_CAP:  # 防未结算局堆积，按插入顺序裁掉最旧
+            for k in list(stash)[: len(stash) - _CARDS_STASH_CAP]:
+                stash.pop(k, None)
+        ctx.kv.set(_DEALER_CARDS_KEY, json.dumps(stash, ensure_ascii=False))
 
-    平局算输：目标点数需压过庄家均点（+0.5）；庄家爆率高则按比例降低点数
-    要求——爆率高的庄家 4 点也敢停，堵他爆牌。样本不足退回配置基准。
+
+def _pop_dealer_cards(ctx: object, rid: object) -> int | None:
+    """取出并移除某局暂存的庄家终局张数；未观察到返回 None。"""
+    if rid in (None, ""):
+        return None
+    stash = _load_json(ctx.kv, _DEALER_CARDS_KEY)
+    cc = stash.pop(str(rid), None)
+    ctx.kv.set(_DEALER_CARDS_KEY, json.dumps(stash, ensure_ascii=False))
+    if isinstance(cc, (int, float)) and not isinstance(cc, bool) and cc > 0:
+        return int(cc)
+    return None
+
+
+def _dealer_effective(entry: dict) -> tuple[int, int, list[float]]:
+    """清洗后的庄家统计 (局数, 爆牌数, 点数样本)。
+
+    兼容旧版写入的脏数据：点数 > 10.5 的样本必是爆牌（当时爆牌局被误当高点点数），
+    读出时改计爆牌并从均点样本剔除，避免均点虚高把阈值顶到上限。
     """
-    base = float(cfg.get("tenhalf_stand_threshold", 8) or 8)
-    entry = dealers.get(dealer_name) or {}
-    totals = entry.get("totals") or []
     rounds = int(entry.get("rounds", 0) or 0)
-    if rounds < _MIN_DEALER_SAMPLES or not totals:
-        return base
+    busts = int(entry.get("busts", 0) or 0)
+    totals: list[float] = []
+    for v in entry.get("totals") or []:
+        try:
+            t = float(v)
+        except (TypeError, ValueError):
+            continue
+        if t > _TARGET:
+            busts += 1
+        else:
+            totals.append(t)
+    return rounds, busts, totals
+
+
+def _threshold_from_stats(rounds: int, busts: int, totals: list[float], min_samples: int) -> float | None:
+    """由 (局数/爆牌数/点数样本) 推导停牌阈值；样本不足或无点数样本返回 None。
+
+    平局算输：目标需压过庄家均点（+0.5）；爆率高则按比例降低点数要求。
+    """
+    if rounds < min_samples or not totals:
+        return None
     avg = sum(totals) / len(totals)
-    bust_rate = int(entry.get("busts", 0) or 0) / rounds
+    bust_rate = busts / rounds
     threshold = avg + 0.5 - bust_rate * _BUST_RATE_DISCOUNT
     return max(_THRESHOLD_MIN, min(_THRESHOLD_MAX, round(threshold * 2) / 2))
 
 
-def _dealer_profile_text(dealers: dict, name: str) -> str:
+def _threshold_for(cfg: dict, dealers: dict, dealer_name: str, dealer_cards: int | None = None) -> float:
+    """停牌阈值：优先用「当前庄家手牌张数」对应分桶的画像，其次聚合画像，都不够退配置基准。
+
+    平局算输、爆率高可低停（赌庄家爆）的推导见 _threshold_from_stats。
+    """
+    base = float(cfg.get("tenhalf_stand_threshold", 8) or 8)
+    entry = dealers.get(dealer_name) or {}
+    if isinstance(dealer_cards, int) and dealer_cards > 0:
+        bucket = (entry.get("cards") or {}).get(str(dealer_cards)) or {}
+        r, b, t = _dealer_effective(bucket)
+        v = _threshold_from_stats(r, b, t, _MIN_CARD_SAMPLES)
+        if v is not None:
+            return v
+    r, b, t = _dealer_effective(entry)
+    v = _threshold_from_stats(r, b, t, _MIN_DEALER_SAMPLES)
+    return base if v is None else v
+
+
+def _dealer_profile_text(dealers: dict, name: str, cards: int | None = None) -> str:
     entry = dealers.get(name) or {}
-    rounds = int(entry.get("rounds", 0) or 0)
+    rounds, busts, totals = _dealer_effective(entry)
     if not rounds:
         return ""
     parts = [f"{rounds}局"]
-    totals = entry.get("totals") or []
     if totals:
         parts.append(f"均 {sum(totals) / len(totals):.1f} 点")
-    busts = int(entry.get("busts", 0) or 0)
     if busts:
         parts.append(f"爆率 {busts / rounds:.0%}")
-    return "·".join(parts)
+    text = "·".join(parts)
+    if isinstance(cards, int) and cards > 0:
+        bucket = (entry.get("cards") or {}).get(str(cards)) or {}
+        br, bb, _bt = _dealer_effective(bucket)
+        if br:
+            text += f"｜{cards}张 {br}局爆率 {bb / br:.0%}"
+    return text
 
 
 def _bump(bucket: dict, delta: int) -> None:
@@ -224,7 +317,8 @@ async def _handle_settlement(ctx: object, cfg: dict, game: dict) -> None:
         return
     ctx.kv.set(_LAST_ROUND_KEY, str(rid))
     settlement = last.get("settlement") or {}
-    dealer_name = _record_dealer(ctx, settlement)
+    dealer_cards = _pop_dealer_cards(ctx, rid)
+    dealer_name = _record_dealer(ctx, settlement, cards=dealer_cards)
     me = settlement.get("self") or {}
     if not me:
         return  # 本局未参与：只记庄家画像
@@ -235,7 +329,7 @@ async def _handle_settlement(ctx: object, cfg: dict, game: dict) -> None:
         return
     rows: list[list[object]] = []
     if dealer_name:
-        profile = _dealer_profile_text(_load_json(ctx.kv, _DEALERS_KEY), dealer_name)
+        profile = _dealer_profile_text(_load_json(ctx.kv, _DEALERS_KEY), dealer_name, dealer_cards)
         rows.append(["庄家", f"{dealer_name}（{profile}）" if profile else dealer_name])
     if me.get("handLabel"):
         rows.append(["我方牌面", str(me.get("handLabel"))])
@@ -306,6 +400,8 @@ async def _once(ctx: object, cfg: dict, client: HdskyClient) -> None:
     self_p = next((p for p in players if isinstance(p, dict) and p.get("isSelf")), None)
     dealer_p = next((p for p in players if isinstance(p, dict) and p.get("dealer")), None)
     rid = game.get("roundId")
+    # 观察庄家手牌张数（按 roundId 取最大值暂存，供结算时配对计入按张数分桶的画像）
+    _observe_dealer_cards(ctx, rid, dealer_p)
 
     # 报名阶段：未报名且可加入 → 按配置下注
     if phase == "signup":
@@ -327,6 +423,14 @@ async def _once(ctx: object, cfg: dict, client: HdskyClient) -> None:
     total = float(self_info.get("total") or 0)
     dealers = _load_json(ctx.kv, _DEALERS_KEY)
     dealer_name = str((dealer_p or {}).get("displayName") or "")
+    raw_dealer_cards = (dealer_p or {}).get("cardCount")
+    dealer_cards_now = (
+        int(raw_dealer_cards)
+        if isinstance(raw_dealer_cards, (int, float))
+        and not isinstance(raw_dealer_cards, bool)
+        and raw_dealer_cards > 0
+        else None
+    )
     dealer_bust = bool((dealer_p or {}).get("bust"))
     raw_dealer_total = (dealer_p or {}).get("total")
     if isinstance(raw_dealer_total, (int, float)):
@@ -334,7 +438,7 @@ async def _once(ctx: object, cfg: dict, client: HdskyClient) -> None:
     else:
         m = _POINT_RE.search(str((dealer_p or {}).get("status") or ""))
         dealer_total = float(m.group(1)) if m else None
-    threshold = _threshold_for(cfg, dealers, dealer_name)
+    threshold = _threshold_for(cfg, dealers, dealer_name, dealer_cards=dealer_cards_now)
     action, reason = _decide(total, actions, dealer_bust, dealer_total, threshold)
     if action is None:
         ctx.log.debug("十点半 #%s 本轮不动作: %s", rid, reason)
