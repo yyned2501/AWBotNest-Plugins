@@ -983,7 +983,7 @@ return (_ctx, _cache) => {
                                 }, null, 512), [
                                   [_vModelCheckbox, cfg.tenhalf_notify]
                                 ]),
-                                _cache[135] || (_cache[135] = _createElementVNode("span", null, "报名/决策/结算推送", -1))
+                                _cache[135] || (_cache[135] = _createElementVNode("span", null, "报名/结算推送", -1))
                               ])
                             ])
                           ])
@@ -1011,12 +1011,12 @@ return (_ctx, _cache) => {
                               _cache[140] || (_cache[140] = _createElementVNode("span", { class: "help" }, "自动夹在门户最小下注与本桌单人上限之间", -1))
                             ]),
                             _createElementVNode("div", _hoisted_94, [
-                              _cache[141] || (_cache[141] = _createElementVNode("span", { class: "lbl" }, "停牌点数阈值", -1)),
+                              _cache[141] || (_cache[141] = _createElementVNode("span", { class: "lbl" }, "停牌点数阈值（基准）", -1)),
                               _withDirectives(_createElementVNode("input", {
                                 "onUpdate:modelValue": _cache[46] || (_cache[46] = $event => ((cfg.tenhalf_stand_threshold) = $event)),
                                 class: "inp",
                                 type: "number",
-                                min: "5",
+                                min: "4",
                                 max: "10",
                                 step: "0.5"
                               }, null, 512), [
@@ -1027,7 +1027,7 @@ return (_ctx, _cache) => {
                                   { number: true }
                                 ]
                               ]),
-                              _cache[142] || (_cache[142] = _createElementVNode("span", { class: "help" }, "点数达此值停牌，低于继续要牌；庄家画像按历史均点微调 ±1.5", -1))
+                              _cache[142] || (_cache[142] = _createElementVNode("span", { class: "help" }, "画像样本不足时的回退基准；样本足够时完全由庄家画像推导（均点+0.5 按爆率让利）", -1))
                             ])
                           ]),
                           _cache[144] || (_cache[144] = _createElementVNode("span", { class: "help" }, " 决策优先序：庄家爆牌→停牌 ｜ 庄家点数可见→领先即停、落后仅反败牌数多于爆牌数才要牌 ｜ 否则按停牌阈值。从不认输（fold 与停牌同样损失下注）。爆牌概率随点数陡增：8→62%、9→69% ", -1))
@@ -1048,6 +1048,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const Config = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-62e834e5"]]);
+const Config = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-ca02298c"]]);
 
 export { Config as default };
