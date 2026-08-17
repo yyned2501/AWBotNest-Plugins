@@ -90,6 +90,26 @@
 - **比赛字段（competitions，2026-08-08 实测确认）**：`horse.competitions` 含 `official`（官方赛）与 `match`（玩家养马赛，Horse2）两类。
   - `official`：`date/status/signupOpen/settled/minEntrants/entrantCount/entrants[]/joined/eligibility{canRace,detail}/rewardPlan[]/yesterday`。报名动作 `official_join`，退出 `official_leave`，每日免费一次。
   - `match`：`active`（是否进行中/报名中）、`canStart`（本账号能否开房）、`limits{minAmount,maxAmount}`（100–10000）、`history[]`（历史结算：roundId/amount/host/cancelled/winner/ranking/selfDelta）、`active` 时含 `roundId/host/amount/closeAtMs/entrants[]/maxEntrants/actions[]/joined`。**加入条件 = `active && "join" in actions && !joined`**；加入请求体仅 `{action: "join", requestKey}`（报名额取服务端 `match.amount`，无需传 amount）；开房动作 `start` 才需 `amount`（在 limits 范围内）。加入有银元成本（报名额，落败扣除），前端确认文案「报名额为 X 银元，落败会扣除报名额」。
+
+### 十点半（tenhalf，2026-08-17 调研）
+
+类 21 点的庄家制牌戏，门户前端 `portal-games.js`（v20260806-19）驱动。**尚未接入插件**。
+
+| 用途 | 方法与路径 | 请求体 | 证据 |
+| --- | --- | --- | --- |
+| 轮询牌局状态 | `GET /api/portal/tenhalf` | 无 | 2026-08-17 实测（tower cookie） |
+| 开庄创建牌桌 | `POST /api/portal/tenhalf/start` | `{requestKey, amount}`（amount=单人下注上限 100–10000） | 前端源码，POST 待验证；开庄需备本局上限 10 倍本金，报名面板同步 TG 官群 |
+| 牌局动作 | `POST /api/portal/tenhalf/action` | `{requestKey, action, amount?}`；`action` ∈ `join`（下注报名，需 amount ∈ [limits.minAmount, game.amount]）/`hit`（要牌）/`stand`（停牌）/`fold`（认输） | 前端源码，POST 待验证；`status` 也出现在 actions 中但前端过滤不展示 |
+
+**GET 实测字段（active=false 无进行中牌局）**：`game.active/canStart`、`game.gameCreation{paused,canCreate,message,updatedAtMs,updatedBy}`（全局开局开关）、`game.limits{minAmount:100,maxAmount:10000,maxPlayers:10}`、`game.lastResult` 与 `game.history[]`（roundId/amount/dealer/dealerSource/settledAtMs/settlement{dealerDisplayName,dealerSource,dealerHandLabel,dealerDelta,rakeTotal,self,results[]{displayName,source,handLabel,resultText,delta}}）。
+
+**active=true 时字段（前端渲染源码，待实测验证）**：`roundId/phase`（`signup` 报名中 → `dealer_draw` 庄家抓牌 → `player_draw` 玩家抓牌 → `settled` 已结算）、`amount`（单人下注上限）、`deadlineAtMs`（阶段倒计时）、`dealer`、`players[]`（`isSelf/folded/bust/dealer/ai/source/displayName/status/cardCount/betAmount`，source 含 app/web/telegram/ai）、`actions[]`、`self{cards[],total,status}`。
+
+**规则推断（结算文案反推，待验证）**：目标 10.5 点，超过即爆牌（玩家爆牌输掉下注、庄家爆牌玩家赢）；玩家点数大于庄家则赢；赢面有 1% 抽水（下注 100 赢 +99，`rakeTotal` 与庄家 delta 对应）；存在半点（12.5/16.5 等，J/Q/K 计 0.5 点的经典十点半规则，待确认）；有 AI 玩家参与（`player.ai`/source=ai）。
+
+### 幸运轮盘（lucky，2026-08-17 调研发现，顺带记录）
+
+`GET /api/portal/lucky`（返回 `lucky{recent[],prizes[],freeSpins,costPerSpin:2000,maxSpins}`）与 `POST /api/portal/lucky/spin`（`{count, requestKey}`，响应 `result{silverGain,animation,...}`）。前端源码证据，未实测；免费次数优先抵扣，奖励进统一账户。**尚未接入插件**。
 - **喂食与冷却（2026-08-08 用户确认 + 2026-08-13/14 实测补全）**：普通喂食（weed/fine）与仙草（divine）**独立计数、独立冷却**——`profile.daily_feed_count`（普通喂食，与 `stats.feedCountToday/feedMax` 对应，每日 5 次）与 `profile.daily_divine_feed_count`（仙草，每日 3 次，服务端文案「今日仙草喂养：3 / 3」已确认）分开。喂食撞冷却时服务端返回「你的马刚吃过，xx分钟 后再喂」（**`result.code=="feed_cooldown"`** + `remainMs`，2026-08-14 实测；遛马仍是 `cooldown`），插件按 `remainMs` 退避不重复尝试。喂食成功响应**不带** remainMs，但门户立刻再喂仍会拒绝——插件成功后先本地预退避 60 分钟（实测约 1 小时）。精草冷却中仍可喂仙草补体力。
 - **草料目录 `horse.feeds`（2026-08-13 GET /api/portal/horse 已确认）**：`weed` 杂草 100 银元 +6 体力 / +12 饱腹；`fine` 精草 300 银元 +18 体力 / +30 饱腹；`divine` 仙草 1000 银元 +50 体力 / +60 饱腹。
 - **喂食成功响应（2026-08-13 POST feed divine 已确认）**：`result` 含 `ok/amount/feedType/feedLabel/expGain/progressGain/profile/message`。`message` 是十余行说明（规则/战绩/改名费），不适合原样推送；插件用结构化字段组表。`profile.last_feed_at_ms` 只在普通喂食时更新（当日 3 次仙草后该字段仍停在前一日普通喂食时间）。
@@ -99,5 +119,6 @@
 
 - `showdown` 实测只需 `{ "action": "showdown" }`（多次提交均 `ok: true`，无目标/确认字段）；`open` 同为开牌动作但尚未在实测中单独提交验证。
 - 对手发起应战后 `game.phase` 的更多取值；当前插件不会用它阻断行动（仅单挑强制摊牌阶段观察到 `"showdown"`）。
+- 十点半：`POST /api/portal/tenhalf/start` 与 `/action` 的实际请求/响应格式、active 时段的完整字段、抓牌点数构成（J/Q/K=0.5 待确认）、爆牌/停牌时机与 AI 玩家行为，均需真实牌局实测。
 
 发生应战失败时，记录并保留（脱敏后）`roundId`、`phase`、`actions`、`self` 关键状态与 POST 错误，用于补全本节。
