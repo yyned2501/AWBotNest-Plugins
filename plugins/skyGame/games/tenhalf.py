@@ -12,6 +12,7 @@
 # 每轮轮询决策链：
 #   lastResult 出现新局 → 结算入账：通知 + 累计/当日战绩 + 庄家画像（按 roundId 去重）
 #   signup 且可加入 → 按配置下注额报名（夹在门户最小下注与单桌人均上限之间）
+#   推送策略：每局只在报名成功与结算时各推一次，要牌/停牌过程不推送（只记日志）
 #   player_draw 且轮到我方（已报名、未出局）：
 #     庄家爆牌 → 停牌（未爆即赢）
 #     庄家当前点数可见 → 领先即停牌；落后仅在反败牌数 > 爆牌数时要牌
@@ -237,9 +238,8 @@ async def _handle_settlement(ctx: object, cfg: dict, game: dict) -> None:
     rows.append(["📊 累计", _stats_text(total)])
     rows.append(["📅 今日", _stats_text(daily)])
     caption = f"🎲 十点半 #{rid} 结算 {'+' if delta >= 0 else ''}{delta:,} 银元"
-    await ctx.notify_table(
-        ["项目", "内容"], rows, caption=caption, level="success" if delta >= 0 else "warning", category="十点半"
-    )
+    # 输赢都走 success：正常结算不算异常，不用 warning 刷屏
+    await ctx.notify_table(["项目", "内容"], rows, caption=caption, level="success", category="十点半")
 
 
 async def _try_join(ctx: object, cfg: dict, client: HdskyClient, game: dict, limits: dict) -> None:
@@ -262,10 +262,8 @@ async def _try_join(ctx: object, cfg: dict, client: HdskyClient, game: dict, lim
         await ctx.notify(f"🎲 十点半报名失败: {msg}", level="warning", category="十点半")
 
 
-async def _submit_action(
-    ctx: object, cfg: dict, client: HdskyClient, game: dict, action: str, reason: str, total: float
-) -> None:
-    """提交要牌/停牌。同局同点数同动作去重，避免响应未更新前重复提交。"""
+async def _submit_action(ctx: object, client: HdskyClient, game: dict, action: str, reason: str, total: float) -> None:
+    """提交要牌/停牌。同局同点数同动作去重；过程不推送，每局只在结算时推一次。"""
     rid = game.get("roundId")
     sig = f"{rid}:{action}:{total:g}"
     if ctx.kv.get(_LAST_ACTION_KEY, "") == sig:
@@ -280,8 +278,6 @@ async def _submit_action(
     ctx.kv.set(_LAST_ACTION_KEY, sig)
     label = "要牌" if action == "hit" else "停牌"
     ctx.log.info("十点半 #%s %s（点数 %g，%s）", rid, label, total, reason)
-    if cfg.get("tenhalf_notify", True):
-        await ctx.notify(f"🎲 十点半 #{rid} {label}：点数 {total:g}，{reason}", category="十点半")
 
 
 async def _once(ctx: object, cfg: dict, client: HdskyClient) -> None:
@@ -336,7 +332,7 @@ async def _once(ctx: object, cfg: dict, client: HdskyClient) -> None:
     if action is None:
         ctx.log.debug("十点半 #%s 本轮不动作: %s", rid, reason)
         return
-    await _submit_action(ctx, cfg, client, game, action, reason, total)
+    await _submit_action(ctx, client, game, action, reason, total)
 
 
 def start(ctx: object) -> None:

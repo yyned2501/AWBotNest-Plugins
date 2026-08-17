@@ -294,7 +294,9 @@ async def test_player_draw_hits_below_threshold() -> None:
     await _once(ctx, {"tenhalf_stand_threshold": 8}, client)
 
     assert client.posts and client.posts[0][1]["action"] == "hit"
-    assert any("要牌" in str(msg) for msg, _ in ctx.notifications)
+    # 要牌/停牌过程不推送，每局只在结算时推一次（v1.17.2），动作只记日志
+    assert ctx.notifications == []
+    assert any("要牌" in msg for _, msg in ctx.log.records)
 
 
 @pytest.mark.asyncio
@@ -362,6 +364,20 @@ async def test_settlement_notifies_once_and_records_stats() -> None:
     # 庄家画像入账：8.5 点一局
     dealers = json.loads(str(ctx.kv.get("tenhalf:dealers")))
     assert dealers["麦克格雷涛"] == {"rounds": 1, "totals": [8.5]}
+
+
+@pytest.mark.asyncio
+async def test_settlement_loss_notifies_success_level() -> None:
+    """输局也按 success 推送：正常结算不算异常，不用 warning（v1.17.2）。"""
+    ctx = _FakeCtx()
+    state = _game(active=False, last_result=_last_result(delta=-100))
+    client = _FakeClient(state, _OK)
+
+    await _once(ctx, {}, client)
+
+    assert len(ctx.tables) == 1
+    _, _, kwargs = ctx.tables[0]
+    assert kwargs.get("level") == "success"
 
 
 @pytest.mark.asyncio
