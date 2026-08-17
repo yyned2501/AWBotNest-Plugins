@@ -14,6 +14,7 @@ import pytest
 
 from plugins.skyGame.games.tenhalf import (
     _bust_prob,
+    _catch_up_settlement,
     _decide,
     _join_amount,
     _observe_dealer_cards,
@@ -486,3 +487,87 @@ async def test_state_error_resets_csrf_and_skips() -> None:
 
     assert client.posts == []
     assert any(level == "WARNING" for level, _ in ctx.log.records)
+
+
+# ── 结算补扫：快速局 settled 窗口短于轮询间隔，lastResult 错过后用 history 回查（v1.19.1）──
+
+
+def _history_entry(rid: int, delta: int = -100) -> dict[str, object]:
+    return {
+        "roundId": rid,
+        "amount": 500,
+        "dealer": "麦克格雷涛",
+        "settledAtMs": 1,
+        "settlement": {
+            "dealerDisplayName": "麦克格雷涛",
+            "dealerHandLabel": "9点",
+            "self": {"displayName": "Yy", "handLabel": "8点", "resultText": "点数小于庄家", "delta": delta},
+            "results": [],
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_catch_up_settles_missed_round_from_history() -> None:
+    """停牌后轮询直接撞上新开局（lastResult 已翻篇）：history 补扫入账并推送。"""
+    ctx = _FakeCtx()
+    ctx.kv.set("tenhalf:joined_round", "1903")
+    new_round = _game(phase="signup", round_id=1904, actions=["join"])
+    new_round["game"]["history"] = [_history_entry(1903, delta=-100)]
+
+    await _once(ctx, {}, _FakeClient(new_round, _OK))
+
+    assert len(ctx.tables) == 1  # 结算推送没丢
+    assert ctx.kv.get("tenhalf:last_round") == "1903"
+    stats = json.loads(str(ctx.kv.get("tenhalf:stats")))
+    assert stats["total"]["net"] == -100
+
+
+@pytest.mark.asyncio
+async def test_catch_up_once_then_no_duplicate() -> None:
+    """补扫过一次后 last_round 已标记，后续轮询不重复入账。"""
+    ctx = _FakeCtx()
+    ctx.kv.set("tenhalf:joined_round", "1903")
+    new_round = _game(phase="signup", round_id=1904, actions=["join"])
+    new_round["game"]["history"] = [_history_entry(1903)]
+    client = _FakeClient(new_round, _OK)
+
+    await _once(ctx, {}, client)
+    await _once(ctx, {}, client)
+
+    assert len(ctx.tables) == 1
+
+
+@pytest.mark.asyncio
+async def test_catch_up_fallback_when_history_empty() -> None:
+    """history 也没有该条：降级推送兜底（盈亏未知），不重复触发。"""
+    ctx = _FakeCtx()
+    ctx.kv.set("tenhalf:joined_round", "1903")
+    new_round = _game(phase="signup", round_id=1904, actions=["join"])
+
+    await _once(ctx, {}, _FakeClient(new_round, _OK))
+
+    assert ctx.tables == []  # 无详情不组表
+    assert any("盈亏未知" in str(msg) for msg, _ in ctx.notifications)
+    assert ctx.kv.get("tenhalf:last_round") == "1903"
+    assert ctx.kv.get("tenhalf:stats") is None  # 盈亏未知不入账战绩
+
+
+@pytest.mark.asyncio
+async def test_catch_up_waits_while_round_still_active() -> None:
+    """报名的局还在进行中（active roundId == joined）不触发补扫。"""
+    ctx = _FakeCtx()
+    ctx.kv.set("tenhalf:joined_round", "1903")
+    ongoing = _game(phase="player_draw", round_id=1903, actions=["hit", "stand"], self_total=5)
+
+    await _catch_up_settlement(ctx, {}, ongoing["game"])
+
+    assert ctx.notifications == [] and ctx.kv.get("tenhalf:last_round") is None
+
+
+@pytest.mark.asyncio
+async def test_join_records_round_for_catch_up() -> None:
+    """报名成功时记下局号，供后续补扫定位。"""
+    ctx = _FakeCtx()
+    await _once(ctx, {}, _FakeClient(_game(phase="signup", actions=["join"]), _OK))
+    assert ctx.kv.get("tenhalf:joined_round") == "501"
