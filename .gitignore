@@ -12,3 +12,4 @@ MIGRATION.md
 
 # Claude 私人部署工具（项目作用域，不入库）
 .claude/skills/deploy-plugin/
+.qoder/
