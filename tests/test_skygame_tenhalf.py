@@ -15,12 +15,16 @@ import pytest
 from plugins.skyGame.games.tenhalf import (
     _bust_prob,
     _catch_up_settlement,
+    _dealer_dist,
     _decide,
+    _decide_ev,
+    _ev_play,
     _join_amount,
     _observe_dealer_cards,
     _once,
     _pop_dealer_cards,
     _record_dealer,
+    _stand_ev,
     _threshold_for,
     start,
 )
@@ -288,6 +292,53 @@ def test_observe_and_pop_dealer_cards() -> None:
     assert _pop_dealer_cards(ctx, 778) is None
 
 
+# ── EV 决策（v1.21.0）：停牌 EV 对要牌 EV 递推，庄家画像分布驱动 ──
+
+# 样本庄家：爆率 30%、非爆样本全 8 点（停牌 EV 手算可验）
+_EV_DEALER = {"rounds": 10, "busts": 3, "totals": [8.0] * 7}
+
+
+def test_stand_ev_counts_bust_and_lower_totals() -> None:
+    # 庄家爆牌或点数低于我赢，同点庄家赢；无样本时只看爆率
+    assert _stand_ev(9, 0.3, [8.0] * 7) == pytest.approx(1.0)
+    assert _stand_ev(8, 0.3, [8.0] * 7) == pytest.approx(-0.4)  # 同点输
+    assert _stand_ev(7, 0.3, [8.0] * 7) == pytest.approx(-0.4)  # 只能赌庄家爆
+    assert _stand_ev(5, 0.5, []) == pytest.approx(0.0)
+
+
+def test_ev_play_five_small_and_optimality() -> None:
+    assert _ev_play(4, 5, 0.0, [9.0], {}) == pytest.approx(5.0)  # 五小直接赢 ×5
+    # 最优打法 EV 永不低于停牌 EV（递推取 max）
+    assert _ev_play(2, 0, 0.3, [8.0] * 7, {}) >= _stand_ev(2, 0.3, [8.0] * 7)
+
+
+def test_dealer_dist_prefers_card_bucket_then_aggregate() -> None:
+    dealers = {"涛": {**_EV_DEALER, "cards": {"3": {"rounds": 3, "busts": 1, "totals": [6.0] * 2}}}}
+    p_bust, samples = _dealer_dist(dealers, "涛", 3)
+    assert p_bust == pytest.approx(1 / 3) and samples == [6.0, 6.0]  # 桶样本足优先
+    p_bust, samples = _dealer_dist(dealers, "涛", None)
+    assert p_bust == pytest.approx(3 / 10) and samples == [8.0] * 7  # 退回聚合
+    assert _dealer_dist({"涛": {"rounds": 2, "totals": [8.0, 8.0]}}, "涛", None) is None  # 样本不足
+    assert _dealer_dist({}, "涛", 3) is None
+
+
+def test_decide_ev_prefers_higher_ev_action() -> None:
+    dist = (0.3, [8.0] * 7)
+    action, reason = _decide_ev(5, 0, ["hit", "stand"], True, None, dist)
+    assert action == "stand" and "爆牌" in reason  # 庄家已爆优先
+    action, _ = _decide_ev(5, 5, ["hit", "stand"], False, None, dist)
+    assert action == "stand"  # 已五小直接赢 ×5
+    action, _ = _decide_ev(5, 0, ["hit", "stand"], False, None, dist)
+    assert action == "hit"  # 要牌 EV -0.37 > 停牌 -0.40
+    action, _ = _decide_ev(9.5, 2, ["hit", "stand"], False, None, dist)
+    assert action == "stand"  # 9.5 点几乎稳赢，要牌只会招爆
+    action, _ = _decide_ev(4, 4, ["hit", "stand"], False, None, dist)
+    assert action == "hit"  # 4 张低点数追五小 ×5（EV +3.15）
+    action, _ = _decide_ev(4, 2, ["hit", "stand"], False, 9.0, dist)
+    assert action == "hit"  # 庄家 9 点可见：点质量分布，反败优于停牌
+    assert _decide_ev(5, 0, [], False, None, dist)[0] is None
+
+
 @pytest.mark.asyncio
 async def test_settlement_pairs_observed_card_count() -> None:
     """活跃局观察庄家 3 张 → 结算配对计入分桶并清空暂存。"""
@@ -390,6 +441,63 @@ async def test_player_draw_stands_above_threshold() -> None:
     await _once(ctx, {"tenhalf_stand_threshold": 8}, client)
 
     assert client.posts and client.posts[0][1]["action"] == "stand"
+
+
+@pytest.mark.asyncio
+async def test_player_draw_uses_ev_when_profile_present() -> None:
+    """画像样本足够时 EV 递推取代阈值（决策日志带 EV 理由）。"""
+    ctx = _FakeCtx()
+    ctx.kv.set("tenhalf:dealers", json.dumps({"麦克格雷涛": _EV_DEALER}))
+    client = _FakeClient(_draw_state(9.5), _OK)
+
+    await _once(ctx, {"tenhalf_stand_threshold": 20}, client)  # 阈值故意给高，验证没走阈值路径
+
+    assert client.posts and client.posts[0][1]["action"] == "stand"
+    assert any("EV" in msg for _, msg in ctx.log.records)
+
+
+@pytest.mark.asyncio
+async def test_player_draw_stands_when_dealer_five_small() -> None:
+    """庄家 5 张未爆 = 五小已定（全桌 ×5 判负），停牌早了结。"""
+    ctx = _FakeCtx()
+    state = _game(
+        phase="player_draw",
+        actions=["hit", "stand"],
+        players=[
+            {"isSelf": True, "betAmount": 100, "cardCount": 3},
+            {"dealer": True, "displayName": "涛", "cardCount": 5},
+        ],
+        self_total=9,
+    )
+    client = _FakeClient(state, _OK)
+
+    await _once(ctx, {}, client)
+
+    assert client.posts and client.posts[0][1]["action"] == "stand"
+    assert any("五小" in msg for _, msg in ctx.log.records)
+
+
+@pytest.mark.asyncio
+async def test_notify_failure_does_not_break_poll() -> None:
+    """通知渠道不可用（断网窗口）时吞异常只记日志，不冒泡到调度层（线上 08-18 事故）。"""
+
+    class _BrokenCtx(_FakeCtx):
+        async def notify(self, message: object, *args: object, **kwargs: object) -> None:
+            raise RuntimeError("无可用通知渠道")
+
+        async def notify_table(self, *args: object, **kwargs: object) -> None:
+            raise RuntimeError("无可用通知渠道")
+
+    ctx = _BrokenCtx()
+    state = _game(active=False, last_result=_last_result(delta=198))
+    client = _FakeClient(state, _OK)
+
+    await _once(ctx, {}, client)  # 不抛异常
+
+    assert any("通知发送失败" in msg for _, msg in ctx.log.records)
+    # 战绩照常入账，只有通知丢失
+    stats = json.loads(str(ctx.kv.get("tenhalf:stats")))
+    assert stats["total"]["rounds"] == 1
 
 
 @pytest.mark.asyncio

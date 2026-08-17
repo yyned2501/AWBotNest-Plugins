@@ -19,8 +19,10 @@
 #   推送策略：每局只在报名成功与结算时各推一次，要牌/停牌过程不推送（只记日志）
 #   player_draw 且轮到我方（已报名、未出局）：
 #     庄家爆牌 → 停牌（未爆即赢）
-#     庄家当前点数可见 → 领先即停牌；落后仅在反败牌数 > 爆牌数时要牌
-#     否则按停牌阈值：点数 ≥ 阈值停牌，否则要牌（画像推导阈值受爆牌红线 6.5 夹取）
+#     庄家点数可见 → 点质量分布进 EV；庄家 5 张未爆（五小）→ 停牌认亏
+#     庄家画像样本足够 → EV 决策：停牌 EV（画像点数分布 + 爆率）对比要牌 EV
+#     （52 张先验递推，含五小 ×5 收益与爆牌损失），择优（v1.21.0）
+#     画像不足 → 退 v1.20.0 阈值逻辑（画像推导阈值受爆牌红线 6.5 夹取）
 #   fold（认输）从不使用：认输与停牌同样损失下注，无收益。
 #
 # 庄家画像：按庄家名统计结算点数/爆牌率（kv 持久化），并按庄家终局手牌张数分桶
@@ -63,10 +65,12 @@ _HISTORY_SCAN_CAP = 10
 # 结算时配对计入「按张数分桶」的画像（只增不减，最大值即终局张数）。
 _DEALER_CARDS_KEY = "tenhalf:dealer_cards"
 _CARDS_STASH_CAP = 30
-# 庄家画像样本门槛：不足不采信，直接用配置阈值（按张数桶样本更稀，门槛放低）
+# 庄家画像样本门槛：不足不采信，退阈值/配置逻辑（按张数桶样本更稀，门槛放低）
 _MIN_DEALER_SAMPLES = 8
 _MIN_CARD_SAMPLES = 3
 _DEALER_TOTALS_CAP = 60
+# 五小（5 张不爆）直接赢，倍数 ×5（2026-08-18 实测坐实）；EV 递推的收益项
+_FIVE_SMALL_MULT = 5.0
 # 画像推导阈值的夹取范围：爆率再高也至少 4 点；上限 6.5 是爆牌红线（v1.20.0）——
 # 7 点要牌爆率 >50%，且线上 61% 输局是爆牌（含五小倍数放大），早停赌庄家自爆
 # 的期望全面优于追高点数（模拟：高爆庄家阈值 6 EV +0.10 vs 阈值 8 -0.16）。
@@ -138,6 +142,105 @@ def _decide(
             return "stand", "未开放要牌，停牌"
         return None, "要牌/停牌均未开放"
     return "hit", f"点数 {total:g} < 阈值 {threshold:g}，爆牌概率 {_bust_prob(total):.0%}"
+
+
+def _stand_ev(total: float, p_bust: float, samples: list[float]) -> float:
+    """停牌 EV（单位下注）：庄家爆牌或点数低于我赢，同点庄家赢。"""
+    if not samples:
+        return 2.0 * p_bust - 1.0  # 只有爆率没有点数样本：爆即赢、否则输
+    below = sum(1 for x in samples if x < total)
+    p_win = p_bust + (1.0 - p_bust) * below / len(samples)
+    return 2.0 * p_win - 1.0
+
+
+def _ev_play(total: float, cards: int, p_bust: float, samples: list[float], memo: dict) -> float:
+    """状态 (total, cards) 起最优打法的 EV（单位下注），memo 记忆化。
+
+    状态空间小（点数为 0.5 的整数倍、张数 ≤5），递推即精确解，
+    等价于无限次蒙特卡洛且零随机、可测试；要牌按 52 张先验逐张期望：
+    爆牌 -1，拿到第 5 张未爆 → 五小 +5，否则递推下一状态。
+    """
+    key = (round(total * 2), cards)
+    if key in memo:
+        return memo[key]
+    if cards >= 5:
+        memo[key] = _FIVE_SMALL_MULT  # 五小直接赢 ×5
+        return _FIVE_SMALL_MULT
+    ev_stand = _stand_ev(total, p_bust, samples)
+    ev_hit = 0.0
+    for v in _DECK:
+        t2 = total + v
+        if t2 > _TARGET:
+            ev_hit -= 1.0
+        elif cards + 1 >= 5:
+            ev_hit += _FIVE_SMALL_MULT
+        else:
+            ev_hit += _ev_play(t2, cards + 1, p_bust, samples, memo)
+    ev_hit /= len(_DECK)
+    best = max(ev_stand, ev_hit)
+    memo[key] = best
+    return best
+
+
+def _dealer_dist(dealers: dict, name: str, cards: int | None) -> tuple[float, list[float]] | None:
+    """庄家终局分布 (爆率, 非爆点数样本)：优先当前张数桶（样本≥3），其次聚合（样本≥8）。"""
+    entry = dealers.get(name) or {}
+    if isinstance(cards, int) and cards > 0:
+        bucket = (entry.get("cards") or {}).get(str(cards)) or {}
+        r, b, t = _dealer_effective(bucket)
+        if r >= _MIN_CARD_SAMPLES and t:
+            return min(1.0, b / r), list(t)
+    r, b, t = _dealer_effective(entry)
+    if r >= _MIN_DEALER_SAMPLES and t:
+        return min(1.0, b / r), list(t)
+    return None
+
+
+def _decide_ev(
+    total: float,
+    cards: int,
+    actions: list[str],
+    dealer_bust: bool,
+    dealer_total: float | None,
+    dist: tuple[float, list[float]],
+) -> tuple[str | None, str]:
+    """EV 决策（v1.21.0）：停牌 EV 对要牌 EV 递推择优，返回 (action, reason)。
+
+    dist 是庄家终局分布；庄家点数可见时退化为点质量分布（结果确定）。
+    """
+    can_hit = "hit" in actions
+    can_stand = "stand" in actions
+    if not can_hit and not can_stand:
+        return None, "门户未开放 hit/stand"
+    if dealer_bust:
+        if can_stand:
+            return "stand", "庄家已爆牌，停牌即赢"
+        return None, "庄家已爆牌但未开放停牌"
+    if cards >= 5:
+        if can_stand:
+            return "stand", "已五小（5张未爆），直接赢 ×5，停牌"
+        return None, "已五小但未开放停牌"
+    if dealer_total is not None:
+        p_bust, samples = 0.0, [dealer_total]
+    else:
+        p_bust, samples = dist
+    memo: dict = {}
+    ev_stand = _stand_ev(total, p_bust, samples)
+    ev_hit = 0.0
+    for v in _DECK:
+        t2 = total + v
+        if t2 > _TARGET:
+            ev_hit -= 1.0
+        elif cards + 1 >= 5:
+            ev_hit += _FIVE_SMALL_MULT
+        else:
+            ev_hit += _ev_play(t2, cards + 1, p_bust, samples, memo)
+    ev_hit /= len(_DECK)
+    if ev_hit > ev_stand and can_hit:
+        return "hit", f"EV 要牌 {ev_hit:+.2f} > 停牌 {ev_stand:+.2f}（{cards}张·爆率 {_bust_prob(total):.0%}）"
+    if can_stand:
+        return "stand", f"EV 停牌 {ev_stand:+.2f} ≥ 要牌 {ev_hit:+.2f}（{cards}张）"
+    return None, "EV 偏向停牌但未开放停牌"
 
 
 def _load_json(kv: object, key: str) -> dict:
@@ -326,6 +429,22 @@ def _update_stats(ctx: object, delta: int) -> tuple[dict, dict]:
     return total, daily
 
 
+async def _safe_notify(ctx: object, message: str, **kwargs: object) -> None:
+    """通知失败只记日志不抛出：断网窗口通知渠道不可用时，避免异常冒泡到调度层触发降级。"""
+    try:
+        await ctx.notify(message, **kwargs)
+    except Exception as e:
+        ctx.log.warning("十点半通知发送失败（渠道暂不可用）: %r", e)
+
+
+async def _safe_notify_table(ctx: object, header: list, rows: list, **kwargs: object) -> None:
+    """_safe_notify 的表格版，同样吞异常只记日志。"""
+    try:
+        await ctx.notify_table(header, rows, **kwargs)
+    except Exception as e:
+        ctx.log.warning("十点半通知发送失败（渠道暂不可用）: %r", e)
+
+
 async def _settle_round(ctx: object, cfg: dict, rid: object, settlement: dict) -> None:
     """入账一局结算：记庄家画像；我方参局才入账战绩并推送（输赢统一 success）。"""
     dealer_cards = _pop_dealer_cards(ctx, rid)
@@ -351,7 +470,7 @@ async def _settle_round(ctx: object, cfg: dict, rid: object, settlement: dict) -
     rows.append(["📅 今日", _stats_text(daily)])
     caption = f"🎲 十点半 #{rid} 结算 {'+' if delta >= 0 else ''}{delta:,} 银元"
     # 输赢都走 success：正常结算不算异常，不用 warning 刷屏
-    await ctx.notify_table(["项目", "内容"], rows, caption=caption, level="success", category="十点半")
+    await _safe_notify_table(ctx, ["项目", "内容"], rows, caption=caption, level="success", category="十点半")
 
 
 async def _handle_settlement(ctx: object, cfg: dict, game: dict) -> None:
@@ -388,7 +507,7 @@ async def _catch_up_settlement(ctx: object, cfg: dict, game: dict) -> None:
     ctx.kv.set(_LAST_ROUND_KEY, str(joined))
     ctx.log.warning("十点半 #%s 已翻篇但 lastResult/history 均未见结算，推送兜底", joined)
     if cfg.get("tenhalf_notify", True):
-        await ctx.notify(f"🎲 十点半 #{joined} 已结算（未抓到结算详情，盈亏未知）", category="十点半")
+        await _safe_notify(ctx, f"🎲 十点半 #{joined} 已结算（未抓到结算详情，盈亏未知）", category="十点半")
 
 
 async def _try_join(ctx: object, cfg: dict, client: HdskyClient, game: dict, limits: dict) -> None:
@@ -401,15 +520,17 @@ async def _try_join(ctx: object, cfg: dict, client: HdskyClient, game: dict, lim
         ctx.kv.set(_JOINED_ROUND_KEY, str(rid))  # 记录报名局号，供结算补扫定位
         ctx.log.info("加入十点半 #%s（下注 %s，单桌上限 %s）", rid, amount, game.get("amount"))
         if cfg.get("tenhalf_notify", True):
-            await ctx.notify(
-                f"🎲 加入十点半 #{rid}，下注 {amount:,} 银元（单桌上限 {game.get('amount')}）", category="十点半"
+            await _safe_notify(
+                ctx,
+                f"🎲 加入十点半 #{rid}，下注 {amount:,} 银元（单桌上限 {game.get('amount')}）",
+                category="十点半",
             )
         return
     ctx.kv.set(_JOIN_FAIL_KEY, str(rid))
     msg = result.get("message") or r.get("error") or "未知"
     ctx.log.warning("十点半报名失败 #%s: %s", rid, msg)
     if cfg.get("tenhalf_notify", True):
-        await ctx.notify(f"🎲 十点半报名失败: {msg}", level="warning", category="十点半")
+        await _safe_notify(ctx, f"🎲 十点半报名失败: {msg}", level="warning", category="十点半")
 
 
 async def _submit_action(ctx: object, client: HdskyClient, game: dict, action: str, reason: str, total: float) -> None:
@@ -472,6 +593,12 @@ async def _once(ctx: object, cfg: dict, client: HdskyClient) -> None:
         ctx.log.debug("十点半 #%s 读不到我方点数，跳过本轮", rid)
         return
     total = float(self_info.get("total") or 0)
+    raw_self_cards = self_info.get("cards")
+    if isinstance(raw_self_cards, list) and raw_self_cards:
+        self_cards = len(raw_self_cards)
+    else:
+        cc = (self_p or {}).get("cardCount")
+        self_cards = int(cc) if isinstance(cc, (int, float)) and not isinstance(cc, bool) and cc > 0 else 0
     dealers = _load_json(ctx.kv, _DEALERS_KEY)
     dealer_name = str((dealer_p or {}).get("displayName") or "")
     raw_dealer_cards = (dealer_p or {}).get("cardCount")
@@ -489,8 +616,18 @@ async def _once(ctx: object, cfg: dict, client: HdskyClient) -> None:
     else:
         m = _POINT_RE.search(str((dealer_p or {}).get("status") or ""))
         dealer_total = float(m.group(1)) if m else None
-    threshold = _threshold_for(cfg, dealers, dealer_name, dealer_cards=dealer_cards_now)
-    action, reason = _decide(total, actions, dealer_bust, dealer_total, threshold)
+    # 庄家 5 张未爆 = 五小已定（全桌 ×5 判负），怎么打都输，停牌早了结
+    if dealer_cards_now == 5 and not dealer_bust:
+        if "stand" in actions:
+            await _submit_action(ctx, client, game, "stand", "庄家五小已定（5张未爆），停牌认亏 ×5", total)
+        return
+    dist = _dealer_dist(dealers, dealer_name, dealer_cards_now)
+    if dist is not None or dealer_bust or dealer_total is not None:
+        # 庄家信息足够（画像分布/已爆/点数可见）→ EV 递推决策（v1.21.0）
+        action, reason = _decide_ev(total, self_cards, actions, dealer_bust, dealer_total, dist or (0.0, []))
+    else:
+        threshold = _threshold_for(cfg, dealers, dealer_name, dealer_cards=dealer_cards_now)
+        action, reason = _decide(total, actions, dealer_bust, dealer_total, threshold)
     if action is None:
         ctx.log.debug("十点半 #%s 本轮不动作: %s", rid, reason)
         return
@@ -528,7 +665,7 @@ def start(ctx: object) -> None:
         except Exception as e:
             ctx.log.error("十点半轮询异常: %r", e)
             if cfg.get("tenhalf_notify", True):
-                await ctx.notify(f"🎲 十点半轮询异常: {e}", level="warning")
+                await _safe_notify(ctx, f"🎲 十点半轮询异常: {e}", level="warning")
 
     ctx.schedule(_tick, "interval", seconds=interval, id="tenhalf_poll")
     ctx.log.info("十点半已启动（每 %.0f 秒轮询）", interval)

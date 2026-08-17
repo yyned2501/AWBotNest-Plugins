@@ -53,11 +53,13 @@ async def handler(client, message):
 
 **发布时元数据只改了一处** — 卡片图标/版本/描述/changelog 在某些界面过期。发往 AWBotNest-Plugins 时同步 `__plugin__` 与 `manifest.json` 的重复元数据，尤其 version/icon/description/changelog。
 
-## Vue 前端类
+## 运行治理类
 
-**Vue 配置页与后端默认值不一致** — 配置页显示一套字段/默认值，运行期用的是另一套。前端表单结构与后端 `DEFAULTS` 各自演进导致。修复：后端 `DEFAULTS` 保持权威、Vue 字段与之对齐、改配置后 `ctx.config.get(...)` 检查键是否被改名/删除。
+**裸 `asyncio.create_task` 跑业务工作** — 停用/重载后任务还在跑、重复触发产生重复任务、平台治理层无法上报/取消。有限的后台业务工作用 `ctx.create_task(coro, name=..., operation=...)`；默认不合适时如实声明 `resources`；别把无限监督循环不改造就塞进受治理任务（每个治理任务有有限超时）。
 
-**改了 `frontend/src` 没重新构建 `dist`** — 源码看着更新了，装上去的 UI 还是旧行为。平台加载的是构建产物：Vue 改动后必须 `npm run build` 且提交 `frontend/dist`。
+**把多实例与能力当普通 import 用** — 账号状态在实例间泄漏、一个插件重载拖垮另一个。`instance_mode` 有意选 `shared`/`account`；跨插件协作用 `ctx.provide_capability`/`ctx.call_capability` + 元数据声明；回放 handler 必须幂等，转账/奖励/签到等副作用绝不盲目重放。
+
+**自带私有浏览器运行时** — Docker 里找不到可执行文件、版本漂移、下载失败、反爬行为随环境变。一律用 `ctx.browser`，用 `ctx.cookies` 前先声明 `cookie_domains`；遗留反爬流程依赖特化运行时，把它当明确的兼容迁移项目，别机械替换。
 
 ## 资源与依赖类
 
@@ -86,6 +88,8 @@ async def handler(client, message):
 - [ ] handler 都在 `setup(ctx)` 内经 `ctx` 注册，无 `@Client.on_message`、无 `import pyrogram`、无 `print`
 - [ ] 配置全在 `config_schema`、字段有 `default`、运行期回退对齐
 - [ ] 运行状态用 `ctx.kv`/`ctx.data_dir`，自有资源有清理
+- [ ] 有限后台任务用 `ctx.create_task`，无遗留裸任务；`resources`/`instance_mode` 与实际运行行为匹配
+- [ ] 跨插件协作走声明能力，回放 handler 幂等
 - [ ] Vue 默认值与构建产物已同步
 - [ ] 依赖已声明、兼容 3.13、未自装
 - [ ] 长时调度任务适当时 `ctx.report_progress` 报进度；有 `self_check(ctx)` 则只读、15 秒内完成
