@@ -339,35 +339,39 @@ async def _once(ctx: object, cfg: dict, client: HdskyClient) -> None:
     await _submit_action(ctx, cfg, client, game, action, reason, total)
 
 
-async def _tick(ctx: object) -> None:
-    """单次调度 tick：未启用直接返回；启用则开客户端跑一轮（有限工作）。
+def start(ctx: object) -> None:
+    """注册十点半轮询调度。间隔取启动时配置，改动后重载生效。
 
-    常驻轮询走 ctx.schedule（平台统一治理：停用/重载自动取消跟踪），
-    不用裸 asyncio.create_task 无限循环——SPEC 硬规则，也避免重载后残留双份轮询。
+    平台对 ctx.schedule 回调是**零参调用**（参考 skyDropAnswer/trigger.py），
+    ctx 经闭包捕获；带参签名会每 5 秒 TypeError 一次并触发调度降级。
     """
     cfg = ctx.config
-    if not cfg.get("tenhalf_enabled", False):
-        return
-    try:
-        async with HdskyClient(log=ctx.log) as client:
-            client.set_renewer(hdsky_auth.renewer_for(ctx))  # 401 时自动续期并重试
-            client.configure(
-                str(cfg.get("hdsky_cookie_file", "") or ""),
-                str(cfg.get("hdsky_base_url", "") or ""),
-                debug_enabled=bool(cfg.get("hdsky_debug", False)),
-                debug_file=str(cfg.get("hdsky_debug_file", "") or ""),
-            )
-            await _once(ctx, cfg, client)
-    except Exception as e:
-        ctx.log.error("十点半轮询异常: %r", e)
-        if cfg.get("tenhalf_notify", True):
-            await ctx.notify(f"🎲 十点半轮询异常: {e}", level="warning")
-
-
-def start(ctx: object) -> None:
-    """注册十点半轮询调度。间隔取启动时配置，改动后重载生效。"""
-    cfg = ctx.config
     interval = float(cfg.get("tenhalf_poll_interval", 5) or 5)
+
+    async def _tick() -> None:
+        """单次调度 tick：未启用直接返回；启用则开客户端跑一轮（有限工作）。
+
+        常驻轮询走 ctx.schedule（平台统一治理：停用/重载自动取消跟踪），
+        不用裸 asyncio.create_task 无限循环——SPEC 硬规则，也避免重载后残留双份轮询。
+        """
+        cfg = ctx.config
+        if not cfg.get("tenhalf_enabled", False):
+            return
+        try:
+            async with HdskyClient(log=ctx.log) as client:
+                client.set_renewer(hdsky_auth.renewer_for(ctx))  # 401 时自动续期并重试
+                client.configure(
+                    str(cfg.get("hdsky_cookie_file", "") or ""),
+                    str(cfg.get("hdsky_base_url", "") or ""),
+                    debug_enabled=bool(cfg.get("hdsky_debug", False)),
+                    debug_file=str(cfg.get("hdsky_debug_file", "") or ""),
+                )
+                await _once(ctx, cfg, client)
+        except Exception as e:
+            ctx.log.error("十点半轮询异常: %r", e)
+            if cfg.get("tenhalf_notify", True):
+                await ctx.notify(f"🎲 十点半轮询异常: {e}", level="warning")
+
     ctx.schedule(_tick, "interval", seconds=interval, id="tenhalf_poll")
     ctx.log.info("十点半已启动（每 %.0f 秒轮询）", interval)
 
