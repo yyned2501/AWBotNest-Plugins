@@ -19,8 +19,8 @@
 #     否则按停牌阈值：点数 ≥ 阈值停牌，否则要牌
 #   fold（认输）从不使用：认输与停牌同样损失下注，无收益。
 #
-# 庄家画像：按庄家名统计结算点数/爆牌率（kv 持久化），样本 ≥ 8 时微调停牌阈值
-# ±1.5（庄家均值高 → 阈值上调更激进），并在结算通知中展示画像。
+# 庄家画像：按庄家名统计结算点数/爆牌率（kv 持久化）；样本 ≥ 8 时停牌阈值完全由
+# 画像推导——平局算输，目标需压过庄家均点；庄家爆率高则低点数即可停牌（赌庄家爆）。
 #
 # 牌堆先验（未实测，按十点半系惯例）：标准 52 张，A=1、2-10 按面值、J/Q/K=0.5（12 张），
 # 仅用于爆牌概率与反败牌数估算，供决策与通知展示。
@@ -48,8 +48,12 @@ _LAST_ACTION_KEY = "tenhalf:last_action"
 _JOIN_FAIL_KEY = "tenhalf:join_fail_round"
 # 庄家画像样本门槛：不足不采信，直接用配置阈值
 _MIN_DEALER_SAMPLES = 8
-_PRIOR_DEALER_AVG = 8.0
 _DEALER_TOTALS_CAP = 60
+# 画像推导阈值的夹取范围：爆率再高也至少 4 点，不爆的庄家最多追到 10
+_THRESHOLD_MIN = 4.0
+_THRESHOLD_MAX = 10.0
+# 爆率对阈值的让利系数：每 10% 爆率可少要 0.6 点（赌庄家爆）
+_BUST_RATE_DISCOUNT = 6.0
 _NUMBER_RE = re.compile(r"\d+(?:\.\d+)?")
 # 庄家状态文本只信「数字+点」形式（如「9.5点」），避免把无关数字误当点数
 _POINT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*点")
@@ -151,18 +155,21 @@ def _record_dealer(ctx: object, settlement: dict) -> str:
 
 
 def _threshold_for(cfg: dict, dealers: dict, dealer_name: str) -> float:
-    """停牌阈值 = 配置基准 ± 庄家画像微调（限幅 ±1.5，样本不足不采信）。"""
+    """停牌阈值：样本足够时完全由庄家画像推导（不再基准±限幅）。
+
+    平局算输：目标点数需压过庄家均点（+0.5）；庄家爆率高则按比例降低点数
+    要求——爆率高的庄家 4 点也敢停，堵他爆牌。样本不足退回配置基准。
+    """
     base = float(cfg.get("tenhalf_stand_threshold", 8) or 8)
     entry = dealers.get(dealer_name) or {}
     totals = entry.get("totals") or []
-    if len(totals) < _MIN_DEALER_SAMPLES:
+    rounds = int(entry.get("rounds", 0) or 0)
+    if rounds < _MIN_DEALER_SAMPLES or not totals:
         return base
     avg = sum(totals) / len(totals)
-    adj = max(-1.5, min(1.5, avg - _PRIOR_DEALER_AVG))
-    rounds = int(entry.get("rounds", 0) or 0)
-    if rounds and int(entry.get("busts", 0) or 0) / rounds >= 0.4:
-        adj -= 0.5  # 高爆牌率庄家无需高点数即可赢，阈值下调更稳
-    return max(5.0, min(10.0, round((base + adj) * 2) / 2))
+    bust_rate = int(entry.get("busts", 0) or 0) / rounds
+    threshold = avg + 0.5 - bust_rate * _BUST_RATE_DISCOUNT
+    return max(_THRESHOLD_MIN, min(_THRESHOLD_MAX, round(threshold * 2) / 2))
 
 
 def _dealer_profile_text(dealers: dict, name: str) -> str:

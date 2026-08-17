@@ -216,15 +216,20 @@ def test_decide_no_available_actions() -> None:
     assert action is None
 
 
-def test_threshold_for_adjusts_with_dealer_profile() -> None:
-    # 庄家历史均点 9.5（≥8 样本）→ 基准 8 上调 1.5（限幅）
+def test_threshold_for_derived_from_dealer_profile() -> None:
+    # 样本足够时完全由画像推导：均点 9.5 无爆 → 9.5+0.5=10（夹到 10）
     dealers = {"涛": {"rounds": 9, "totals": [9.5] * 9}}
-    assert _threshold_for({"tenhalf_stand_threshold": 8}, dealers, "涛") == 9.5
-    # 样本不足不采信
+    assert _threshold_for({"tenhalf_stand_threshold": 8}, dealers, "涛") == 10
+    # 样本不足不采信，退回配置基准
     assert _threshold_for({"tenhalf_stand_threshold": 8}, {"涛": {"rounds": 3, "totals": [9.5] * 3}}, "涛") == 8
-    # 高爆牌率（≥40%）下调 0.5：均点 8 无偏移、爆率 50% → 7.5
+    # 爆率 50% 让利 3 点：均点 8 → 8+0.5-3 = 5.5
     dealers = {"涛": {"rounds": 10, "busts": 5, "totals": [8.0] * 8}}
-    assert _threshold_for({"tenhalf_stand_threshold": 8}, dealers, "涛") == 7.5
+    assert _threshold_for({"tenhalf_stand_threshold": 8}, dealers, "涛") == 5.5
+    # 爆率 80%：8+0.5-4.8=3.7 → 夹到下限 4（爆率高 4 点也敢停，堵庄家爆）
+    dealers = {"涛": {"rounds": 10, "busts": 8, "totals": [8.0] * 6}}
+    assert _threshold_for({"tenhalf_stand_threshold": 8}, dealers, "涛") == 4.0
+    # 只有爆牌样本（totals 为空）不推导，退回基准
+    assert _threshold_for({"tenhalf_stand_threshold": 8}, {"涛": {"rounds": 12, "busts": 12}}, "涛") == 8
 
 
 # ── 报名阶段 ──

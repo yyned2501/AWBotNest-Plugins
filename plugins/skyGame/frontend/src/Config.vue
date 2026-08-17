@@ -494,7 +494,7 @@ async function renewNow() {
                 <span class="lbl">十点半通知</span>
                 <label class="row switch">
                   <input v-model="cfg.tenhalf_notify" type="checkbox" />
-                  <span>报名/决策/结算推送</span>
+                  <span>报名/结算推送</span>
                 </label>
               </div>
             </div>
@@ -509,9 +509,9 @@ async function renewNow() {
                 <span class="help">自动夹在门户最小下注与本桌单人上限之间</span>
               </div>
               <div class="fld">
-                <span class="lbl">停牌点数阈值</span>
-                <input v-model.number="cfg.tenhalf_stand_threshold" class="inp" type="number" min="5" max="10" step="0.5" />
-                <span class="help">点数达此值停牌，低于继续要牌；庄家画像按历史均点微调 ±1.5</span>
+                <span class="lbl">停牌点数阈值（基准）</span>
+                <input v-model.number="cfg.tenhalf_stand_threshold" class="inp" type="number" min="4" max="10" step="0.5" />
+                <span class="help">画像样本不足时的回退基准；样本足够时完全由庄家画像推导（均点+0.5 按爆率让利）</span>
               </div>
             </div>
             <span class="help">
