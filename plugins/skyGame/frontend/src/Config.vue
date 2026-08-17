@@ -511,13 +511,14 @@ async function renewNow() {
               <div class="fld">
                 <span class="lbl">停牌点数阈值（基准）</span>
                 <input v-model.number="cfg.tenhalf_stand_threshold" class="inp" type="number" min="4" max="10" step="0.5" />
-                <span class="help">画像样本不足时的回退基准；样本足够时由庄家画像推导（均点+0.5 按爆率让利），受爆牌红线夹取 ≤6.5</span>
+                <span class="help">仅画像样本不足时的回退基准；样本足够时走 EV 决策（停牌 EV 对要牌 EV 递推择优）</span>
               </div>
             </div>
             <span class="help">
-              决策优先序：庄家爆牌→停牌 ｜ 庄家点数可见→领先即停、落后仅反败牌数多于爆牌数才要牌 ｜
-              否则按停牌阈值。从不认输（fold 与停牌同样损失下注）。爆牌概率随点数陡增：7→54%、8→62%，
-              故画像阈值最多 6.5，早停赌庄家自爆（另有五小 ×5 倍数放大爆牌代价）
+              决策优先序：庄家爆牌→停牌 ｜ 我方/庄家五小→立即停牌 ｜ 庄家画像样本足够→EV 决策：
+              按画像点数分布+爆率算停牌 EV，对比 52 张先验递推的要牌 EV（含五小 ×5），择优要/停，
+              张数是一等公民（4 张低点数追五小、高点数早停）｜ 画像不足→退停牌阈值。
+              从不认输（fold 与停牌同样损失下注）
             </span>
           </section>
 

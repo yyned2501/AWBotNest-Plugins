@@ -1,6 +1,6 @@
 ---
 name: plugin-guide
-version: 4
+version: 5
 description: >-
   Use this skill whenever you write, modify, review, or debug an AWBotNest plugin.
   Single authoritative plugin-authoring skill for this repo — consolidates the platform
@@ -9,8 +9,9 @@ description: >-
   debugging, spec vs current-repo practice), the plugin contract, the full ctx interface,
   config_schema (all 12 field types), Vue mode, webhook/on_api, browser & AI,
   requirements/deps, cookie_domains/ctx.cookies, group isolation, multi-Bot routing,
-  account scope (user|bot|both|standalone), and marketplace publishing. Load it for ANY
-  task touching AWBotNest plugin code. On-demand references:
+  account scope (user|bot|both|standalone), runtime governance (instance_mode/resources/
+  ctx.create_task/capabilities/replay events), and marketplace publishing. Load it for
+  ANY task touching AWBotNest plugin code. On-demand references:
   references/pitfalls.md (common pitfalls + checklist — read when debugging),
   references/platform-api.md (remote-manage a live instance: enable/reload/config/kv/
   logs/send), references/minimal-plugin-template.py (starter plugin).
@@ -79,6 +80,17 @@ __plugin__ = {
     "config_schema": { ... },     # 可选：前端据此生成配置表单
     "requirements": ["httpx>=0.27"],  # 可选：第三方依赖，启用时平台代装
     "cookie_domains": ["example.com", "*.example.com"],  # 可选：ctx.cookies 可读的域名白名单
+    # —— 运行治理字段（均可选，简单插件不声明则用平台安全默认值）——
+    "min_platform_version": "1.1.4.0",  # 可选：兼容的平台版本下限（另有 max_platform_version）
+    "plugin_api_version": 1,            # 可选：依赖的插件 API 版本
+    "requires_plugins": [],             # 可选：必须先启用的插件 id
+    "requires_capabilities": [],        # 可选：依赖的平台抽象能力
+    "provides_capabilities": [],        # 可选：本插件提供的能力
+    "instance_mode": "shared",          # 可选：shared（默认）| account（按账号各建实例）
+    "resources": {                      # 可选：运行保护（超时/并发/后台任务/熔断）
+        "timeout_seconds": 120, "max_concurrency": 8, "max_background_tasks": 32,
+        "failure_threshold": 5, "recovery_seconds": 60,
+    },
 }
 
 async def setup(ctx):
@@ -297,6 +309,41 @@ async def setup(ctx):
 
 配置里存的是 chat_id，界面要显示群名时调平台 API `GET /api/chats/{chat_id}`（可选 `?session=账号名`），返回 `{id, title, type}`。Vue 模式下经 `host.callApi` 自动带令牌。可选增强，失败应回退显示 ID。
 
+### 4.11 运行治理：后台任务 / 多实例 / 能力 / 事件回放
+
+平台对 `setup`、handler、Webhook、动作、插件 API、定时任务、自检和 `teardown` 走**统一执行管道**：统一执行超时、并发限制、事件记录与熔断（连续失败达 `resources.failure_threshold` 暂时熔断，`recovery_seconds` 后自动重试）。治理字段在启动前检查，不满足时插件不会带病运行。
+
+**后台任务**：有限的后台业务工作不要裸 `asyncio.create_task`——平台无法追踪/取消/上报：
+
+```python
+task = ctx.create_task(worker(), name="数据同步", operation="sync")
+```
+
+停用/重载/更新插件时，平台会取消并等待这些任务真正退出。每个受治理任务都有**有限超时**，别把无限监督循环直接塞进 `ctx.create_task`——先拆成有限工作（常驻轮询用 `ctx.schedule`）。默认值不合适时如实声明 `resources`。
+
+**多实例**：`instance_mode="shared"`（默认）只执行一次 `setup(ctx)`，现有插件无需改动；`="account"` 为每个选中且已连接的用户账号各跑一次 `setup`，用 `ctx.account_name`/`ctx.instance_id` 区分，实例有独立的 `ctx.user`、KV 和数据目录。只有确需按账号隔离状态才用 `account`。
+
+**能力机制**：插件间禁止 import，能力替换与备用链走统一接口：
+
+```python
+# 提供能力；priority 越高越优先，首选失败自动尝试备用提供者
+ctx.provide_capability("ocr", ocr_service, priority=100)
+# 使用能力
+text = await ctx.call_capability("ocr", image, method="recognize")
+```
+
+**事件回放**：可回放的业务事件必须显式登记，平台不会盲目重放消息/支付等高风险事件：
+
+```python
+@ctx.on_replay("sync_user")
+async def replay_sync(payload):
+    await sync_user(payload["user_id"])
+
+ctx.record_event("sync_user", {"user_id": 123}, replayable=True)
+```
+
+回放 handler 必须**幂等**：转账/奖励/签到等副作用绝不能盲目重放。管理员可在插件页「依赖关系」「运行诊断」查看实例、任务、熔断与最近事件，并手动回放明确允许回放的事件。
+
 ---
 
 ## 5. config_schema（配置表单）
@@ -416,8 +463,12 @@ vue 模式无平台「保存」按钮，由组件自己调 `host.saveConfig`。�
 6. `_` 前缀文件/目录不被识别为插件。
 7. 业务配置只进 `config_schema`，禁止读写平台配置；持久化用 `ctx.kv`（关系型表名带 `<id>_` 前缀）。
 8. 自管理资源（连接、后台 task）必须在 `teardown` 或 `ctx.add_cleanup` 释放。
+9. 后台业务工作统一走 `ctx.create_task`（定时轮询用 `ctx.schedule`），禁止把裸 `asyncio.create_task` 当作不可管理的后台服务。
+10. 插件间协作走声明的能力接口（`ctx.provide_capability`/`ctx.call_capability`），仍禁止 import。
 
 **热插拔容错**：单个插件 `setup` 抛异常只标记该插件 `error`，不影响内核与其它插件。
+
+**安全更新**：商店更新先写隔离目录并做语法、元数据、接口版本和平台版本检查；运行中插件重载失败时自动恢复旧文件和旧运行实例。
 
 ---
 
