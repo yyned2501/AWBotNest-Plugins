@@ -1,10 +1,11 @@
 # =============================================================================
-# AWBotNest 插件：天空游戏 (skyGame) v1.16.29
+# AWBotNest 插件：天空游戏 (skyGame) v1.17.0
 #
 # 天空系列游戏的统一入口：Vue 配置界面左侧按游戏分组，各游戏逻辑拆到
 # games/ 子模块，互不干扰。当前收录：
 #   - 炸金花：轮询 hdsky 门户 API，自动加入/看牌/好牌跟注烂牌弃牌
 #   - 养马：自动喂食/遛马/官方赛报名/复活提示
+#   - 十点半：自动报名下注/要牌停牌决策/结算通知（玩家位，不开庄）
 #   - Cookie 自动续期：门户会话过期时从 CookieCloud 取浏览器 cookie，
 #     读 HDSky 站内信验证码自动重新登录，写回 cookie 文件
 #
@@ -13,6 +14,7 @@
 #   games/hdsky_auth.py  Cookie 续期（CookieCloud → 站内信抽码 → 登录 → 写 cookie）
 #   games/zhajinhua/     炸金花包（详见 zhajinhua/__init__.py）
 #   games/horse.py       养马养护循环
+#   games/tenhalf.py     十点半参与循环
 # =============================================================================
 
 from __future__ import annotations
@@ -23,9 +25,9 @@ from .games import hdsky_auth
 __plugin__ = {
     "name": "天空游戏",
     "id": "skyGame",
-    "version": "1.16.29",
+    "version": "1.17.0",
     "author": "Yy",
-    "description": "天空系列游戏统一入口：炸金花自动参与、养马自动养护，左侧按游戏分组配置。",
+    "description": "天空系列游戏统一入口：炸金花自动参与、养马自动养护、十点半自动参与，左侧按游戏分组配置。",
     "scope": "user",
     "render_mode": "vue",
     "default_enabled": False,
@@ -420,8 +422,68 @@ __plugin__ = {
             "section": "炸金花",
             "order": 27,
         },
+        # ── 十点半 ──
+        "tenhalf_enabled": {
+            "type": "boolean",
+            "default": False,
+            "label": "启用十点半自动参与",
+            "section": "十点半",
+            "help": "有桌开局时报名下注、抓牌阶段要牌/停牌决策、结算后推送战绩。"
+            "动作契约来自门户前端源码尚未实测，首次启用建议同时开启门户调试记录核对",
+            "order": 40,
+        },
+        "tenhalf_poll_interval": {
+            "type": "slider",
+            "default": 5,
+            "label": "轮询间隔(秒)",
+            "section": "十点半",
+            "min": 2,
+            "max": 60,
+            "step": 1,
+            "help": "报名阶段有倒计时，轮询太慢会错过报名",
+            "order": 41,
+        },
+        "tenhalf_bet_amount": {
+            "type": "number",
+            "default": 100,
+            "label": "报名下注额",
+            "section": "十点半",
+            "min": 100,
+            "max": 10000,
+            "step": 100,
+            "help": "加入时自动夹在门户最小下注与本桌单人上限之间",
+            "order": 42,
+        },
+        "tenhalf_stand_threshold": {
+            "type": "slider",
+            "default": 8,
+            "label": "停牌点数阈值",
+            "section": "十点半",
+            "min": 5,
+            "max": 10,
+            "step": 0.5,
+            "help": "点数达到此值停牌，低于则继续要牌。庄家画像按历史均点微调 ±1.5（样本足够时）。"
+            "爆牌概率随点数陡增：8→62%、9→69%",
+            "order": 43,
+        },
+        "tenhalf_notify": {
+            "type": "boolean",
+            "default": True,
+            "label": "十点半通知",
+            "section": "十点半",
+            "help": "报名/要牌停牌决策/结算推送",
+            "order": 44,
+        },
     },
     "changelog": (
+        "v1.17.0 更新：\n"
+        "- 新增十点半（门户代号 tenhalf）自动参与：报名阶段按配置下注额自动报名（夹在门户"
+        "最小下注与单桌单人上限之间）；玩家抓牌阶段按「庄家爆牌即停、庄家点数可见时领先即停/"
+        "落后仅反败牌数大于爆牌数才要牌、否则按停牌阈值」决策，从不认输（fold 与停牌同样损失下注）；"
+        "结算按 roundId 去重推送结构化表格并入账累计/当日战绩；按庄家统计结算点数/爆牌率，"
+        "样本 ≥ 8 时微调停牌阈值 ±1.5。只玩玩家位不开庄（开庄需备本局上限 10 倍本金）。"
+        "动作契约来自门户前端 portal-games.js 源码尚未实测，默认关闭，首次启用建议同时开启"
+        "门户调试记录核对实际请求；\n"
         "v1.16.26 修复：\n"
         "- 遛马成功推送也改结构化表格：从 expGain/progressGain/bonusAmount/eventNote/profile"
         "组「项目/内容」两列（含随机事件和银元奖励），不再把服务端十余行说明原文塞进 notify；\n"

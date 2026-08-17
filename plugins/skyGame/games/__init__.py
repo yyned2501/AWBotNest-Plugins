@@ -8,11 +8,11 @@
 
 from __future__ import annotations
 
-from . import hdsky_auth, horse
+from . import hdsky_auth, horse, tenhalf
 from .zhajinhua import zhajinhua
 
 # 注册顺序即启停顺序（hdsky_auth 是 Cookie 续期看门狗，接口同 start/stop）
-_GAMES = [zhajinhua, horse, hdsky_auth]
+_GAMES = [zhajinhua, horse, tenhalf, hdsky_auth]
 
 
 def start_all(ctx: object) -> None:

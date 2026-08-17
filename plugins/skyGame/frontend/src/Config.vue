@@ -1,6 +1,6 @@
 <script setup>
 // 天空游戏 · 配置界面
-// 左侧按游戏分组：全局设置 / 养马 / 炸金花
+// 左侧按游戏分组：全局设置 / 养马 / 炸金花 / 十点半
 // host.getConfig() / host.saveConfig() / host.callApi()
 import { ref, reactive, onMounted } from 'vue'
 
@@ -56,6 +56,12 @@ const DEFAULTS = {
   zjh_notify_hand: true,
   zjh_notify_fold_confirm: false,
   zjh_notify_error: true,
+  // 十点半
+  tenhalf_enabled: false,
+  tenhalf_poll_interval: 5,
+  tenhalf_bet_amount: 100,
+  tenhalf_stand_threshold: 8,
+  tenhalf_notify: true,
 }
 
 // 草料选项（与后端 config_schema 一致）
@@ -70,6 +76,7 @@ const GROUPS = [
   { key: 'global', label: '全局设置', icon: '⚙️' },
   { key: 'horse', label: '养马', icon: '🐴' },
   { key: 'zjh', label: '炸金花', icon: '🃏' },
+  { key: 'tenhalf', label: '十点半', icon: '🎲' },
 ]
 
 const group = ref('global')
@@ -456,6 +463,61 @@ async function renewNow() {
               <input v-model="cfg.zjh_notify_error" type="checkbox" />
               <span>异常</span>
             </label>
+          </section>
+
+          <div class="savebar">
+            <button class="btn primary lg" :disabled="saving" @click="save">{{ saving ? '保存中…' : '保存配置' }}</button>
+          </div>
+        </template>
+
+        <!-- ============ 十点半 ============ -->
+        <template v-else-if="group === 'tenhalf'">
+          <h3 class="det-title">十点半</h3>
+
+          <section class="card">
+            <div class="card-h">基础设置</div>
+            <label class="row switch">
+              <input v-model="cfg.tenhalf_enabled" type="checkbox" />
+              <span>启用自动参与</span>
+            </label>
+            <span class="help" style="margin-top:-4px">
+              有桌开局时报名下注 → 抓牌阶段要牌/停牌 → 结算推送战绩。只玩玩家位不开庄。
+              动作契约来自门户前端尚未实测，首次启用建议同时开启「全局设置 · 门户调试记录」核对
+            </span>
+            <div class="grid">
+              <div class="fld">
+                <span class="lbl">轮询间隔(秒)</span>
+                <input v-model.number="cfg.tenhalf_poll_interval" class="inp" type="number" min="2" max="60" step="1" />
+                <span class="help">报名阶段有倒计时，轮询太慢会错过报名</span>
+              </div>
+              <div class="fld">
+                <span class="lbl">十点半通知</span>
+                <label class="row switch">
+                  <input v-model="cfg.tenhalf_notify" type="checkbox" />
+                  <span>报名/决策/结算推送</span>
+                </label>
+              </div>
+            </div>
+          </section>
+
+          <section class="card">
+            <div class="card-h">参与策略</div>
+            <div class="grid">
+              <div class="fld">
+                <span class="lbl">报名下注额</span>
+                <input v-model.number="cfg.tenhalf_bet_amount" class="inp" type="number" min="100" max="10000" step="100" />
+                <span class="help">自动夹在门户最小下注与本桌单人上限之间</span>
+              </div>
+              <div class="fld">
+                <span class="lbl">停牌点数阈值</span>
+                <input v-model.number="cfg.tenhalf_stand_threshold" class="inp" type="number" min="5" max="10" step="0.5" />
+                <span class="help">点数达此值停牌，低于继续要牌；庄家画像按历史均点微调 ±1.5</span>
+              </div>
+            </div>
+            <span class="help">
+              决策优先序：庄家爆牌→停牌 ｜ 庄家点数可见→领先即停、落后仅反败牌数多于爆牌数才要牌 ｜
+              否则按停牌阈值。从不认输（fold 与停牌同样损失下注）。爆牌概率随点数陡增：8→62%、9→69%
+            </span>
           </section>
 
           <div class="savebar">
