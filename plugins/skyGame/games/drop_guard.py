@@ -136,6 +136,9 @@ def start(ctx: object) -> None:
             return
         if await apply_reply(ctx, text):
             ctx.log.debug("掉落守卫：捕获 /info 回复 msg=%s", message.id)
+        else:
+            # 观测点：handler 触发但无配额行——用于区分「filter 没匹配」与「回复格式变了」
+            ctx.log.info("掉落守卫：捕获 bot 私聊消息但未匹配配额行: %s", text[:200])
 
     async def _tick() -> None:
         try:
@@ -144,7 +147,7 @@ def start(ctx: object) -> None:
             ctx.log.error("掉落守卫 tick 异常: %r", e)
 
     ctx.schedule(_tick, "interval", seconds=_TICK_SECONDS, id="drop_guard_tick")
-    ctx.log.info("掉落守卫已启动（每 %ds 检查一次 /info 是否到期）", _TICK_SECONDS)
+    ctx.log.info("掉落守卫已启动（每 %ds 检查一次 /info 是否到期，监听 bot=%s）", _TICK_SECONDS, bot_ids)
 
 
 def stop(ctx: object) -> None:
