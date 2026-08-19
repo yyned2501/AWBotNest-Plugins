@@ -14,7 +14,6 @@ import pytest
 
 import plugins.skyGame.games.drop_guard as dg
 from plugins.skyGame.games.tenhalf import _once
-from plugins.skyGame.games.tenhalf import start as tenhalf_start
 from tests.test_skygame_tenhalf import _OK, _FakeClient, _FakeCtx, _game
 
 
@@ -236,8 +235,7 @@ async def test_tenhalf_signup_blocked_when_drop_full() -> None:
 
     await _once(ctx, {"tenhalf_bet_amount": 200}, client)
 
-    assert client.posts == []  # 配额满 → 不报名
-    assert any("掉落配额已满" in msg for _, msg in ctx.log.records)
+    assert client.posts == []  # 配额满且未参与 → _once 顶部直接返回，不报名
 
     # 配额恢复（剩余 > 0）→ 照常报名
     ctx.kv.set(dg._KV_REMAINING, 2)
@@ -246,17 +244,34 @@ async def test_tenhalf_signup_blocked_when_drop_full() -> None:
 
 
 @pytest.mark.asyncio
-async def test_tenhalf_tick_stops_heartbeat_when_paused() -> None:
-    # v1.22.4：配额满时整个 tick 直接返回——不开 HTTP 客户端、不统计不推送；
-    # 恢复后首轮 _catch_up_settlement 会补扫漏掉的结算
+async def test_tenhalf_paused_not_joined_stops_settlement_and_actions() -> None:
+    # v1.23.1：配额满且未参与当前局 → 停心跳：不结算不推送不动作
     ctx = _FakeCtx()
-    ctx.config = {"tenhalf_enabled": True}
     ctx.kv.set(dg._KV_REMAINING, 0)
     ctx.kv.set(dg._KV_CHECKED_TS, time.time())
-    tenhalf_start(ctx)
-    fn, _, _ = ctx.schedules[0]
+    state = _game(phase="signup", actions=["join"], players=[{"isSelf": False, "displayName": "别人"}])
+    client = _FakeClient(state, _OK)
 
-    await fn()  # paused → 直接返回，不应有任何推送/报错
+    await _once(ctx, {"tenhalf_bet_amount": 200}, client)
 
+    assert client.posts == []  # 不报名也不做任何动作
     assert ctx.notifications == []
-    assert not any(lv == "ERROR" for lv, _ in ctx.log.records)
+
+
+@pytest.mark.asyncio
+async def test_tenhalf_paused_still_plays_joined_round() -> None:
+    # v1.23.1：配额满但已报名 → 照常打完本局（决策/结算不受暂停影响）
+    ctx = _FakeCtx()
+    ctx.kv.set(dg._KV_REMAINING, 0)
+    ctx.kv.set(dg._KV_CHECKED_TS, time.time())
+    state = _game(
+        phase="player_draw",
+        actions=["hit", "stand"],
+        players=[{"isSelf": True, "displayName": "我"}],
+        self_total=3,
+    )
+    client = _FakeClient(state, _OK)
+
+    await _once(ctx, {"tenhalf_bet_amount": 200}, client)
+
+    assert client.posts and client.posts[0][1]["action"] == "hit"  # 低点数照常要牌

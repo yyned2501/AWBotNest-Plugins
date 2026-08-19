@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any
 
 from .. import drop_guard, hdsky_auth
@@ -96,6 +97,7 @@ from .zjh_stats import record_round_result
 
 __all__ = [
     "_FOLD_CONFIRM_MAX_RETRIES",
+    "_PAUSE_IDLE_GRACE",
     "_TERMINAL_RESEND_MAX",
     "_OpponentSnapshot",
     "_PendingFold",
@@ -159,6 +161,10 @@ __all__ = [
     "start",
     "stop",
 ]
+
+# 暂停期未入桌的宽限时长：roundId 切换后再跑这么久才停心跳，
+# 覆盖 lastResult 滞后一局的结算入账窗口
+_PAUSE_IDLE_GRACE = 60.0
 
 _poll_task: asyncio.Task[None] | None = None
 
@@ -461,6 +467,9 @@ async def _poll_loop(ctx: object) -> None:
     last_rid: Any = None
     tracker = _RoundTracker()
     round_joined = False
+    # 暂停期未入桌的连续空闲起点：宽限一段再停心跳，确保最后一局结算入账
+    # （lastResult 滞后一局，roundId 切换后下一轮响应才带上结算数据）
+    pause_idle_at: float | None = None
     last_round_hand = ""
     last_round_hand_type = ""
     # 对手画像：进程内缓存 + 延迟写 kv（get_store 首次调用加载已有画像，半衰期按次数/手数）
@@ -488,10 +497,17 @@ async def _poll_loop(ctx: object) -> None:
                 if not cfg.get("zjh_enabled", True):
                     await asyncio.sleep(interval)
                     continue
-                if drop_guard.paused(ctx):
-                    # 掉落配额已满：停心跳（不访问门户），时段刷新后自动恢复
-                    await asyncio.sleep(interval)
-                    continue
+                if drop_guard.paused(ctx) and not round_joined:
+                    # 配额满且未入桌：宽限期过后停心跳（不访问门户），时段刷新后自动恢复；
+                    # 已入桌则照常打完本局（join 分支另行拦截）再停
+                    mono = time.monotonic()
+                    if pause_idle_at is None:
+                        pause_idle_at = mono
+                    if mono - pause_idle_at > _PAUSE_IDLE_GRACE:
+                        await asyncio.sleep(interval)
+                        continue
+                else:
+                    pause_idle_at = None
 
                 # 每轮读最新配置（cookie 路径/门户地址可能被改）
                 client.configure(
