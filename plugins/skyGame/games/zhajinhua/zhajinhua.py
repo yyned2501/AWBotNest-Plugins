@@ -24,7 +24,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from .. import hdsky_auth
+from .. import drop_guard, hdsky_auth
 from ..hdsky import HdskyClient
 from .zjh_hand import (
     _acquire_hand_after_peek,
@@ -600,14 +600,17 @@ async def _poll_loop(ctx: object) -> None:
 
                 # 没加入且可加入 → 加入
                 if not joined and "join" in actions:
-                    ctx.log.info("加入牌桌 #%s...", rid)
-                    r = await client.post("/api/portal/zhajinhua/join", {})
-                    if r.get("ok"):
-                        ctx.log.info("加入成功！")
-                        if cfg.get("zjh_notify_join", True):
-                            await ctx.notify(f"🃏 加入牌桌 #{rid}")
+                    if drop_guard.paused(ctx):
+                        ctx.log.debug("掉落配额已满，跳过炸金花牌桌 #%s 加入", rid)
                     else:
-                        ctx.log.warning("加入失败: %s", r.get("error"))
+                        ctx.log.info("加入牌桌 #%s...", rid)
+                        r = await client.post("/api/portal/zhajinhua/join", {})
+                        if r.get("ok"):
+                            ctx.log.info("加入成功！")
+                            if cfg.get("zjh_notify_join", True):
+                                await ctx.notify(f"🃏 加入牌桌 #{rid}")
+                        else:
+                            ctx.log.warning("加入失败: %s", r.get("error"))
 
                 # 轮到我了
                 if fold_pending and alive and is_turn:

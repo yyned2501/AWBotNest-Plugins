@@ -41,7 +41,7 @@ import datetime
 import json
 import re
 
-from . import hdsky_auth
+from . import drop_guard, hdsky_auth
 from .hdsky import HdskyClient, request_key
 
 _TARGET = 10.5
@@ -578,6 +578,9 @@ async def _once(ctx: object, cfg: dict, client: HdskyClient) -> None:
     # 报名阶段：未报名且可加入 → 按配置下注
     if phase == "signup":
         if self_p is not None or "join" not in actions:
+            return
+        if drop_guard.paused(ctx):
+            ctx.log.debug("十点半 #%s 掉落配额已满，跳过报名", rid)
             return
         if ctx.kv.get(_JOIN_FAIL_KEY, "") == str(rid):
             ctx.log.debug("十点半 #%s 本局报名失败过，不再重试", rid)
