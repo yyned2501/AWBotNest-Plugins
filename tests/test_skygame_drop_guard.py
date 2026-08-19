@@ -101,20 +101,29 @@ def test_paused_semantics() -> None:
     assert dg.paused(ctx) is False  # 还有剩余 → 照常参与
 
 
+def test_parse_remaining_new_and_legacy_format() -> None:
+    # 新格式（2026-08-19 实测）：配额拆成聊天/游戏两类，守卫只认「游戏」
+    assert dg.parse_remaining("当前时段剩余掉落: 聊天 3 · 游戏 0") == 0
+    assert dg.parse_remaining("当前时段剩余掉落：聊天 3 · 游戏 5") == 5
+    # 旧格式纯数字兼容
+    assert dg.parse_remaining("当前时段剩余掉落：2") == 2
+    assert dg.parse_remaining("你好") is None
+
+
 @pytest.mark.asyncio
 async def test_apply_reply_toggles_pause_and_notifies_once() -> None:
     ctx = _GuardCtx()
 
-    assert await dg.apply_reply(ctx, "📊 统计\n当前时段剩余掉落：0\n今日掉落 12") is True
+    assert await dg.apply_reply(ctx, "📊 统计\n当前时段剩余掉落: 聊天 3 · 游戏 0\n今日掉落 12") is True
     assert dg.paused(ctx) is True
     assert len(ctx.notifications) == 1 and "暂停" in ctx.notifications[0]
 
     # 状态不变不重复通知
-    await dg.apply_reply(ctx, "当前时段剩余掉落：0")
+    await dg.apply_reply(ctx, "当前时段剩余掉落: 聊天 1 · 游戏 0")
     assert len(ctx.notifications) == 1
 
     # 时段刷新恢复：再通知一次
-    await dg.apply_reply(ctx, "当前时段剩余掉落：5")
+    await dg.apply_reply(ctx, "当前时段剩余掉落: 聊天 3 · 游戏 5")
     assert dg.paused(ctx) is False
     assert len(ctx.notifications) == 2 and "恢复" in ctx.notifications[1]
 

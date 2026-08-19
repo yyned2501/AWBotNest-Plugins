@@ -18,8 +18,11 @@ from __future__ import annotations
 import re
 import time
 
-# /info 回复里的配额行（与 skyDropAnswer 共用同一 bot 回复格式）
-_INFO_REMAINING_RE = re.compile(r"当前时段剩余掉落[:：]\s*(\d+)")
+# /info 回复里的配额行。新格式（2026-08-19 实测）把配额拆成两类：
+#   当前时段剩余掉落: 聊天 3 · 游戏 0
+# 游戏参与只消耗「游戏」配额；旧格式为纯数字，兼容回退。
+_INFO_GAME_RE = re.compile(r"当前时段剩余掉落[:：]\s*聊天\s*\d+\s*·\s*游戏\s*(\d+)")
+_INFO_LEGACY_RE = re.compile(r"当前时段剩余掉落[:：]\s*(\d+)")
 
 _KV_REMAINING = "dropguard:remaining"
 _KV_CHECKED_TS = "dropguard:checked_ts"
@@ -60,12 +63,20 @@ def paused(ctx: object) -> bool:
     return time.time() - ts < _STALE_AFTER
 
 
+def parse_remaining(text: str) -> int | None:
+    """从 /info 回复解析本时段剩余「游戏」掉落配额；无法解析返回 None。"""
+    m = _INFO_GAME_RE.search(text)
+    if m:
+        return int(m.group(1))
+    m = _INFO_LEGACY_RE.search(text)
+    return int(m.group(1)) if m else None
+
+
 async def apply_reply(ctx: object, text: str) -> bool:
     """解析 /info 回复更新剩余数；暂停状态翻转时通知一次。返回是否解析成功。"""
-    m = _INFO_REMAINING_RE.search(text)
-    if not m:
+    remaining = parse_remaining(text)
+    if remaining is None:
         return False
-    remaining = int(m.group(1))
     was_paused = bool(ctx.kv.get(_KV_PAUSED, False))
     ctx.kv.set(_KV_REMAINING, remaining)
     ctx.kv.set(_KV_CHECKED_TS, time.time())
@@ -77,9 +88,9 @@ async def apply_reply(ctx: object, text: str) -> bool:
         return True
     ctx.kv.set(_KV_PAUSED, now_paused)
     msg = (
-        "🪙 天空小秘掉落配额已满（本时段剩余 0），暂停十点半/炸金花/赛马新加入，时段刷新后自动恢复"
+        "🪙 天空小秘游戏掉落配额已满（本时段游戏剩余 0），暂停十点半/炸金花/赛马新加入，时段刷新后自动恢复"
         if now_paused
-        else f"🪙 天空小秘掉落剩余 {remaining}，恢复游戏参与"
+        else f"🪙 天空小秘游戏掉落剩余 {remaining}，恢复游戏参与"
     )
     ctx.log.info(msg)
     try:
