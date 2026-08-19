@@ -93,6 +93,14 @@ def _guard_enabled(ctx: object) -> bool:
     return bool(ctx.config.get("drop_guard_enabled", True))
 
 
+def _guard_bot_ids(cfg: dict) -> list[int | str]:
+    """掉落守卫专用 bot（读 drop_guard_bot）；留空回退默认天空小秘。
+
+    不复用全局 bot 配置——线上曾把那里配成 HDSky 验证 bot，发 /info 无掉落回复。
+    """
+    return _parse_bot_ids(str(cfg.get("drop_guard_bot", "") or ""))
+
+
 async def _guard_tick(ctx: object) -> None:
     """低频 tick：间隔到了就私聊 bot 发一次 /info（回复由 handler 捕获解析）。"""
     if not _guard_enabled(ctx):
@@ -102,7 +110,7 @@ async def _guard_tick(ctx: object) -> None:
     last = max(float(ctx.kv.get(_KV_CHECKED_TS, 0) or 0), float(ctx.kv.get(_KV_SENT_TS, 0) or 0))
     if now - last < interval:
         return
-    bot_ids = _parse_bot_ids(str(ctx.config.get("bot", "") or ""))
+    bot_ids = _guard_bot_ids(ctx.config)
     target = bot_ids[0]
     if isinstance(target, str) and not target.startswith("@"):
         target = f"@{target}"
@@ -116,7 +124,7 @@ async def _guard_tick(ctx: object) -> None:
 
 def start(ctx: object) -> None:
     """注册 /info 回复捕获 handler + 低频检查调度。"""
-    bot_ids = _parse_bot_ids(str(ctx.config.get("bot", "") or ""))
+    bot_ids = _guard_bot_ids(ctx.config)
     info_filter = ctx.filters.private & ctx.filters.user(bot_ids) & ctx.filters.text
 
     @ctx.on_message(info_filter, group=7)

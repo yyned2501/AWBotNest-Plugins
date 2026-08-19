@@ -152,6 +152,16 @@ async def test_guard_tick_sends_info_with_throttle() -> None:
 
 
 @pytest.mark.asyncio
+async def test_guard_ignores_global_bot_config() -> None:
+    # 全局 bot 配置可能是别的 bot（如 HDSky 验证 bot），守卫只认 drop_guard_bot，
+    # 留空回退默认天空小秘（v1.22.1）
+    ctx = _GuardCtx()
+    ctx.config = {"drop_guard_enabled": True, "bot": "@HDSkyVerify_bot"}
+    await dg._guard_tick(ctx)
+    assert ctx.user.sent == [("8907007783", "/info")]
+
+
+@pytest.mark.asyncio
 async def test_guard_tick_send_failure_does_not_raise() -> None:
     ctx = _GuardCtx()
     ctx.config = {"drop_guard_enabled": True}
