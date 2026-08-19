@@ -109,7 +109,7 @@
 
 ### 幸运轮盘（lucky，2026-08-17 调研发现，顺带记录）
 
-`GET /api/portal/lucky`（返回 `lucky{recent[],prizes[],freeSpins,costPerSpin:2000,maxSpins}`）与 `POST /api/portal/lucky/spin`（`{count, requestKey}`，响应 `result{silverGain,animation,...}`）。前端源码证据，未实测；免费次数优先抵扣，奖励进统一账户。**尚未接入插件**。
+`GET /api/portal/lucky`（返回 `lucky{recent[],prizes[],freeSpins,costPerSpin:2000,maxSpins,balance}`）与 `POST /api/portal/lucky/spin`（`{count, requestKey}`，响应 `result{ok,message,spinCount,freeSpinCount,costAmount,silverGain,balanceAfter,summary[],animation}`）。**2026-08-19 实测已接入**（skyGame v1.23.0 `games/lucky.py`）：免费次数优先抵扣（免费抽时 `costAmount=0`），`count` 支持批量；免费次数由当日随机掉落累计兑换（/info 可见「免费抽奖次数」），当天不用隔天作废。
 - **喂食与冷却（2026-08-08 用户确认 + 2026-08-13/14 实测补全）**：普通喂食（weed/fine）与仙草（divine）**独立计数、独立冷却**——`profile.daily_feed_count`（普通喂食，与 `stats.feedCountToday/feedMax` 对应，每日 5 次）与 `profile.daily_divine_feed_count`（仙草，每日 3 次，服务端文案「今日仙草喂养：3 / 3」已确认）分开。喂食撞冷却时服务端返回「你的马刚吃过，xx分钟 后再喂」（**`result.code=="feed_cooldown"`** + `remainMs`，2026-08-14 实测；遛马仍是 `cooldown`），插件按 `remainMs` 退避不重复尝试。喂食成功响应**不带** remainMs，但门户立刻再喂仍会拒绝——插件成功后先本地预退避 60 分钟（实测约 1 小时）。精草冷却中仍可喂仙草补体力。
 - **草料目录 `horse.feeds`（2026-08-13 GET /api/portal/horse 已确认）**：`weed` 杂草 100 银元 +6 体力 / +12 饱腹；`fine` 精草 300 银元 +18 体力 / +30 饱腹；`divine` 仙草 1000 银元 +50 体力 / +60 饱腹。
 - **喂食成功响应（2026-08-13 POST feed divine 已确认）**：`result` 含 `ok/amount/feedType/feedLabel/expGain/progressGain/profile/message`。`message` 是十余行说明（规则/战绩/改名费），不适合原样推送；插件用结构化字段组表。`profile.last_feed_at_ms` 只在普通喂食时更新（当日 3 次仙草后该字段仍停在前一日普通喂食时间）。
