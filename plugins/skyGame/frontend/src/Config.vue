@@ -40,6 +40,7 @@ const DEFAULTS = {
   horse_auto_official_race: false,
   horse_auto_revive: false,
   horse_notify: true,
+  horse_drop_guard: false,
   // 炸金花
   zjh_enabled: true,
   zjh_poll_interval: 2,
@@ -283,6 +284,14 @@ async function renewNow() {
                   <input v-model="cfg.horse_notify" type="checkbox" />
                   <span>操作结果推送</span>
                 </label>
+              </div>
+              <div class="fld">
+                <span class="lbl">掉落控制</span>
+                <label class="row switch">
+                  <input v-model="cfg.horse_drop_guard" type="checkbox" />
+                  <span>受游戏掉落控制</span>
+                </label>
+                <span class="help">默认关：掉落配额满时养马照常；勾选后参赛也随守卫暂停</span>
               </div>
             </div>
           </section>

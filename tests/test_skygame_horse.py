@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import time
 
 import pytest
 
@@ -319,6 +320,33 @@ async def test_match_race_joins_when_stamina_enough() -> None:
     assert path == "/api/portal/horse/race/action"
     assert body["action"] == "join"
     assert "amount" not in body  # 报名额取服务端 match.amount，请求体只带 action+requestKey
+
+
+@pytest.mark.asyncio
+async def test_match_race_ignores_drop_guard_by_default() -> None:
+    # v1.22.4：养马默认不受掉落守卫影响——配额已满仍照常加入玩家赛
+    ctx = _FakeCtx()
+    ctx.kv.set("dropguard:remaining", 0)
+    ctx.kv.set("dropguard:checked_ts", time.time())
+    action = {"ok": True, "result": {"ok": True, "message": "已加入养马赛 #1083"}}
+    client = _FakeClient(_horse_state(match=_active_match()), action)
+
+    await _care_once(ctx, {}, client)
+
+    assert len(client.posts) == 1 and client.posts[0][1]["action"] == "join"
+
+
+@pytest.mark.asyncio
+async def test_match_race_blocked_when_drop_guard_opted_in() -> None:
+    # 勾选「受游戏掉落控制」且配额已满 → 不加入玩家赛（养护动作照常）
+    ctx = _FakeCtx()
+    ctx.kv.set("dropguard:remaining", 0)
+    ctx.kv.set("dropguard:checked_ts", time.time())
+    client = _FakeClient(_horse_state(match=_active_match()), {"ok": True})
+
+    await _care_once(ctx, {"horse_drop_guard": True}, client)
+
+    assert all(body.get("action") != "join" for _, body in client.posts)
 
 
 @pytest.mark.asyncio

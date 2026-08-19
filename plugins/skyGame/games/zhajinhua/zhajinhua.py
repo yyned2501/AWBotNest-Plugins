@@ -488,6 +488,10 @@ async def _poll_loop(ctx: object) -> None:
                 if not cfg.get("zjh_enabled", True):
                     await asyncio.sleep(interval)
                     continue
+                if drop_guard.paused(ctx):
+                    # 掉落配额已满：停心跳（不访问门户），时段刷新后自动恢复
+                    await asyncio.sleep(interval)
+                    continue
 
                 # 每轮读最新配置（cookie 路径/门户地址可能被改）
                 client.configure(

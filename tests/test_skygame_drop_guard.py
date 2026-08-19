@@ -14,6 +14,7 @@ import pytest
 
 import plugins.skyGame.games.drop_guard as dg
 from plugins.skyGame.games.tenhalf import _once
+from plugins.skyGame.games.tenhalf import start as tenhalf_start
 from tests.test_skygame_tenhalf import _OK, _FakeClient, _FakeCtx, _game
 
 
@@ -242,3 +243,20 @@ async def test_tenhalf_signup_blocked_when_drop_full() -> None:
     ctx.kv.set(dg._KV_REMAINING, 2)
     await _once(ctx, {"tenhalf_bet_amount": 200}, client)
     assert client.posts and client.posts[0][1]["action"] == "join"
+
+
+@pytest.mark.asyncio
+async def test_tenhalf_tick_stops_heartbeat_when_paused() -> None:
+    # v1.22.4：配额满时整个 tick 直接返回——不开 HTTP 客户端、不统计不推送；
+    # 恢复后首轮 _catch_up_settlement 会补扫漏掉的结算
+    ctx = _FakeCtx()
+    ctx.config = {"tenhalf_enabled": True}
+    ctx.kv.set(dg._KV_REMAINING, 0)
+    ctx.kv.set(dg._KV_CHECKED_TS, time.time())
+    tenhalf_start(ctx)
+    fn, _, _ = ctx.schedules[0]
+
+    await fn()  # paused → 直接返回，不应有任何推送/报错
+
+    assert ctx.notifications == []
+    assert not any(lv == "ERROR" for lv, _ in ctx.log.records)

@@ -88,7 +88,8 @@ async def apply_reply(ctx: object, text: str) -> bool:
         return True
     ctx.kv.set(_KV_PAUSED, now_paused)
     msg = (
-        "🪙 天空小秘游戏掉落配额已满（本时段游戏剩余 0），暂停十点半/炸金花/赛马新加入，时段刷新后自动恢复"
+        "🪙 天空小秘游戏掉落配额已满（本时段游戏剩余 0），十点半/炸金花暂停轮询与新加入"
+        "（养马不受影响），时段刷新后自动恢复"
         if now_paused
         else f"🪙 天空小秘游戏掉落剩余 {remaining}，恢复游戏参与"
     )
