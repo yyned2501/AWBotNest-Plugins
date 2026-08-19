@@ -401,7 +401,7 @@ async def test_match_race_feeds_divine_then_joins_low_stamina() -> None:
     headers, rows, kwargs = ctx.tables[0]
     assert headers == ["项目", "内容"]
     assert ["草料", "仙草"] in rows
-    assert ["体力", "61/100"] in rows
+    assert ["体力", "11 → 61/100"] in rows  # 喂前 → 喂后，避免误读为高体力喂的
     assert ["今日仙草", "3/3"] in rows
     assert kwargs.get("caption") == "🐴 仙草喂养成功"
 
@@ -667,6 +667,18 @@ def test_format_feed_table_falls_back_when_result_empty() -> None:
     assert headers == ["项目", "内容"]
     assert caption == "🐴 喂食失败"
     assert rows == [["结果", "喂食失败"]]
+
+
+def test_format_feed_table_shows_stamina_change_when_before_given() -> None:
+    # 正向：传喂前体力时表格显示「喂前 → 喂后」；不传则只展示喂后值（兼容旧行为）
+    payload = {
+        "ok": True,
+        "result": {"ok": True, "feedType": "divine", "feedLabel": "仙草", "profile": {"stamina": 95}},
+    }
+    _, rows, _ = _format_feed_table(payload, "喂仙草失败", stamina_before=45)
+    assert ["体力", "45 → 95/100"] in rows
+    _, rows_legacy, _ = _format_feed_table(payload, "喂仙草失败")
+    assert ["体力", "95/100"] in rows_legacy
 
 
 def test_format_walk_table_uses_structured_fields_not_server_blob() -> None:

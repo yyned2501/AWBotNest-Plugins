@@ -17,6 +17,9 @@ const DEFAULTS = {
   hdsky_base_url: 'https://hdsky.supertimi.de:8443',
   hdsky_debug: false,
   hdsky_debug_file: '/app/data/hdsky_debug.jsonl',
+  // 掉落守卫
+  drop_guard_enabled: true,
+  drop_guard_interval: 10,
   // Cookie 自动续期
   auth_auto_renew: true,
   cc_server: 'http://192.168.31.10:3000',
@@ -151,7 +154,7 @@ async function renewNow() {
             <div class="fld">
               <span class="lbl">天空小秘机器人</span>
               <input v-model="cfg.bot" class="inp" placeholder="@用户名 或 数字ID，逗号分隔可填多个" />
-              <span class="help">留空=默认天空小秘。</span>
+              <span class="help">留空=默认天空小秘。掉落守卫的 /info 也发给它。</span>
             </div>
           </section>
 
@@ -165,6 +168,23 @@ async function renewNow() {
             <div class="fld">
               <span class="lbl">门户地址</span>
               <input v-model="cfg.hdsky_base_url" class="inp" spellcheck="false" />
+            </div>
+          </section>
+
+          <section class="card">
+            <div class="card-h">掉落配额守卫</div>
+            <label class="row switch">
+              <input v-model="cfg.drop_guard_enabled" type="checkbox" />
+              <span>掉落满时暂停游戏参与</span>
+            </label>
+            <span class="help" style="margin-top:-4px">
+              定期私聊天空小秘发 /info 查「当前时段剩余掉落」，剩余为 0 时暂停十点半报名/炸金花入桌/赛马报名
+              （养马喂食/遛马不受影响），时段刷新后自动恢复；状态切换会通知一次
+            </span>
+            <div class="fld">
+              <span class="lbl">掉落检查间隔(分钟)</span>
+              <input v-model.number="cfg.drop_guard_interval" class="inp" type="number" min="5" max="60" step="5" />
+              <span class="help">多久私聊 bot 发一次 /info；越短对配额满的反应越快</span>
             </div>
           </section>
 

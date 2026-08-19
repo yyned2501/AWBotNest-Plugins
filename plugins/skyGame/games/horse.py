@@ -29,7 +29,7 @@ import datetime
 import json
 import re
 
-from . import hdsky_auth
+from . import drop_guard, hdsky_auth
 from .hdsky import HdskyClient, request_key
 
 _task: asyncio.Task[None] | None = None
@@ -60,8 +60,12 @@ def _stat_pair(current: object, maximum: int) -> str:
     return f"{int(current or 0)}/{maximum}"
 
 
-def _append_profile_rows(rows: list[list[object]], profile: dict) -> None:
-    """喂食/遛马共用的马匹状态行。"""
+def _append_profile_rows(rows: list[list[object]], profile: dict, stamina_before: int | None = None) -> None:
+    """喂食/遛马共用的马匹状态行。
+
+    响应里的 profile 是动作执行后的状态；喂食传 stamina_before 可显示「喂前 → 喂后」，
+    否则只展示喂后体力会被误读为高体力喂的。
+    """
     if not profile:
         return
     if profile.get("horse_name"):
@@ -73,7 +77,10 @@ def _append_profile_rows(rows: list[list[object]], profile: dict) -> None:
             level_text += f"（经验 {int(exp):,}）"
         rows.append(["等级", level_text])
     if profile.get("stamina") is not None:
-        rows.append(["体力", _stat_pair(profile.get("stamina"), 100)])
+        stamina_text = _stat_pair(profile.get("stamina"), 100)
+        if stamina_before is not None:
+            stamina_text = f"{stamina_before} → {stamina_text}"
+        rows.append(["体力", stamina_text])
     if profile.get("mood") is not None:
         rows.append(["心情", _stat_pair(profile.get("mood"), 100)])
     if profile.get("satiety") is not None:
@@ -84,11 +91,14 @@ def _append_profile_rows(rows: list[list[object]], profile: dict) -> None:
         rows.append(["今日仙草", _stat_pair(profile.get("daily_divine_feed_count"), _DIVINE_DAILY_MAX)])
 
 
-def _format_feed_table(payload: dict, fallback: str) -> tuple[list[str], list[list[object]], str]:
+def _format_feed_table(
+    payload: dict, fallback: str, stamina_before: int | None = None
+) -> tuple[list[str], list[list[object]], str]:
     """把喂食结果收成两列表格，不把服务端长文案原样推送。
 
     实测 feed 成功响应含 feedType/feedLabel/amount/expGain/progressGain/profile，
     旧实现直接推 result.message（十余行说明+规则），平台按「字段：内容」自动拆表后列对不齐。
+    profile 是喂后状态，传 stamina_before 时体力行显示「喂前 → 喂后」。
     """
     result = payload.get("result", {}) or {}
     profile = result.get("profile") or {}
@@ -104,7 +114,7 @@ def _format_feed_table(payload: dict, fallback: str) -> tuple[list[str], list[li
         rows.append(["经验", f"+{int(result.get('expGain') or 0)}"])
     if result.get("progressGain") not in (None, ""):
         rows.append(["长期进度", f"+{result.get('progressGain')}"])
-    _append_profile_rows(rows, profile)
+    _append_profile_rows(rows, profile, stamina_before)
     if len(rows) == 1 and not ok:
         rows = [["结果", result.get("message") or fallback]]
     return ["项目", "内容"], rows, caption
@@ -184,6 +194,7 @@ async def _notify_result(
     fallback: str,
     walk_today: int | None = None,
     walk_max: int | None = None,
+    stamina_before: int | None = None,
 ) -> None:
     """喂食/遛马走结构化表格；其它动作仍用服务端短消息。冷却静默。"""
     result = payload.get("result", {}) or {}
@@ -194,7 +205,7 @@ async def _notify_result(
         return
     ok = bool(result.get("ok", payload.get("ok", False)))
     if result.get("feedType") or result.get("feedLabel") or fallback.startswith("喂"):
-        headers, rows, caption = _format_feed_table(payload, fallback)
+        headers, rows, caption = _format_feed_table(payload, fallback, stamina_before)
         await ctx.notify_table(headers, rows, caption=caption, level="success" if ok else "warning", category="养马")
         return
     if fallback.startswith("遛马") or result.get("eventKind") is not None or result.get("bonusAmount") is not None:
@@ -276,14 +287,16 @@ def _divine_feed_ready(st: dict, profile: dict, now_ms: int, ctx: object) -> boo
     )
 
 
-async def _do_feed(ctx: object, cfg: dict, client: HdskyClient, feed_type: str, reason: str) -> dict:
-    """执行一次喂食并处理冷却/通知。"""
+async def _do_feed(
+    ctx: object, cfg: dict, client: HdskyClient, feed_type: str, reason: str, stamina_before: int | None = None
+) -> dict:
+    """执行一次喂食并处理冷却/通知。stamina_before 为喂前体力，通知表格展示变化量。"""
     cd_key = _DIVINE_CD_KEY if feed_type == "divine" else _FEED_CD_KEY
     now_ms = int(datetime.datetime.now().timestamp() * 1000)
     r = await _horse_action(client, "feed", feedType=feed_type)
     ctx.log.info("喂食 %s（%s）", feed_type, reason)
     _feed_cooldown_handle(ctx, r, cd_key, now_ms)
-    await _notify_result(ctx, cfg, r, f"喂{_feed_label(feed_type)}失败")
+    await _notify_result(ctx, cfg, r, f"喂{_feed_label(feed_type)}失败", stamina_before=stamina_before)
     return r
 
 
@@ -336,6 +349,10 @@ async def _care_once(ctx: object, cfg: dict, client: HdskyClient) -> None:
         and "join" in (match.get("actions") or [])
         and not bool(match.get("joined"))
     )
+    if match_joinable and drop_guard.paused(ctx):
+        # 掉落配额已满：不参赛（报名额白耗），喂食/遛马等养护动作照常
+        ctx.log.debug("掉落配额已满，跳过玩家养马赛 #%s 加入", match.get("roundId"))
+        match_joinable = False
     min_stamina = int(cfg.get("horse_race_min_stamina", 30) or 30)
 
     # 玩家赛：体力足够 → 直接加入
@@ -361,7 +378,12 @@ async def _care_once(ctx: object, cfg: dict, client: HdskyClient) -> None:
             ctx.log.debug("玩家赛体力不足（%d < %d）但仙草暂不可喂（额度/冷却），等待补体力", stamina, min_stamina)
             return
         r = await _do_feed(
-            ctx, cfg, client, "divine", f"玩家赛体力不足（{stamina} < {min_stamina}），喂仙草+{divine_gain} 后参赛"
+            ctx,
+            cfg,
+            client,
+            "divine",
+            f"玩家赛体力不足（{stamina} < {min_stamina}），喂仙草+{divine_gain} 后参赛",
+            stamina_before=stamina,
         )
         feed_result = r.get("result", {}) or {}
         if not feed_result.get("ok", r.get("ok", False)):
@@ -384,10 +406,12 @@ async def _care_once(ctx: object, cfg: dict, client: HdskyClient) -> None:
     feed_type = _configured_feed_type(cfg)
     if stamina < threshold:
         if feed_type != "divine" and _regular_feed_ready(st, stats, profile, now_ms, ctx):
-            await _do_feed(ctx, cfg, client, feed_type, f"今日普通喂养 {feed_count}/{feed_max}，体力 {stamina}")
+            await _do_feed(
+                ctx, cfg, client, feed_type, f"今日普通喂养 {feed_count}/{feed_max}，体力 {stamina}", stamina
+            )
             return
         if _divine_feed_ready(st, profile, now_ms, ctx):
-            await _do_feed(ctx, cfg, client, "divine", f"普通草料不可用，体力 {stamina} < {threshold}，喂仙草")
+            await _do_feed(ctx, cfg, client, "divine", f"普通草料不可用，体力 {stamina} < {threshold}，喂仙草", stamina)
             return
         if (
             feed_type != "divine"
@@ -441,6 +465,8 @@ async def _care_once(ctx: object, cfg: dict, client: HdskyClient) -> None:
         ctx.log.debug("官方赛今日已报名（服务端状态），跳过")
     elif ctx.kv.get("horse:race_last_signup_date") == today:
         ctx.log.debug("今日已报名官方赛，明天再检查")
+    elif drop_guard.paused(ctx):
+        ctx.log.debug("掉落配额已满，跳过官方赛马报名")
     elif cfg.get("horse_auto_official_race", False) and official.get("signupOpen") and eligibility.get("canRace"):
         r = await client.post("/api/portal/horse/race/action", {"action": "official_join", "requestKey": request_key()})
         ctx.log.info("报名官方赛马")
