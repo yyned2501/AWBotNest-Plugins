@@ -8,13 +8,14 @@
 from __future__ import annotations
 
 import inspect
+import json
 import time
 
 import pytest
 
 import plugins.skyGame.games.drop_guard as dg
 from plugins.skyGame.games.tenhalf import _once
-from tests.test_skygame_tenhalf import _OK, _FakeClient, _FakeCtx, _game
+from tests.test_skygame_tenhalf import _OK, _FakeClient, _FakeCtx, _game, _last_result
 
 
 class _FakeKV:
@@ -275,3 +276,23 @@ async def test_tenhalf_paused_still_plays_joined_round() -> None:
     await _once(ctx, {"tenhalf_bet_amount": 200}, client)
 
     assert client.posts and client.posts[0][1]["action"] == "hit"  # 低点数照常要牌
+
+
+@pytest.mark.asyncio
+async def test_tenhalf_paused_settlement_of_finished_round_not_swallowed() -> None:
+    # v1.23.3 回归：刚结束那局的结算不得被暂停检查吞掉——局结束瞬间切到
+    # 新局（self_p 已空）时，lastResult 结算仍要入账推送，然后才停心跳
+    ctx = _FakeCtx()
+    ctx.kv.set(dg._KV_REMAINING, 0)
+    ctx.kv.set(dg._KV_CHECKED_TS, time.time())
+    ctx.kv.set("tenhalf:joined_round", "4244")
+    state = _game(phase="signup", round_id=4245, actions=["join"], last_result=_last_result(rid=4244, delta=-100))
+    client = _FakeClient(state, _OK)
+
+    await _once(ctx, {}, client)
+
+    assert ctx.tables, "结算表格推送丢失"
+    assert ctx.kv.get("tenhalf:last_round") == "4244"
+    stats = json.loads(str(ctx.kv.get("tenhalf:stats")))
+    assert stats["total"]["net"] == -100
+    assert client.posts == []  # 暂停下仍不新报名
