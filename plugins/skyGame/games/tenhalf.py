@@ -655,6 +655,10 @@ def start(ctx: object) -> None:
         cfg = ctx.config
         if not cfg.get("tenhalf_enabled", False):
             return
+        if drop_guard.paused(ctx):
+            # 掉落配额已满：整个 tick 停心跳（不访问门户、不统计不推送），
+            # 恢复后首轮 _catch_up_settlement 从 history[] 补扫漏掉的结算
+            return
         try:
             async with HdskyClient(log=ctx.log) as client:
                 client.set_renewer(hdsky_auth.renewer_for(ctx))  # 401 时自动续期并重试

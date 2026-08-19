@@ -349,8 +349,8 @@ async def _care_once(ctx: object, cfg: dict, client: HdskyClient) -> None:
         and "join" in (match.get("actions") or [])
         and not bool(match.get("joined"))
     )
-    if match_joinable and drop_guard.paused(ctx):
-        # 掉落配额已满：不参赛（报名额白耗），喂食/遛马等养护动作照常
+    if match_joinable and bool(cfg.get("horse_drop_guard", False)) and drop_guard.paused(ctx):
+        # 勾选了「受游戏掉落控制」且配额已满：不参赛（报名额白耗），喂食/遛马等养护动作照常
         ctx.log.debug("掉落配额已满，跳过玩家养马赛 #%s 加入", match.get("roundId"))
         match_joinable = False
     min_stamina = int(cfg.get("horse_race_min_stamina", 30) or 30)
@@ -465,7 +465,7 @@ async def _care_once(ctx: object, cfg: dict, client: HdskyClient) -> None:
         ctx.log.debug("官方赛今日已报名（服务端状态），跳过")
     elif ctx.kv.get("horse:race_last_signup_date") == today:
         ctx.log.debug("今日已报名官方赛，明天再检查")
-    elif drop_guard.paused(ctx):
+    elif drop_guard.paused(ctx) and cfg.get("horse_drop_guard", False):
         ctx.log.debug("掉落配额已满，跳过官方赛马报名")
     elif cfg.get("horse_auto_official_race", False) and official.get("signupOpen") and eligibility.get("canRace"):
         r = await client.post("/api/portal/horse/race/action", {"action": "official_join", "requestKey": request_key()})
