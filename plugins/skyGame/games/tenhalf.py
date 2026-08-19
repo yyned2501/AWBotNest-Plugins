@@ -483,6 +483,14 @@ async def _handle_settlement(ctx: object, cfg: dict, game: dict) -> None:
     await _settle_round(ctx, cfg, rid, last.get("settlement") or {})
 
 
+def _round_no(v: object) -> int:
+    """局号转数字（单调递增）；非法值返回 -1 不参与比较。"""
+    try:
+        return int(str(v))
+    except (TypeError, ValueError):
+        return -1
+
+
 async def _catch_up_settlement(ctx: object, cfg: dict, game: dict) -> None:
     """用 history[] 补扫被 lastResult 漏掉的结算（v1.19.1）。
 
@@ -492,7 +500,10 @@ async def _catch_up_settlement(ctx: object, cfg: dict, game: dict) -> None:
     兜底（盈亏未知，战绩不入账），保证每局报名后必有结束推送。
     """
     joined = ctx.kv.get(_JOINED_ROUND_KEY, "")
-    if not joined or str(ctx.kv.get(_LAST_ROUND_KEY, "")) == str(joined):
+    # 数字比较而非相等比较：_handle_settlement 可能已入账更大的局号（lastResult 推进），
+    # 相等比较会永远不成立——history 里还有 joined 时每轮重复入账，
+    # 翻篇后每轮兜底推送并把 last_round 回退成小值（v1.23.2 修复重复统计）
+    if not joined or _round_no(joined) <= _round_no(ctx.kv.get(_LAST_ROUND_KEY, "")):
         return
     active_rid = game.get("roundId") if game.get("active") else None
     if active_rid is not None and str(active_rid) == str(joined):

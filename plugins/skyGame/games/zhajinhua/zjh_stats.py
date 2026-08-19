@@ -5,6 +5,8 @@
 # 累计（zjh:stats）与当日（zjh:stats:day:YYYY-MM-DD）两个键。调用方在牌局轮询
 # roundId 切换时每局调用一次（zhajinhua.py）；展示文本由 zjh_notify 拼装。
 # kv 值用 dict 存储（与画像 ProfileStore 同一套平台 kv，实测支持 dict）。
+# 入账另按 roundId 持久去重（zjh:last_fed_rid）：调用方的进程内去重变量
+# 重载即丢，重载后同一 lastResult 会再次送达（v1.23.2 修复重复入账）。
 
 from __future__ import annotations
 
@@ -13,6 +15,7 @@ from typing import Any
 
 _STATS_TOTAL_KEY = "zjh:stats"
 _STATS_DAY_PREFIX = "zjh:stats:day"
+_LAST_FED_KEY = "zjh:last_fed_rid"
 
 
 def _result_delta(last_result: Any) -> float | None:
@@ -49,10 +52,17 @@ def record_round_result(kv: object, last_result: Any, today: str | None = None) 
     """入账一局结算：累计与当日统计同步更新，返回本局净输赢（无有效结算返回 None）。
 
     调用方保证每局只调一次（roundId 切换去重）；selfDelta 缺失时不入账、不报错。
+    另按 roundId 持久去重：插件重载后调用方进程内去重失效，同一 lastResult
+    会再次送达，kv 里已记过的局号直接跳过（不重复入账也不重复推送）。
     """
     delta = _result_delta(last_result)
     if delta is None:
         return None
+    rid = last_result.get("roundId") if isinstance(last_result, dict) else None
+    if rid is not None:
+        if str(kv.get(_LAST_FED_KEY, "")) == str(rid):
+            return None  # 重载前已入账过本局
+        kv.set(_LAST_FED_KEY, str(rid))
     today = today or datetime.date.today().isoformat()
     for key in (_STATS_TOTAL_KEY, f"{_STATS_DAY_PREFIX}:{today}"):
         stats = _load_stats(kv, key)

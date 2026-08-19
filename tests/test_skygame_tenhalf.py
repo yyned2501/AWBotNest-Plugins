@@ -648,6 +648,36 @@ async def test_catch_up_once_then_no_duplicate() -> None:
 
 
 @pytest.mark.asyncio
+async def test_catch_up_skipped_when_last_round_already_advanced() -> None:
+    """v1.23.2 回归：_handle_settlement 已入账更大局号（lastResult 推进）后，
+    joined 局号即使还在 history 里也不重复入账（旧相等比较每轮都会重记）。"""
+    ctx = _FakeCtx()
+    ctx.kv.set("tenhalf:joined_round", "1903")
+    ctx.kv.set("tenhalf:last_round", "1905")
+    state = _game(phase="signup", round_id=1906, actions=["join"])
+    state["game"]["history"] = [_history_entry(1903)]
+
+    await _catch_up_settlement(ctx, {}, state["game"])
+
+    assert ctx.tables == [] and ctx.notifications == []
+    assert ctx.kv.get("tenhalf:last_round") == "1905"  # 不回退成小值
+    assert ctx.kv.get("tenhalf:stats") is None  # 不重复入账
+
+
+@pytest.mark.asyncio
+async def test_catch_up_no_repeated_fallback_after_advanced() -> None:
+    """v1.23.2 回归：joined 局号已落后且不在 history —— 不每轮兜底推送。"""
+    ctx = _FakeCtx()
+    ctx.kv.set("tenhalf:joined_round", "1903")
+    ctx.kv.set("tenhalf:last_round", "1905")
+
+    await _catch_up_settlement(ctx, {}, _game(phase="signup", round_id=1906)["game"])
+
+    assert ctx.notifications == []
+    assert ctx.kv.get("tenhalf:last_round") == "1905"
+
+
+@pytest.mark.asyncio
 async def test_catch_up_fallback_when_history_empty() -> None:
     """history 也没有该条：降级推送兜底（盈亏未知），不重复触发。"""
     ctx = _FakeCtx()
