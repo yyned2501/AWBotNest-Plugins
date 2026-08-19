@@ -571,9 +571,12 @@ async def _poll_loop(ctx: object) -> None:
                     # 新局响应 lastResult 已被清空——从不入账、从不推送（用户反馈）。
                     if round_joined:
                         last_delta = record_round_result(ctx.kv, last_result)
-                        await _notify_game_result(
-                            ctx, cfg, game_data, last_round_hand, last_round_hand_type, last_delta
-                        )
+                        # record 内部按 roundId 持久去重：重载后同一 lastResult 再次送达
+                        # 时返回 None，不再重复入账也不重复推送
+                        if last_delta is not None:
+                            await _notify_game_result(
+                                ctx, cfg, game_data, last_round_hand, last_round_hand_type, last_delta
+                            )
                 if cfg.get("zjh_profile_enabled", True):
                     profile_store.flush()
                 s = g.get("self", {})

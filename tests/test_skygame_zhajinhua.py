@@ -3610,6 +3610,17 @@ def test_record_round_result_accumulates_total_and_day() -> None:
     assert day == total
 
 
+def test_record_round_result_dedupes_same_round_after_reload() -> None:
+    """v1.23.2 回归：重载后调用方进程内去重丢失，同一 lastResult 再次送达——
+    kv 按 roundId 持久去重拦住，不重复入账。"""
+    kv = _FakeKV()
+    assert record_round_result(kv, {"roundId": 7, "selfDelta": 500}, today="2026-08-19") == 500
+    assert record_round_result(kv, {"roundId": 7, "selfDelta": 500}, today="2026-08-19") is None
+
+    total = kv.get("zjh:stats")
+    assert total["games"] == 1 and total["profit"] == 500
+
+
 def test_record_round_result_skips_missing_delta() -> None:
     """异常路径：无 selfDelta 或结构异常时不入账、返回 None。"""
     kv = _FakeKV()
