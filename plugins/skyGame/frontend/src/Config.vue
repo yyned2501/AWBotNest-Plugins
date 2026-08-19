@@ -41,6 +41,9 @@ const DEFAULTS = {
   horse_auto_revive: false,
   horse_notify: true,
   horse_drop_guard: false,
+  // 幸运轮盘
+  lucky_enabled: true,
+  lucky_draw_time: '23:50',
   // 炸金花
   zjh_enabled: true,
   zjh_poll_interval: 2,
@@ -82,6 +85,7 @@ const GROUPS = [
   { key: 'horse', label: '养马', icon: '🐴' },
   { key: 'zjh', label: '炸金花', icon: '🃏' },
   { key: 'tenhalf', label: '十点半', icon: '🎲' },
+  { key: 'lucky', label: '幸运轮盘', icon: '🎰' },
 ]
 
 const group = ref('global')
@@ -555,6 +559,31 @@ async function renewNow() {
               张数是一等公民（4 张低点数追五小、高点数早停）｜ 画像不足→退停牌阈值。
               从不认输（fold 与停牌同样损失下注）
             </span>
+          </section>
+
+          <div class="savebar">
+            <button class="btn primary lg" :disabled="saving" @click="save">{{ saving ? '保存中…' : '保存配置' }}</button>
+          </div>
+        </template>
+
+        <!-- ============ 幸运轮盘 ============ -->
+        <template v-else-if="group === 'lucky'">
+          <h3 class="det-title">幸运轮盘</h3>
+
+          <section class="card">
+            <div class="card-h">免费抽奖</div>
+            <label class="row switch">
+              <input v-model="cfg.lucky_enabled" type="checkbox" />
+              <span>每天自动抽掉免费次数</span>
+            </label>
+            <span class="help" style="margin-top:-4px">免费次数由当日随机掉落累计兑换，当天不用隔天作废</span>
+            <div class="grid">
+              <div class="fld">
+                <span class="lbl">每日抽奖时刻</span>
+                <input v-model="cfg.lucky_draw_time" class="inp" type="text" placeholder="23:50" />
+                <span class="help">格式 HH:MM，到点后的第一次检查执行，当天只抽一次</span>
+              </div>
+            </div>
           </section>
 
           <div class="savebar">
