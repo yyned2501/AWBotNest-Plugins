@@ -559,6 +559,12 @@ async def _once(ctx: object, cfg: dict, client: HdskyClient) -> None:
         client.reset_csrf()
         return
     game = data.get("game") or {}
+    players = game.get("players") or []
+    self_p = next((p for p in players if isinstance(p, dict) and p.get("isSelf")), None)
+    if drop_guard.paused(ctx) and self_p is None:
+        # 配额满且未参与当前局：停心跳（不统计不推送）；已报名则照常打完本局
+        # （signup 分支另行拦截），恢复后 _catch_up_settlement 会补扫漏掉的结算
+        return
     await _handle_settlement(ctx, cfg, game)
     # lastResult 漏掉的结算用 history[] 回查（快速局 settled 窗口短于轮询间隔）
     await _catch_up_settlement(ctx, cfg, game)
@@ -567,9 +573,7 @@ async def _once(ctx: object, cfg: dict, client: HdskyClient) -> None:
 
     phase = game.get("phase")
     actions = game.get("actions") or []
-    players = game.get("players") or []
     limits = game.get("limits") or {}
-    self_p = next((p for p in players if isinstance(p, dict) and p.get("isSelf")), None)
     dealer_p = next((p for p in players if isinstance(p, dict) and p.get("dealer")), None)
     rid = game.get("roundId")
     # 观察庄家手牌张数（按 roundId 取最大值暂存，供结算时配对计入按张数分桶的画像）
@@ -579,9 +583,7 @@ async def _once(ctx: object, cfg: dict, client: HdskyClient) -> None:
     if phase == "signup":
         if self_p is not None or "join" not in actions:
             return
-        if drop_guard.paused(ctx):
-            ctx.log.debug("十点半 #%s 掉落配额已满，跳过报名", rid)
-            return
+        # 配额满时不新报名的拦截在 _once 顶部（paused 且未参与直接返回）
         if ctx.kv.get(_JOIN_FAIL_KEY, "") == str(rid):
             ctx.log.debug("十点半 #%s 本局报名失败过，不再重试", rid)
             return
@@ -655,10 +657,7 @@ def start(ctx: object) -> None:
         cfg = ctx.config
         if not cfg.get("tenhalf_enabled", False):
             return
-        if drop_guard.paused(ctx):
-            # 掉落配额已满：整个 tick 停心跳（不访问门户、不统计不推送），
-            # 恢复后首轮 _catch_up_settlement 从 history[] 补扫漏掉的结算
-            return
+        # 掉落配额满的暂停逻辑在 _once 内：未参与才停心跳，已报名的局照常打完
         try:
             async with HdskyClient(log=ctx.log) as client:
                 client.set_renewer(hdsky_auth.renewer_for(ctx))  # 401 时自动续期并重试
