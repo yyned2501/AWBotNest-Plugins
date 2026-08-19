@@ -572,13 +572,14 @@ async def _once(ctx: object, cfg: dict, client: HdskyClient) -> None:
     game = data.get("game") or {}
     players = game.get("players") or []
     self_p = next((p for p in players if isinstance(p, dict) and p.get("isSelf")), None)
-    if drop_guard.paused(ctx) and self_p is None:
-        # 配额满且未参与当前局：停心跳（不统计不推送）；已报名则照常打完本局
-        # （signup 分支另行拦截），恢复后 _catch_up_settlement 会补扫漏掉的结算
-        return
     await _handle_settlement(ctx, cfg, game)
     # lastResult 漏掉的结算用 history[] 回查（快速局 settled 窗口短于轮询间隔）
     await _catch_up_settlement(ctx, cfg, game)
+    if drop_guard.paused(ctx) and self_p is None:
+        # 配额满且未参与当前局：结算已消化完，停心跳（不再新报名）；已报名则
+        # 照常打完本局。注意此检查必须在结算消化之后——否则刚结束那局切到
+        # 新局后 self_p 为空，结算会被暂停检查吞掉永不入账（v1.23.3 修复）
+        return
     if not game.get("active"):
         return
 
