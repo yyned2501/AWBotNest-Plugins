@@ -20,9 +20,9 @@ from plugins.skyGame.games.tenhalf import (
     _decide_ev,
     _ev_play,
     _join_amount,
-    _observe_dealer_cards,
+    _observe_dealer,
     _once,
-    _pop_dealer_cards,
+    _pop_dealer_obs,
     _record_dealer,
     _stand_ev,
     _threshold_for,
@@ -251,7 +251,20 @@ def test_record_dealer_counts_over_target_as_bust() -> None:
     _record_dealer(ctx, {"dealerDisplayName": "涛", "dealerHandLabel": "爆牌"})
     _record_dealer(ctx, {"dealerDisplayName": "涛", "dealerHandLabel": "8.5点"})
     dealers = json.loads(str(ctx.kv.get("tenhalf:dealers")))
-    assert dealers["涛"] == {"rounds": 3, "busts": 2, "totals": [8.5]}
+    assert dealers["涛"] == {"name": "涛", "rounds": 3, "busts": 2, "totals": [8.5]}
+
+
+def test_record_dealer_keys_by_stable_id() -> None:
+    """传稳定 id 时画像以 id 为主键，改名后自动归并同一画像（v1.23.5）。"""
+    ctx = _FakeCtx()
+    _record_dealer(ctx, {"dealerDisplayName": "老名字", "dealerHandLabel": "8点"}, dealer_key="id:201")
+    _record_dealer(ctx, {"dealerDisplayName": "新名字", "dealerHandLabel": "8点"}, dealer_key="id:201")
+    dealers = json.loads(str(ctx.kv.get("tenhalf:dealers")))
+    assert set(dealers) == {"id:201"}  # 只有一个画像，没有按名字拆成两份
+    entry = dealers["id:201"]
+    assert entry["rounds"] == 2
+    assert entry["name"] == "新名字"  # 展示名刷成最新
+    assert len(entry["totals"]) == 2  # 改名后的局也计入同一画像
 
 
 # ── 庄家画像按手牌张数分桶 ──
@@ -260,10 +273,10 @@ def test_record_dealer_counts_over_target_as_bust() -> None:
 def test_record_dealer_buckets_by_card_count() -> None:
     """传 cards 时同步计入按张数分桶；爆牌计入桶的 busts、不入桶点数样本。"""
     ctx = _FakeCtx()
-    _record_dealer(ctx, {"dealerDisplayName": "涛", "dealerHandLabel": "8点"}, cards=3)
-    _record_dealer(ctx, {"dealerDisplayName": "涛", "dealerHandLabel": "11点"}, cards=3)  # 爆牌
-    _record_dealer(ctx, {"dealerDisplayName": "涛", "dealerHandLabel": "9点"}, cards=4)
-    entry = json.loads(str(ctx.kv.get("tenhalf:dealers")))["涛"]
+    _record_dealer(ctx, {"dealerDisplayName": "涛", "dealerHandLabel": "8点"}, cards=3, dealer_key="id:9")
+    _record_dealer(ctx, {"dealerDisplayName": "涛", "dealerHandLabel": "11点"}, cards=3, dealer_key="id:9")  # 爆牌
+    _record_dealer(ctx, {"dealerDisplayName": "涛", "dealerHandLabel": "9点"}, cards=4, dealer_key="id:9")
+    entry = json.loads(str(ctx.kv.get("tenhalf:dealers")))["id:9"]
     assert entry["rounds"] == 3 and entry["busts"] == 1
     assert entry["cards"]["3"] == {"rounds": 2, "busts": 1, "totals": [8.0]}
     assert entry["cards"]["4"] == {"rounds": 1, "totals": [9.0]}
@@ -280,16 +293,18 @@ def test_threshold_prefers_card_bucket_then_aggregate() -> None:
     assert _threshold_for({"tenhalf_stand_threshold": 8}, dealers, "涛") == 5.5
 
 
-def test_observe_and_pop_dealer_cards() -> None:
-    """按 roundId 取最大张数暂存（只增不减）；弹出后清空；无 cardCount 不记录。"""
+def test_observe_and_pop_dealer_obs() -> None:
+    """按 roundId 暂存观察：张数取最大（只增不减）、id 直接写入；弹出后清空。"""
     ctx = _FakeCtx()
-    _observe_dealer_cards(ctx, 777, {"cardCount": 2})
-    _observe_dealer_cards(ctx, 777, {"cardCount": 3})
-    _observe_dealer_cards(ctx, 777, {"cardCount": 1})  # 不回退
-    assert _pop_dealer_cards(ctx, 777) == 3
-    assert _pop_dealer_cards(ctx, 777) is None  # 已弹出
-    _observe_dealer_cards(ctx, 778, {})  # 无 cardCount 不记录
-    assert _pop_dealer_cards(ctx, 778) is None
+    _observe_dealer(ctx, 777, {"cardCount": 2, "accountId": 201})
+    _observe_dealer(ctx, 777, {"cardCount": 3, "accountId": 201})
+    _observe_dealer(ctx, 777, {"cardCount": 1, "accountId": 201})  # 不回退
+    assert _pop_dealer_obs(ctx, 777) == (3, "id:201")
+    assert _pop_dealer_obs(ctx, 777) == (None, None)  # 已弹出
+    _observe_dealer(ctx, 778, {})  # 无 cardCount 无 id 不记录
+    assert _pop_dealer_obs(ctx, 778) == (None, None)
+    _observe_dealer(ctx, 779, {"accountId": 202})  # 仅 id（无张数）也记录
+    assert _pop_dealer_obs(ctx, 779) == (None, "id:202")
 
 
 # ── EV 决策（v1.21.0）：停牌 EV 对要牌 EV 递推，庄家画像分布驱动 ──
@@ -576,7 +591,7 @@ async def test_settlement_notifies_once_and_records_stats() -> None:
     assert stats["total"] == {"rounds": 1, "net": 198, "wins": 1, "losses": 0}
     # 庄家画像入账：8.5 点一局
     dealers = json.loads(str(ctx.kv.get("tenhalf:dealers")))
-    assert dealers["麦克格雷涛"] == {"rounds": 1, "totals": [8.5]}
+    assert dealers["麦克格雷涛"] == {"name": "麦克格雷涛", "rounds": 1, "totals": [8.5]}
 
 
 @pytest.mark.asyncio
@@ -606,7 +621,7 @@ async def test_settlement_without_self_only_records_dealer() -> None:
 
     assert ctx.tables == [] and ctx.kv.get("tenhalf:stats") is None
     dealers = json.loads(str(ctx.kv.get("tenhalf:dealers")))
-    assert dealers["麦克格雷涛"] == {"rounds": 1, "busts": 1}
+    assert dealers["麦克格雷涛"] == {"name": "麦克格雷涛", "rounds": 1, "busts": 1}
 
 
 @pytest.mark.asyncio
