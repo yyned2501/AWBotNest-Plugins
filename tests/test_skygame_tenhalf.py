@@ -353,6 +353,11 @@ def test_decide_ev_prefers_higher_ev_action() -> None:
     assert action == "stand"  # 9.5 点几乎稳赢，要牌只会招爆
     action, _, _, _ = _decide_ev(4, 4, ["hit", "stand"], False, None, dist)
     assert action == "hit"  # 4 张低点数追五小 ×5（EV +3.15）
+    action, _, ev_hit, ev_stand = _decide_ev(8.5, 4, ["hit", "stand"], False, None, dist)
+    # 4 张 8.5 差一张成五小：1/2/JQK 共 20 张可成（≈5/13），要牌 EV 为正
+    assert action == "hit" and isinstance(ev_hit, float) and isinstance(ev_stand, float)
+    action, _, _, _ = _decide_ev(10.5, 4, ["hit", "stand"], False, None, dist)
+    assert action == "stand"  # 4 张 10.5 已至目标，再拿必爆
     action, _, _, _ = _decide_ev(4, 2, ["hit", "stand"], False, 9.0, dist)
     assert action == "hit"  # 庄家 9 点可见：点质量分布，反败优于停牌
     assert _decide_ev(5, 0, [], False, None, dist)[0] is None
@@ -634,27 +639,33 @@ async def test_player_draw_records_decision_trace() -> None:
     assert action == "stand" and total == 9.5 and hand == "6♣ 3♣"
     assert isinstance(ev_hit, float) and isinstance(ev_stand, float)
     text = _decide_text(total, hand.split(), action, ev_hit, ev_stand)
-    assert text.startswith("停牌 9.5（6♣ 3♣）") and "拿牌ev" in text and "停牌ev" in text
+    assert text.startswith("停牌 9.5(6♣ 3♣)") and "拿牌ev(" in text and "停牌ev(" in text
 
 
 @pytest.mark.asyncio
 async def test_settlement_push_includes_decision_trace() -> None:
-    """结算推送表格带本局决策轨迹行（动作在首、EV 对比收尾）。"""
+    """结算推送表格带本局决策轨迹，每条决策单独一行（动作在首、EV 对比收尾）。"""
     ctx = _FakeCtx()
-    # 局 501：先走一手要牌（阈值路径无数值），再停牌（EV 路径）
+    # 局 501：先走一手要牌（EV 路径），再走一手停牌（EV 路径），共两条轨迹
     ctx.kv.set("tenhalf:dealers", json.dumps({"麦克格雷涛": _EV_DEALER}))
     state = _draw_state_top_dealer(6, {"displayName": "麦克格雷涛", "cardCount": 2, "bust": False, "total": None})
-    state["game"]["self"] = {"cards": ["6♣"], "total": 6, "status": ""}
+    state["game"]["self"] = {"cards": ["3♣"], "total": 3, "status": ""}
+    await _once(ctx, {"tenhalf_stand_threshold": 20}, _FakeClient(state, _OK))
+    state["game"]["self"] = {"cards": ["6♣", "3♣"], "total": 9.5, "status": ""}
     await _once(ctx, {"tenhalf_stand_threshold": 20}, _FakeClient(state, _OK))
     settled = _game(active=False, last_result=_last_result(rid=501, delta=99))
     await _once(ctx, {}, _FakeClient(settled, _OK))
 
     assert len(ctx.tables) == 1
     headers, rows, _ = ctx.tables[0]
-    labels = [row[0] for row in rows]
+    labels = [str(row[0]) for row in rows]
     assert "📜 决策轨迹" in labels
-    trace_row = rows[labels.index("📜 决策轨迹")][1]
-    assert "拿牌" in str(trace_row) and "拿牌ev" in str(trace_row) and "停牌ev" in str(trace_row)
+    trace_rows = [row for row in rows if str(row[0]).startswith("📜 决策轨迹") or row[0] == ""]
+    # 首行带标题、后续行空 label，且不含 \n 拼接（每条单独成行）
+    assert len(trace_rows) >= 2
+    assert str(trace_rows[0][1]).startswith("要") and "拿牌ev(" in str(trace_rows[0][1])
+    assert str(trace_rows[1][1]).startswith("停牌") and "停牌ev(" in str(trace_rows[1][1])
+    assert "\n" not in str(trace_rows[0][1])
     assert _pop_decision_log(ctx, 501) == []  # 推送后轨迹已取走
 
 

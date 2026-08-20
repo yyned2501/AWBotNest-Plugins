@@ -102,6 +102,23 @@ def test_paused_semantics() -> None:
     assert dg.paused(ctx) is False  # 还有剩余 → 照常参与
 
 
+def test_paused_clears_at_hour_boundary() -> None:
+    """v1.23.7：时段按整点轮换，跨整点后配额必然刷新——不等 /info 回执直接恢复。"""
+    ctx = _GuardCtx()
+    now_ts = time.time()
+    # 找「最近的跨整点时刻」：从当前逐秒回退，必然在 1 小时内跨小时（且 < 过期阈值）
+    prev = now_ts
+    while dg._same_hour(prev, now_ts):
+        prev -= 1.0
+    _set_full(ctx, remaining=0)
+    ctx.kv.set(dg._KV_CHECKED_TS, prev)
+    assert now_ts - prev < dg._STALE_AFTER  # 未过期，确保走「跨整点」而非「过期」分支
+    assert dg.paused(ctx) is False  # 上次 /info 是上一时段的事 → 已恢复
+    # 同时段（未跨整点）仍保持暂停
+    _set_full(ctx, remaining=0)
+    assert dg.paused(ctx) is True
+
+
 def test_parse_remaining_new_and_legacy_format() -> None:
     # 新格式（2026-08-19 实测）：配额拆成聊天/游戏两类，守卫只认「游戏」
     assert dg.parse_remaining("当前时段剩余掉落: 聊天 3 · 游戏 0") == 0

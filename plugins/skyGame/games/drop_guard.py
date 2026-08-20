@@ -7,6 +7,10 @@
 # 时段切换后剩余回升 → 自动恢复。实现参照 skyDropAnswer 的 /info 校准模式，
 # 各插件自行读取，互不依赖（插件间禁止互相 import）。
 #
+# 时段的切换点是整点（实测按小时轮换）：跨整点即视为新时段、配额必然刷新，
+# paused() 直接解除暂停——不用等 interval 周期的 /info 回执才恢复（v1.23.7）；
+# /info 回执仅用于刷新剩余数与状态翻转通知。
+#
 # kv 键：
 #   dropguard:remaining   最近一次 /info 解析出的本时段剩余掉落
 #   dropguard:checked_ts  最近一次成功解析 /info 回复的时间
@@ -48,10 +52,17 @@ def _parse_bot_ids(raw: str) -> list[int | str]:
     return out or [_DEFAULT_BOT]
 
 
+def _same_hour(ts1: float, ts2: float) -> bool:
+    """两个时间戳是否落在同一个整点时段（时段按小时轮换）。"""
+    a, b = time.localtime(ts1), time.localtime(ts2)
+    return a.tm_year == b.tm_year and a.tm_yday == b.tm_yday and a.tm_hour == b.tm_hour
+
+
 def paused(ctx: object) -> bool:
     """掉落配额已满且 /info 结果新鲜 → True，各游戏用它拦截新加入。
 
     未查过/数据非法/结果过期一律 False（照常参与，宁可多打不误停）。
+    跨整点（时段刷新）也返回 False：新时段配额必然恢复，不等 /info 回执（v1.23.7）。
     """
     try:
         remaining = int(ctx.kv.get(_KV_REMAINING))
@@ -60,6 +71,9 @@ def paused(ctx: object) -> bool:
     if remaining > 0:
         return False
     ts = float(ctx.kv.get(_KV_CHECKED_TS, 0) or 0)
+    if ts > 0 and not _same_hour(ts, time.time()):
+        # 上次 /info 是上一个整点时段的事：时段已切换、配额已刷新，自动恢复参与
+        return False
     return time.time() - ts < _STALE_AFTER
 
 
