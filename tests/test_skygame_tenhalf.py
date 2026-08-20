@@ -24,6 +24,7 @@ from plugins.skyGame.games.tenhalf import (
     _join_amount,
     _observe_dealer,
     _once,
+    _points_dist_text,
     _pop_dealer_obs,
     _pop_decision_log,
     _record_dealer,
@@ -298,7 +299,7 @@ def test_threshold_prefers_card_bucket_then_aggregate() -> None:
 
 
 def test_dealer_profile_text_shows_card_bucket_first() -> None:
-    """结算推送庄家行（v1.23.8）：本局张数分桶完整画像前置（决策依据），聚合殿后。"""
+    """结算推送庄家行（v1.23.9）：本局张数分桶逐点数分布前置（EV 决策输入），聚合殿后。"""
     dealers = {
         "涛": {
             "rounds": 30,
@@ -308,12 +309,19 @@ def test_dealer_profile_text_shows_card_bucket_first() -> None:
         }
     }
     text = _dealer_profile_text(dealers, "涛", cards=4)
-    assert text == "4张 3局·均 9.0 点·爆率 33%｜30局·均 8.9 点·爆率 33%"
+    assert text == "4张 3局：9点×2/爆×1｜30局·均 8.9 点·爆率 33%"
     # 桶无样本 → 退回纯聚合画像
     plain = {"涛": {"rounds": 30, "busts": 10, "totals": [8.9] * 28}}
     assert _dealer_profile_text(plain, "涛", cards=4) == "30局·均 8.9 点·爆率 33%"
     assert _dealer_profile_text(plain, "涛") == "30局·均 8.9 点·爆率 33%"
     assert _dealer_profile_text({}, "涛") == ""
+
+
+def test_points_dist_text_sorted_and_compacted() -> None:
+    """逐点数分布：从低到高、同点数合并、×1 省略、爆牌殿后、全爆只显爆。"""
+    assert _points_dist_text(1, [7.5, 7.0, 9.0, 7.5]) == "7点/7.5点×2/9点/爆×1"
+    assert _points_dist_text(1, []) == "爆×1"
+    assert _points_dist_text(0, [8.0]) == "8点"
 
 
 def test_observe_and_pop_dealer_obs() -> None:

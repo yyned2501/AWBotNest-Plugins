@@ -507,8 +507,19 @@ def _profile_core(rounds: int, busts: int, totals: list[float]) -> str:
     return "·".join(parts)
 
 
+def _points_dist_text(busts: int, totals: list[float]) -> str:
+    """逐点数出现次数分布：7点×2/7.5点×1/8点×2…/爆×3（从低到高，×1 省略）。"""
+    counts: dict[float, int] = {}
+    for t in totals:
+        counts[t] = counts.get(t, 0) + 1
+    items = [f"{p:g}点×{c}" if c > 1 else f"{p:g}点" for p, c in sorted(counts.items())]
+    if busts:
+        items.append(f"爆×{busts}")
+    return "/".join(items)
+
+
 def _dealer_profile_text(dealers: dict, name: str, cards: int | None = None, dealer_key: str = "") -> str:
-    """结算推送的庄家画像：本局手牌张数分桶画像前置（决策依据），聚合画像殿后。"""
+    """结算推送的庄家画像：本局张数分桶完整分布（逐点数次数+爆数）前置，聚合画像殿后。"""
     entry = _dealer_lookup(dealers, name, dealer_key)
     rounds, busts, totals = _dealer_effective(entry)
     if not rounds:
@@ -518,8 +529,8 @@ def _dealer_profile_text(dealers: dict, name: str, cards: int | None = None, dea
         bucket = (entry.get("cards") or {}).get(str(cards)) or {}
         br, bb, bt = _dealer_effective(bucket)
         if br:
-            # 本局张数分桶完整画像（局数/均点/爆率）置前，聚合画像殿后作参考（v1.23.8）
-            text = f"{cards}张 {_profile_core(br, bb, bt)}｜{text}"
+            # 本局张数分桶逐点数分布（EV 决策的真正输入）置前，聚合画像殿后（v1.23.9）
+            text = f"{cards}张 {br}局：{_points_dist_text(bb, bt)}｜{text}"
     return text
 
 
