@@ -41,7 +41,7 @@
   },
   "skyGame": {
     "name": "天空游戏",
-    "version": "1.23.5",
+    "version": "1.23.6",
     "author": "Yy",
     "description": "天空系列游戏统一入口：炸金花自动参与（Terminal EV 多人决策树 + 对手画像）、养马自动养护、十点半自动参与、门户 Cookie 自动续期、掉落配额守卫、幸运轮盘免费抽奖，Vue 左侧按游戏分组配置。",
     "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/skyGame.svg",
