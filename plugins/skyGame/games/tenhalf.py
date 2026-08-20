@@ -19,14 +19,15 @@
 #   推送策略：每局只在报名成功与结算时各推一次，要牌/停牌过程不推送（只记日志）
 #   player_draw 且轮到我方（已报名、未出局）：
 #     庄家爆牌 → 停牌（未爆即赢）
-#     庄家点数可见 → 点质量分布进 EV；庄家 5 张未爆（五小）→ 停牌认亏
+#     庄家点数可见 → 点质量分布进 EV；庄家 5 张（疑似五小）→ 画像 EV 递推 + 认输选项三方择优
 #     庄家画像样本足够 → EV 决策：停牌 EV（画像点数分布 + 爆率）对比要牌 EV
 #     （52 张先验递推，含五小 ×5 收益与爆牌损失），择优（v1.21.0）——
 #     全程 EV 决策，不再用点数阈值停牌（v1.23.7）；4 张时差一张成五小，
 #     EV 递推自然包含（如 8.5 点 4 张：1/2/JQK 共 20 张可成五小 ×5）
 #     画像不足 → 退 v1.20.0 阈值逻辑（画像推导阈值受爆牌红线 6.5 夹取）
-#   fold（认输）仅用于庄家五小已定且我方 0 张时止损：只输本金 ×1，避免坐等 ×5（v1.23.6）
-#   每次提交的动作记入本局决策轨迹（点数/手牌/拿牌EV/停牌EV），结算推送时
+#   fold（认输）是庄家疑似五小时（5 张未爆，dealer_bust 已先行拦截）的第三选项：
+#   EV 恒 -1（只亏本金 ×1），与要牌/停牌 EV 对比择优；他实际已爆则停牌即赢（v1.23.11）
+#   每次提交的动作记入本局决策轨迹（点数/手牌/拿牌EV/停牌EV/认输EV），结算推送时
 #   每条决策单独一行展示（半角括号，动作在首；v1.23.7）
 #
 # 庄家画像：按庄家名统计结算点数/爆牌率（kv 持久化），并按庄家终局手牌张数分桶
@@ -69,7 +70,7 @@ _HISTORY_SCAN_CAP = 10
 # 结算时配对计入「按张数分桶」的画像（只增不减，最大值即终局张数）。
 _DEALER_CARDS_KEY = "tenhalf:dealer_cards"
 _CARDS_STASH_CAP = 30
-# 本局决策轨迹暂存：每次要牌/停牌/认输提交成功后记一条（点数/手牌/动作/拿牌EV/停牌EV），
+# 本局决策轨迹暂存：每次要牌/停牌/认输提交成功后记一条（点数/手牌/动作/拿牌EV/停牌EV/认输EV），
 # 结算推送时拼进表格（过程不推送，每局只在结算时推一次）。
 _DECISION_LOG_KEY = "tenhalf:decision_log"
 _DECISION_LOG_CAP = 30
@@ -108,8 +109,18 @@ def _hand_text(cards: object) -> str:
     return " ".join(parts)
 
 
-def _decide_text(total: float, cards: object, action: str | None, ev_hit: float | None, ev_stand: float | None) -> str:
-    """一条决策轨迹文本：动作为首、点数与手牌居中、EV 对比收尾（半角括号）。"""
+def _decide_text(
+    total: float,
+    cards: object,
+    action: str | None,
+    ev_hit: float | None,
+    ev_stand: float | None,
+    ev_fold: float | None = None,
+) -> str:
+    """一条决策轨迹文本：动作为首、点数与手牌居中、EV 对比收尾（半角括号）。
+
+    庄家疑似五小（v1.23.11）追加认输 EV 第三值，如「认输 0：拿牌ev(35)>停牌ev(-500) 认输ev(-100)」。
+    """
     label = _ACTION_LABELS.get(action or "", str(action or ""))
     head = f"{label} {total:g}"
     hand = _hand_text(cards)
@@ -118,18 +129,28 @@ def _decide_text(total: float, cards: object, action: str | None, ev_hit: float 
     if ev_hit is None or ev_stand is None:
         return head
     cmp = ">" if ev_hit > ev_stand else ("<" if ev_hit < ev_stand else "=")
-    return f"{head}：拿牌ev({ev_hit * 100:.0f}){cmp}停牌ev({ev_stand * 100:.0f})"
+    text = f"{head}：拿牌ev({ev_hit * 100:.0f}){cmp}停牌ev({ev_stand * 100:.0f})"
+    if ev_fold is not None:
+        text += f" 认输ev({ev_fold * 100:.0f})"
+    return text
 
 
 def _record_decision(
-    ctx: object, rid: object, total: float, cards: object, action: str, ev_hit: float | None, ev_stand: float | None
+    ctx: object,
+    rid: object,
+    total: float,
+    cards: object,
+    action: str,
+    ev_hit: float | None,
+    ev_stand: float | None,
+    ev_fold: float | None = None,
 ) -> None:
     """暂存一手决策轨迹；同局同点数同动作的重复提交由 _LAST_ACTION_KEY 去重挡住。"""
     if rid in (None, ""):
         return
     log = _load_json(ctx.kv, _DECISION_LOG_KEY)
     steps = list(log.get(str(rid)) or [])
-    steps.append([total, _hand_text(cards), action, ev_hit, ev_stand])
+    steps.append([total, _hand_text(cards), action, ev_hit, ev_stand, ev_fold])
     log[str(rid)] = steps
     if len(log) > _DECISION_LOG_CAP:  # 防未结算局堆积，按插入顺序裁掉最旧
         for k in list(log)[: len(log) - _DECISION_LOG_CAP]:
@@ -217,12 +238,15 @@ def _stand_ev(total: float, p_bust: float, samples: list[float]) -> float:
     return 2.0 * p_win - 1.0
 
 
-def _ev_play(total: float, cards: int, p_bust: float, samples: list[float], memo: dict) -> float:
+def _ev_play(
+    total: float, cards: int, p_bust: float, samples: list[float], memo: dict, five_small: bool = False
+) -> float:
     """状态 (total, cards) 起最优打法的 EV（单位下注），memo 记忆化。
 
     状态空间小（点数为 0.5 的整数倍、张数 ≤5），递推即精确解，
     等价于无限次蒙特卡洛且零随机、可测试；要牌按 52 张先验逐张期望：
     爆牌 -1，拿到第 5 张未爆 → 五小 +5，否则递推下一状态。
+    five_small（庄家疑似五小，v1.23.11）：中间状态停牌与爆牌都按 ×5 判负计。
     """
     key = (round(total * 2), cards)
     if key in memo:
@@ -230,16 +254,16 @@ def _ev_play(total: float, cards: int, p_bust: float, samples: list[float], memo
     if cards >= 5:
         memo[key] = _FIVE_SMALL_MULT  # 五小直接赢 ×5
         return _FIVE_SMALL_MULT
-    ev_stand = _stand_ev(total, p_bust, samples)
+    ev_stand = -_FIVE_SMALL_MULT if five_small else _stand_ev(total, p_bust, samples)
     ev_hit = 0.0
     for v in _DECK:
         t2 = total + v
         if t2 > _TARGET:
-            ev_hit -= 1.0
+            ev_hit -= _FIVE_SMALL_MULT if five_small else 1.0
         elif cards + 1 >= 5:
             ev_hit += _FIVE_SMALL_MULT
         else:
-            ev_hit += _ev_play(t2, cards + 1, p_bust, samples, memo)
+            ev_hit += _ev_play(t2, cards + 1, p_bust, samples, memo, five_small=five_small)
     ev_hit /= len(_DECK)
     best = max(ev_stand, ev_hit)
     memo[key] = best
@@ -311,51 +335,82 @@ def _decide_ev(
     dealer_bust: bool,
     dealer_total: float | None,
     dist: tuple[float, list[float]],
-) -> tuple[str | None, str, float | None, float | None]:
-    """EV 决策（v1.21.0）：停牌 EV 对要牌 EV 递推择优，返回 (action, reason, ev_hit, ev_stand)。
+    dealer_five_small: bool = False,
+) -> tuple[str | None, str, float | None, float | None, float | None]:
+    """EV 决策（v1.21.0）：停牌 EV 对要牌 EV 递推择优，返回 (action, reason, ev_hit, ev_stand, ev_fold)。
 
-    ev_* 为两种选择的单位下注期望（供结算推送决策轨迹展示）；
-    非 EV 路径（庄家已爆/五小已定/门户未开放）无 EV 数值，返回 None。
+    ev_* 为各选择的单位下注期望（供结算推送决策轨迹展示）；
+    非 EV 路径（庄家已爆/我方已五小/门户未开放）无 EV 数值，返回 None。
     dist 是庄家终局分布；庄家点数可见时退化为点质量分布（结果确定）。
+    dealer_five_small（庄家 5 张未爆，疑似五小，v1.23.11）：停牌/爆牌按 ×5 判负计、
+    要牌递推追五小，并多一个认输选项（只亏本金 ×1，EV 恒 -1）三方对比择优——
+    庄家实际已爆由 dealer_bust 先行拦截，不会误认输。
     """
     can_hit = "hit" in actions
     can_stand = "stand" in actions
-    if not can_hit and not can_stand:
-        return None, "门户未开放 hit/stand", None, None
+    if not can_hit and not can_stand and "fold" not in actions:
+        return None, "门户未开放任何动作", None, None, None
     if dealer_bust:
         if can_stand:
-            return "stand", "庄家已爆牌，停牌即赢", None, None
-        return None, "庄家已爆牌但未开放停牌", None, None
+            return "stand", "庄家已爆牌，停牌即赢", None, None, None
+        return None, "庄家已爆牌但未开放停牌", None, None, None
     if cards >= 5:
         if can_stand:
-            return "stand", "已五小（5张未爆），直接赢 ×5，停牌", None, None
-        return None, "已五小但未开放停牌", None, None
+            return "stand", "已五小（5张未爆），直接赢 ×5，停牌", None, None, None
+        return None, "已五小但未开放停牌", None, None, None
     if dealer_total is not None:
         p_bust, samples = 0.0, [dealer_total]
     else:
         p_bust, samples = dist
     memo: dict = {}
-    ev_stand = _stand_ev(total, p_bust, samples)
+    ev_stand = -_FIVE_SMALL_MULT if dealer_five_small else _stand_ev(total, p_bust, samples)
+    ev_fold = -1.0 if dealer_five_small and "fold" in actions else None
     ev_hit = 0.0
     for v in _DECK:
         t2 = total + v
         if t2 > _TARGET:
-            ev_hit -= 1.0
+            ev_hit -= _FIVE_SMALL_MULT if dealer_five_small else 1.0
         elif cards + 1 >= 5:
             ev_hit += _FIVE_SMALL_MULT
         else:
-            ev_hit += _ev_play(t2, cards + 1, p_bust, samples, memo)
+            ev_hit += _ev_play(t2, cards + 1, p_bust, samples, memo, five_small=dealer_five_small)
     ev_hit /= len(_DECK)
-    if ev_hit > ev_stand and can_hit:
+    # 可用动作按 EV 择优（同分优先级 hit > stand > fold，认输是最后手段）；
+    # 庄家已爆时 dealer_bust 已先行返回，认输选项只会对比真五小以外的正常局面
+    prio = {"hit": 3, "stand": 2, "fold": 1}
+    options: list[tuple[float, str]] = [(ev_hit, "hit")] if can_hit else []
+    if can_stand:
+        options.append((ev_stand, "stand"))
+    if ev_fold is not None:
+        options.append((ev_fold, "fold"))
+    if not options:
+        return None, "EV 无可用动作（要牌/停牌/认输均未开放）", ev_hit, ev_stand, ev_fold
+    best_ev, action = max(options, key=lambda o: (o[0], prio[o[1]]))
+    fold_desc = f" 认输 {ev_fold:+.2f}" if ev_fold is not None else ""
+    if action == "fold":
         return (
-            "hit",
-            f"EV 要牌 {ev_hit:+.2f} > 停牌 {ev_stand:+.2f}（{cards}张·爆率 {_bust_prob(total):.0%}）",
+            "fold",
+            f"EV 认输 {ev_fold:+.2f} 最优：要牌 {ev_hit:+.2f}/停牌 {ev_stand:+.2f}（庄家疑似五小，认输只亏本金×1）",
             ev_hit,
             ev_stand,
+            ev_fold,
         )
-    if can_stand:
-        return "stand", f"EV 停牌 {ev_stand:+.2f} ≥ 要牌 {ev_hit:+.2f}（{cards}张）", ev_hit, ev_stand
-    return None, "EV 偏向停牌但未开放停牌", ev_hit, ev_stand
+    if action == "hit":
+        tail = "·庄家疑似五小，追五小）" if dealer_five_small else "）"
+        return (
+            "hit",
+            f"EV 要牌 {ev_hit:+.2f} > 停牌 {ev_stand:+.2f}{fold_desc}（{cards}张·爆率 {_bust_prob(total):.0%}{tail}",
+            ev_hit,
+            ev_stand,
+            ev_fold,
+        )
+    return (
+        "stand",
+        f"EV 停牌 {ev_stand:+.2f} ≥ 要牌 {ev_hit:+.2f}{fold_desc}（{cards}张）",
+        ev_hit,
+        ev_stand,
+        ev_fold,
+    )
 
 
 def _load_json(kv: object, key: str) -> dict:
@@ -747,6 +802,7 @@ async def _submit_action(
     total: float,
     ev_hit: float | None = None,
     ev_stand: float | None = None,
+    ev_fold: float | None = None,
 ) -> None:
     """提交要牌/停牌/认输。同局同点数同动作去重；过程不推送，每局只在结算时推一次。"""
     rid = game.get("roundId")
@@ -763,7 +819,7 @@ async def _submit_action(
     ctx.kv.set(_LAST_ACTION_KEY, sig)
     label = _ACTION_LABELS.get(action, action)
     ctx.log.info("十点半 #%s %s（点数 %g，%s）", rid, label, total, reason)
-    _record_decision(ctx, rid, total, (game.get("self") or {}).get("cards"), action, ev_hit, ev_stand)
+    _record_decision(ctx, rid, total, (game.get("self") or {}).get("cards"), action, ev_hit, ev_stand, ev_fold)
 
 
 async def _once(ctx: object, cfg: dict, client: HdskyClient) -> None:
@@ -841,31 +897,26 @@ async def _once(ctx: object, cfg: dict, client: HdskyClient) -> None:
     else:
         m = _POINT_RE.search(str((dealer_p or {}).get("status") or ""))
         dealer_total = float(m.group(1)) if m else None
-    # 庄家 5 张未爆 = 五小已定（全桌 ×5 判负），怎么打都输；我方若还没拿牌
-    # （0 张）可认输止损——只输本金（×1），不用坐等 ×5 翻倍（v1.23.6）
-    if dealer_cards_now == 5 and not dealer_bust:
-        if self_cards == 0 and "fold" in actions:
-            await _submit_action(
-                ctx, client, game, "fold", "庄家五小已定（5张未爆）且我方未拿牌，认输只输本金×1", total
-            )
-            return
-        if "stand" in actions:
-            await _submit_action(ctx, client, game, "stand", "庄家五小已定（5张未爆），停牌认亏 ×5", total)
-        return
+    # 庄家 5 张（疑似五小，v1.23.11）：不再预设认输/停牌——他可能已爆（bust 先拦截，
+    # 停牌即赢）；真五小定局则照常画像 EV 递推，并把认输选项（只亏本金 ×1，EV -1）
+    # 纳入对比，由 EV 择优；我方接近五小时递推自含追五小收益（成五小 ×5）
+    five_small = dealer_cards_now == 5 and not dealer_bust
     dist = _dealer_dist(dealers, dealer_name, dealer_cards_now, dealer_key=dealer_key)
-    if dist is not None or dealer_bust or dealer_total is not None:
-        # 庄家信息足够（画像分布/已爆/点数可见）→ EV 递推决策（v1.21.0）
-        action, reason, ev_hit, ev_stand = _decide_ev(
-            total, self_cards, actions, dealer_bust, dealer_total, dist or (0.0, [])
+    if dist is not None or dealer_bust or dealer_total is not None or five_small:
+        # 庄家信息足够（画像/已爆/点数可见/疑似五小）→ EV 递推决策（v1.21.0）。
+        # 五小定局本身已给出停牌 ×5/认输 ×1 的确定性结果，画像与点数不可见也走 EV，不回退阈值
+        action, reason, ev_hit, ev_stand, ev_fold = _decide_ev(
+            total, self_cards, actions, dealer_bust, dealer_total, dist or (0.0, []), dealer_five_small=five_small
         )
     else:
+        # 画像与点数都不可见才退阈值（此路径无认输选项）
         threshold = _threshold_for(cfg, dealers, dealer_name, dealer_cards=dealer_cards_now, dealer_key=dealer_key)
         action, reason = _decide(total, actions, dealer_bust, dealer_total, threshold)
-        ev_hit = ev_stand = None
+        ev_hit = ev_stand = ev_fold = None
     if action is None:
         ctx.log.debug("十点半 #%s 本轮不动作: %s", rid, reason)
         return
-    await _submit_action(ctx, client, game, action, reason, total, ev_hit=ev_hit, ev_stand=ev_stand)
+    await _submit_action(ctx, client, game, action, reason, total, ev_hit=ev_hit, ev_stand=ev_stand, ev_fold=ev_fold)
 
 
 def start(ctx: object) -> None:

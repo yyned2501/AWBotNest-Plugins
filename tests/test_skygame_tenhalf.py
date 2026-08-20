@@ -370,25 +370,64 @@ def test_dealer_dist_prefers_card_bucket_then_aggregate() -> None:
 
 def test_decide_ev_prefers_higher_ev_action() -> None:
     dist = (0.3, [8.0] * 7)
-    action, reason, _, _ = _decide_ev(5, 0, ["hit", "stand"], True, None, dist)
+    action, reason, _, _, _ = _decide_ev(5, 0, ["hit", "stand"], True, None, dist)
     assert action == "stand" and "爆牌" in reason  # 庄家已爆优先
-    action, _, _, _ = _decide_ev(5, 5, ["hit", "stand"], False, None, dist)
+    action, _, _, _, _ = _decide_ev(5, 5, ["hit", "stand"], False, None, dist)
     assert action == "stand"  # 已五小直接赢 ×5
-    action, _, ev_hit, ev_stand = _decide_ev(5, 0, ["hit", "stand"], False, None, dist)
+    action, _, ev_hit, ev_stand, _ = _decide_ev(5, 0, ["hit", "stand"], False, None, dist)
     assert action == "hit"  # 要牌 EV -0.37 > 停牌 -0.40
     assert ev_hit > ev_stand  # EV 数值随决策返回（供轨迹展示）
-    action, _, _, _ = _decide_ev(9.5, 2, ["hit", "stand"], False, None, dist)
+    action, _, _, _, _ = _decide_ev(9.5, 2, ["hit", "stand"], False, None, dist)
     assert action == "stand"  # 9.5 点几乎稳赢，要牌只会招爆
-    action, _, _, _ = _decide_ev(4, 4, ["hit", "stand"], False, None, dist)
+    action, _, _, _, _ = _decide_ev(4, 4, ["hit", "stand"], False, None, dist)
     assert action == "hit"  # 4 张低点数追五小 ×5（EV +3.15）
-    action, _, ev_hit, ev_stand = _decide_ev(8.5, 4, ["hit", "stand"], False, None, dist)
+    action, _, ev_hit, ev_stand, _ = _decide_ev(8.5, 4, ["hit", "stand"], False, None, dist)
     # 4 张 8.5 差一张成五小：1/2/JQK 共 20 张可成（≈5/13），要牌 EV 为正
     assert action == "hit" and isinstance(ev_hit, float) and isinstance(ev_stand, float)
-    action, _, _, _ = _decide_ev(10.5, 4, ["hit", "stand"], False, None, dist)
+    action, _, _, _, _ = _decide_ev(10.5, 4, ["hit", "stand"], False, None, dist)
     assert action == "stand"  # 4 张 10.5 已至目标，再拿必爆
-    action, _, _, _ = _decide_ev(4, 2, ["hit", "stand"], False, 9.0, dist)
+    action, _, _, _, _ = _decide_ev(4, 2, ["hit", "stand"], False, 9.0, dist)
     assert action == "hit"  # 庄家 9 点可见：点质量分布，反败优于停牌
     assert _decide_ev(5, 0, [], False, None, dist)[0] is None
+
+
+def test_decide_ev_five_small_three_way_choice() -> None:
+    """庄家疑似五小（v1.23.11）：停牌/爆牌按 ×5 判负，认输 EV(-1) 第三选项三方择优。"""
+    # 0 张：要牌 -4.35 < 认输 -1 < 停牌 -5 → 认输止损（只亏本金 ×1）
+    action, reason, ev_hit, ev_stand, ev_fold = _decide_ev(
+        0, 0, ["hit", "stand", "fold"], False, None, (0.0, []), dealer_five_small=True
+    )
+    assert action == "fold" and ev_fold == -1.0 and ev_stand == -5.0
+    assert ev_hit == pytest.approx(-4.3492, abs=1e-4) and ev_fold > ev_hit > ev_stand
+    assert "认输" in reason
+    # 4 张 4.5 点：成五小牌 36/52 ≈ 69%，追五小 EV +1.92 最优（停牌 -5/认输 -1 殿后）
+    action, _, ev_hit, ev_stand, ev_fold = _decide_ev(
+        4.5, 4, ["hit", "stand", "fold"], False, None, (0.0, []), dealer_five_small=True
+    )
+    assert action == "hit" and ev_hit == pytest.approx(1.9231, abs=1e-4) and ev_fold == -1.0
+    # 9.5 点 2 张：要牌必爆 -5、停牌 -5，认输 -1 保本
+    action, _, _, _, ev_fold = _decide_ev(
+        9.5, 2, ["hit", "stand", "fold"], False, None, (0.0, []), dealer_five_small=True
+    )
+    assert action == "fold" and ev_fold == -1.0
+    # 门户未开放认输：无第三选项，要牌/停牌照常择优（9 点 3 张：要牌 -4.11 > 停牌 -5）
+    action, _, ev_hit, ev_stand, ev_fold = _decide_ev(
+        9, 3, ["hit", "stand"], False, None, (0.0, []), dealer_five_small=True
+    )
+    assert action == "hit" and ev_fold is None and ev_hit > ev_stand
+    # 庄家实际已爆（5 张 bust 先行拦截）：停牌即赢，认输选项不生效
+    action, _, _, _, ev_fold = _decide_ev(5, 0, ["hit", "stand", "fold"], True, None, (0.0, []), dealer_five_small=True)
+    assert action == "stand" and ev_fold is None
+
+
+def test_decide_text_appends_fold_ev() -> None:
+    """决策轨迹追加认输 EV 第三值（半角括号、动态符号、×100 取整）。"""
+    assert _decide_text(0, [], "fold", -4.3492, -5.0, -1.0) == "认输 0：拿牌ev(-435)>停牌ev(-500) 认输ev(-100)"
+    assert _decide_text(4.5, ["A♥", "3♣", "J♥", "Q♣"], "hit", 1.9231, -5.0, -1.0).endswith(
+        "拿牌ev(192)>停牌ev(-500) 认输ev(-100)"
+    )
+    # 常规路径（无认输选项）：保持两值对比，不带认输 EV
+    assert _decide_text(5, [], "hit", -0.37, -0.4) == "要牌 5：拿牌ev(-37)>停牌ev(-40)"
 
 
 @pytest.mark.asyncio
@@ -531,27 +570,6 @@ async def test_player_draw_uses_ev_when_profile_present() -> None:
 
 
 @pytest.mark.asyncio
-async def test_player_draw_stands_when_dealer_five_small() -> None:
-    """庄家 5 张未爆 = 五小已定（全桌 ×5 判负），停牌早了结。"""
-    ctx = _FakeCtx()
-    state = _game(
-        phase="player_draw",
-        actions=["hit", "stand"],
-        players=[
-            {"isSelf": True, "betAmount": 100, "cardCount": 3},
-            {"dealer": True, "displayName": "涛", "cardCount": 5},
-        ],
-        self_total=9,
-    )
-    client = _FakeClient(state, _OK)
-
-    await _once(ctx, {}, client)
-
-    assert client.posts and client.posts[0][1]["action"] == "stand"
-    assert any("五小" in msg for _, msg in ctx.log.records)
-
-
-@pytest.mark.asyncio
 async def test_notify_failure_does_not_break_poll() -> None:
     """通知渠道不可用（断网窗口）时吞异常只记日志，不冒泡到调度层（线上 08-18 事故）。"""
 
@@ -608,46 +626,58 @@ async def test_player_draw_skipped_when_not_joined_or_out() -> None:
 
 
 @pytest.mark.asyncio
-async def test_player_draw_folds_on_five_small_when_no_cards() -> None:
-    """庄家五小已定（5 张未爆）且我方未拿牌（0 张）：认输只输本金 ×1，不坐等 ×5。"""
+async def test_player_draw_ev_choices_when_dealer_five_small() -> None:
+    """庄家 5 张（疑似五小，v1.23.11）：照常 EV 择优；0 张认输止损、4 张追五小、已爆停牌。"""
+    # 0 张 + fold 开放：认输 EV -1 最优（要牌 -4.35/停牌 -5.00），止损只亏本金 ×1
     ctx = _FakeCtx()
-    state = _game(
-        phase="player_draw",
-        actions=["fold", "hit", "stand"],
-        players=[
-            {"isSelf": True, "betAmount": 100, "cardCount": 0},
-            {"dealer": True, "displayName": "涛", "cardCount": 5},
-        ],
-        self_total=0,
+    client = _FakeClient(
+        _game(
+            phase="player_draw",
+            actions=["fold", "hit", "stand"],
+            players=[
+                {"isSelf": True, "betAmount": 100, "cardCount": 0},
+                {"dealer": True, "displayName": "涛", "cardCount": 5},
+            ],
+            self_total=0,
+        ),
+        _OK,
     )
-    client = _FakeClient(state, _OK)
-
     await _once(ctx, {}, client)
-
     assert client.posts and client.posts[0][1]["action"] == "fold"
     assert any("认输" in msg for _, msg in ctx.log.records)
-    assert _pop_decision_log(ctx, 501)  # 认输也进决策轨迹
-
-
-@pytest.mark.asyncio
-async def test_player_draw_still_stands_on_five_small_when_has_cards() -> None:
-    """我方已拿牌时五小无认输选项（动作列表无 fold），维持停牌认亏 ×5。"""
-    ctx = _FakeCtx()
-    state = _game(
-        phase="player_draw",
-        actions=["hit", "stand"],
-        players=[
-            {"isSelf": True, "betAmount": 100, "cardCount": 3},
-            {"dealer": True, "displayName": "涛", "cardCount": 5},
-        ],
-        self_total=9,
-        self_cards=["6♣", "2♣", "A♥"],
+    steps = _pop_decision_log(ctx, 501)
+    assert steps and steps[0][2] == "fold" and steps[0][5] == -1.0  # 认输进决策轨迹并带 EV
+    # 4 张 4.5 点 + fold 开放：追五小 EV +1.92 最优，不认输（新行为：不再硬编码停牌认亏）
+    client = _FakeClient(
+        _game(
+            phase="player_draw",
+            actions=["fold", "hit", "stand"],
+            players=[
+                {"isSelf": True, "betAmount": 100, "cardCount": 4},
+                {"dealer": True, "displayName": "涛", "cardCount": 5},
+            ],
+            self_total=4.5,
+        ),
+        _OK,
     )
-    client = _FakeClient(state, _OK)
-
     await _once(ctx, {}, client)
-
+    assert client.posts and client.posts[0][1]["action"] == "hit"
+    # 庄家实际已爆（5 张 bust=True）：停牌即赢，认输选项不生效
+    client = _FakeClient(
+        _game(
+            phase="player_draw",
+            actions=["fold", "hit", "stand"],
+            players=[
+                {"isSelf": True, "betAmount": 100, "cardCount": 0},
+                {"dealer": True, "displayName": "涛", "cardCount": 5, "bust": True},
+            ],
+            self_total=0,
+        ),
+        _OK,
+    )
+    await _once(ctx, {}, client)
     assert client.posts and client.posts[0][1]["action"] == "stand"
+    assert any("爆牌" in msg for _, msg in ctx.log.records)
 
 
 @pytest.mark.asyncio
@@ -663,10 +693,10 @@ async def test_player_draw_records_decision_trace() -> None:
 
     steps = _pop_decision_log(ctx, 501)
     assert len(steps) == 1
-    total, hand, action, ev_hit, ev_stand = steps[0]
+    total, hand, action, ev_hit, ev_stand, ev_fold = steps[0]
     assert action == "stand" and total == 9.5 and hand == "6♣ 3♣"
-    assert isinstance(ev_hit, float) and isinstance(ev_stand, float)
-    text = _decide_text(total, hand.split(), action, ev_hit, ev_stand)
+    assert isinstance(ev_hit, float) and isinstance(ev_stand, float) and ev_fold is None
+    text = _decide_text(total, hand.split(), action, ev_hit, ev_stand, ev_fold)
     assert text.startswith("停牌 9.5(6♣ 3♣)") and "拿牌ev(" in text and "停牌ev(" in text
 
 
