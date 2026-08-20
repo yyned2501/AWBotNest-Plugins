@@ -298,8 +298,8 @@ def test_threshold_prefers_card_bucket_then_aggregate() -> None:
     assert _threshold_for({"tenhalf_stand_threshold": 8}, dealers, "涛") == 5.5
 
 
-def test_dealer_profile_text_shows_card_bucket_first() -> None:
-    """结算推送庄家行（v1.23.9）：本局张数分桶逐点数分布前置（EV 决策输入），聚合殿后。"""
+def test_dealer_profile_text_shows_card_bucket_only() -> None:
+    """结算推送庄家行（v1.23.10）：只显示当前手牌张数分桶（点数分布+爆数），不再并列聚合。"""
     dealers = {
         "涛": {
             "rounds": 30,
@@ -309,8 +309,8 @@ def test_dealer_profile_text_shows_card_bucket_first() -> None:
         }
     }
     text = _dealer_profile_text(dealers, "涛", cards=4)
-    assert text == "4张 3局：9点×2/爆×1｜30局·均 8.9 点·爆率 33%"
-    # 桶无样本 → 退回纯聚合画像
+    assert text == "4张 3局：9点×2/爆×1"
+    # 桶无样本 → 退回聚合画像
     plain = {"涛": {"rounds": 30, "busts": 10, "totals": [8.9] * 28}}
     assert _dealer_profile_text(plain, "涛", cards=4) == "30局·均 8.9 点·爆率 33%"
     assert _dealer_profile_text(plain, "涛") == "30局·均 8.9 点·爆率 33%"
@@ -874,3 +874,83 @@ async def test_join_records_round_for_catch_up() -> None:
     ctx = _FakeCtx()
     await _once(ctx, {}, _FakeClient(_game(phase="signup", actions=["join"]), _OK))
     assert ctx.kv.get("tenhalf:joined_round") == "501"
+
+
+# ── 全局画像兜底（v1.23.10）：本庄样本不足用其余所有庄家的画像合计代表 ──
+
+
+def test_dealer_dist_falls_back_to_global_aggregate() -> None:
+    """新庄家（无画像）用全体庄家合计分布；本人样本不足查全局时排除本人。"""
+    dealers = {
+        "甲": {"rounds": 6, "busts": 1, "totals": [8.0] * 5},  # 聚合不足 8
+        "乙": {"rounds": 7, "busts": 2, "totals": [9.0] * 5},  # 聚合不足 8
+    }
+    p_bust, samples = _dealer_dist(dealers, "丙", None)
+    assert p_bust == pytest.approx(3 / 13) and sorted(samples) == sorted([8.0] * 5 + [9.0] * 5)
+    # 查「甲」（本庄 6 局不足）→ 全局排除甲后只剩乙 7 局，仍不足 → None
+    assert _dealer_dist(dealers, "甲", None) is None
+    # 稳定 id 键 + 展示名都能正确排除本人
+    dealers2 = {"id:9": {"name": "丙", "rounds": 6, "totals": [8.0] * 6}, "乙": {"rounds": 10, "totals": [9.0] * 8}}
+    p_bust, samples = _dealer_dist(dealers2, "丙", None, dealer_key="id:9")
+    assert p_bust == 0.0 and samples == [9.0] * 8
+
+
+def test_dealer_dist_global_bucket_then_aggregate() -> None:
+    """本庄无样本时全局分桶优先于全局聚合（桶样本≥3 用桶）。"""
+    dealers = {
+        "甲": {"rounds": 5, "totals": [7.0] * 5, "cards": {"3": {"rounds": 2, "totals": [6.0]}}},
+        "乙": {"rounds": 5, "totals": [7.0] * 5, "cards": {"3": {"rounds": 2, "busts": 1, "totals": [6.0]}}},
+    }
+    p_bust, samples = _dealer_dist(dealers, "丙", 3)
+    assert p_bust == pytest.approx(1 / 4) and samples == [6.0, 6.0]  # 全局 3 张桶合计 4 局
+    p_bust, samples = _dealer_dist(dealers, "丙", None)
+    assert p_bust == 0.0 and samples == [7.0] * 10  # 无张数 → 全局聚合
+
+
+def test_threshold_for_falls_back_to_global() -> None:
+    """本庄样本不足 → 全局画像推导阈值；全局也不足才退配置基准。"""
+    dealers = {
+        "甲": {"rounds": 10, "busts": 8, "totals": [9.0] * 2},
+        "乙": {"rounds": 10, "busts": 8, "totals": [9.0] * 2},
+    }
+    # 全局合计 20 局爆 16：均 9 → 9+0.5-3.2=6.3 → 6.5（红线上限夹取后也到 6.5）
+    assert _threshold_for({"tenhalf_stand_threshold": 8}, dealers, "丙") == 6.5
+    # 全局只有本人 → 无兜底，退配置基准
+    assert _threshold_for({"tenhalf_stand_threshold": 8}, {"甲": {"rounds": 3, "totals": [9.5] * 3}}, "甲") == 8
+
+
+def test_threshold_global_bucket_lower_bound() -> None:
+    """全局 3 张桶均 5 无爆 → 阈值 5.5（无红线问题，直接生效）。"""
+    dealers = {
+        "甲": {"rounds": 10, "totals": [9.5] * 9, "cards": {"3": {"rounds": 3, "totals": [5.0] * 3}}},
+        "乙": {"rounds": 10, "totals": [9.5] * 9, "cards": {"3": {"rounds": 3, "totals": [5.0] * 3}}},
+    }
+    assert _threshold_for({"tenhalf_stand_threshold": 8}, dealers, "丙", dealer_cards=3) == 5.5
+
+
+def test_dealer_profile_text_marks_global_representative() -> None:
+    """本庄无画像时用全局当前张数桶代表并标注「全局画像」；全体为空返回空串。"""
+    dealers = {
+        "甲": {
+            "rounds": 10,
+            "busts": 3,
+            "totals": [8.0] * 7,
+            "cards": {"3": {"rounds": 3, "busts": 1, "totals": [6.0] * 2}},
+        },
+        "乙": {
+            "rounds": 10,
+            "busts": 3,
+            "totals": [8.0] * 7,
+            "cards": {"3": {"rounds": 3, "busts": 1, "totals": [6.0] * 2}},
+        },
+    }
+    assert _dealer_profile_text(dealers, "丙", cards=3) == "全局画像 3张 6局：6点×4/爆×2"
+    assert _dealer_profile_text(dealers, "丙") == "全局画像 20局·均 8.0 点·爆率 30%"
+    assert _dealer_profile_text({}, "丙") == ""
+
+
+def test_decide_text_uses_proper_comparison_symbol() -> None:
+    """决策轨迹 EV 对比符号跟随大小：拿牌大用 >，停牌大用 <，相等用 =。"""
+    assert "拿牌ev(50)>停牌ev(20)" in _decide_text(6, [], "hit", 0.5, 0.2)
+    assert "拿牌ev(20)<停牌ev(50)" in _decide_text(6, [], "stand", 0.2, 0.5)
+    assert "拿牌ev(40)=停牌ev(40)" in _decide_text(6, [], "stand", 0.4, 0.4)
