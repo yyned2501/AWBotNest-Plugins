@@ -18,11 +18,13 @@ from plugins.skyGame.games.tenhalf import (
     _dealer_dist,
     _decide,
     _decide_ev,
+    _decide_text,
     _ev_play,
     _join_amount,
     _observe_dealer,
     _once,
     _pop_dealer_obs,
+    _pop_decision_log,
     _record_dealer,
     _stand_ev,
     _threshold_for,
@@ -39,6 +41,7 @@ def _game(
     round_id: int = 501,
     last_result: dict[str, object] | None = None,
     self_total: float | None = None,
+    self_cards: list[str] | None = None,
 ) -> dict[str, object]:
     """构造 GET /api/portal/tenhalf 响应。"""
     game: dict[str, object] = {
@@ -52,7 +55,7 @@ def _game(
         "players": players or [],
     }
     if self_total is not None:
-        game["self"] = {"cards": [], "total": self_total, "status": ""}
+        game["self"] = {"cards": self_cards or [], "total": self_total, "status": ""}
     if last_result is not None:
         game["lastResult"] = last_result
     return {"game": game}
@@ -339,17 +342,18 @@ def test_dealer_dist_prefers_card_bucket_then_aggregate() -> None:
 
 def test_decide_ev_prefers_higher_ev_action() -> None:
     dist = (0.3, [8.0] * 7)
-    action, reason = _decide_ev(5, 0, ["hit", "stand"], True, None, dist)
+    action, reason, _, _ = _decide_ev(5, 0, ["hit", "stand"], True, None, dist)
     assert action == "stand" and "爆牌" in reason  # 庄家已爆优先
-    action, _ = _decide_ev(5, 5, ["hit", "stand"], False, None, dist)
+    action, _, _, _ = _decide_ev(5, 5, ["hit", "stand"], False, None, dist)
     assert action == "stand"  # 已五小直接赢 ×5
-    action, _ = _decide_ev(5, 0, ["hit", "stand"], False, None, dist)
+    action, _, ev_hit, ev_stand = _decide_ev(5, 0, ["hit", "stand"], False, None, dist)
     assert action == "hit"  # 要牌 EV -0.37 > 停牌 -0.40
-    action, _ = _decide_ev(9.5, 2, ["hit", "stand"], False, None, dist)
+    assert ev_hit > ev_stand  # EV 数值随决策返回（供轨迹展示）
+    action, _, _, _ = _decide_ev(9.5, 2, ["hit", "stand"], False, None, dist)
     assert action == "stand"  # 9.5 点几乎稳赢，要牌只会招爆
-    action, _ = _decide_ev(4, 4, ["hit", "stand"], False, None, dist)
+    action, _, _, _ = _decide_ev(4, 4, ["hit", "stand"], False, None, dist)
     assert action == "hit"  # 4 张低点数追五小 ×5（EV +3.15）
-    action, _ = _decide_ev(4, 2, ["hit", "stand"], False, 9.0, dist)
+    action, _, _, _ = _decide_ev(4, 2, ["hit", "stand"], False, 9.0, dist)
     assert action == "hit"  # 庄家 9 点可见：点质量分布，反败优于停牌
     assert _decide_ev(5, 0, [], False, None, dist)[0] is None
 
@@ -568,6 +572,90 @@ async def test_player_draw_skipped_when_not_joined_or_out() -> None:
     client = _FakeClient(state, _OK)
     await _once(ctx, {}, client)
     assert client.posts == []
+
+
+@pytest.mark.asyncio
+async def test_player_draw_folds_on_five_small_when_no_cards() -> None:
+    """庄家五小已定（5 张未爆）且我方未拿牌（0 张）：认输只输本金 ×1，不坐等 ×5。"""
+    ctx = _FakeCtx()
+    state = _game(
+        phase="player_draw",
+        actions=["fold", "hit", "stand"],
+        players=[
+            {"isSelf": True, "betAmount": 100, "cardCount": 0},
+            {"dealer": True, "displayName": "涛", "cardCount": 5},
+        ],
+        self_total=0,
+    )
+    client = _FakeClient(state, _OK)
+
+    await _once(ctx, {}, client)
+
+    assert client.posts and client.posts[0][1]["action"] == "fold"
+    assert any("认输" in msg for _, msg in ctx.log.records)
+    assert _pop_decision_log(ctx, 501)  # 认输也进决策轨迹
+
+
+@pytest.mark.asyncio
+async def test_player_draw_still_stands_on_five_small_when_has_cards() -> None:
+    """我方已拿牌时五小无认输选项（动作列表无 fold），维持停牌认亏 ×5。"""
+    ctx = _FakeCtx()
+    state = _game(
+        phase="player_draw",
+        actions=["hit", "stand"],
+        players=[
+            {"isSelf": True, "betAmount": 100, "cardCount": 3},
+            {"dealer": True, "displayName": "涛", "cardCount": 5},
+        ],
+        self_total=9,
+        self_cards=["6♣", "2♣", "A♥"],
+    )
+    client = _FakeClient(state, _OK)
+
+    await _once(ctx, {}, client)
+
+    assert client.posts and client.posts[0][1]["action"] == "stand"
+
+
+@pytest.mark.asyncio
+async def test_player_draw_records_decision_trace() -> None:
+    """EV 决策提交成功后记入本局决策轨迹（点数/手牌/拿牌EV/停牌EV）。"""
+    ctx = _FakeCtx()
+    ctx.kv.set("tenhalf:dealers", json.dumps({"麦克格雷涛": _EV_DEALER}))
+    state = _draw_state_top_dealer(9.5, {"displayName": "麦克格雷涛", "cardCount": 2, "bust": False, "total": None})
+    state["game"]["self"] = {"cards": ["6♣", "3♣"], "total": 9.5, "status": ""}
+    client = _FakeClient(state, _OK)
+
+    await _once(ctx, {"tenhalf_stand_threshold": 20}, client)
+
+    steps = _pop_decision_log(ctx, 501)
+    assert len(steps) == 1
+    total, hand, action, ev_hit, ev_stand = steps[0]
+    assert action == "stand" and total == 9.5 and hand == "6♣ 3♣"
+    assert isinstance(ev_hit, float) and isinstance(ev_stand, float)
+    text = _decide_text(total, hand.split(), action, ev_hit, ev_stand)
+    assert text.startswith("停牌 9.5（6♣ 3♣）") and "拿牌ev" in text and "停牌ev" in text
+
+
+@pytest.mark.asyncio
+async def test_settlement_push_includes_decision_trace() -> None:
+    """结算推送表格带本局决策轨迹行（动作在首、EV 对比收尾）。"""
+    ctx = _FakeCtx()
+    # 局 501：先走一手要牌（阈值路径无数值），再停牌（EV 路径）
+    ctx.kv.set("tenhalf:dealers", json.dumps({"麦克格雷涛": _EV_DEALER}))
+    state = _draw_state_top_dealer(6, {"displayName": "麦克格雷涛", "cardCount": 2, "bust": False, "total": None})
+    state["game"]["self"] = {"cards": ["6♣"], "total": 6, "status": ""}
+    await _once(ctx, {"tenhalf_stand_threshold": 20}, _FakeClient(state, _OK))
+    settled = _game(active=False, last_result=_last_result(rid=501, delta=99))
+    await _once(ctx, {}, _FakeClient(settled, _OK))
+
+    assert len(ctx.tables) == 1
+    headers, rows, _ = ctx.tables[0]
+    labels = [row[0] for row in rows]
+    assert "📜 决策轨迹" in labels
+    trace_row = rows[labels.index("📜 决策轨迹")][1]
+    assert "拿牌" in str(trace_row) and "拿牌ev" in str(trace_row) and "停牌ev" in str(trace_row)
+    assert _pop_decision_log(ctx, 501) == []  # 推送后轨迹已取走
 
 
 # ── 结算入账 ──
