@@ -117,7 +117,8 @@ def _decide_text(total: float, cards: object, action: str | None, ev_hit: float 
         head += f"({hand})"
     if ev_hit is None or ev_stand is None:
         return head
-    return f"{head}：拿牌ev({ev_hit * 100:.0f})>停牌ev({ev_stand * 100:.0f})"
+    cmp = ">" if ev_hit > ev_stand else ("<" if ev_hit < ev_stand else "=")
+    return f"{head}：拿牌ev({ev_hit * 100:.0f}){cmp}停牌ev({ev_stand * 100:.0f})"
 
 
 def _record_decision(
@@ -254,8 +255,34 @@ def _dealer_lookup(dealers: dict, name: str, dealer_key: str) -> dict:
     return dealers.get(name) or {}
 
 
+def _global_dealer_entry(dealers: dict, dealer_key: str, name: str) -> dict:
+    """其余所有庄家的画像合计（排除本人），样本不足的新庄家用它代表（v1.23.10）。"""
+    merged: dict = {}
+    skip = dealer_key or name
+    for key, entry in dealers.items():
+        if key == skip or key == name or (entry.get("name") or "") == name:
+            continue  # 排除本人（稳定 id 键 / displayName 键 / 展示名）
+        merged["rounds"] = int(merged.get("rounds", 0) or 0) + int(entry.get("rounds", 0) or 0)
+        merged["busts"] = int(merged.get("busts", 0) or 0) + int(entry.get("busts", 0) or 0)
+        totals = list(merged.get("totals") or []) + list(entry.get("totals") or [])
+        merged["totals"] = totals[-_DEALER_TOTALS_CAP * 2 :]
+        cards = dict(merged.get("cards") or {})
+        for n, bucket in (entry.get("cards") or {}).items():
+            b = dict(cards.get(n) or {})
+            b["rounds"] = int(b.get("rounds", 0) or 0) + int(bucket.get("rounds", 0) or 0)
+            b["busts"] = int(b.get("busts", 0) or 0) + int(bucket.get("busts", 0) or 0)
+            bt = list(b.get("totals") or []) + list(bucket.get("totals") or [])
+            b["totals"] = bt[-_DEALER_TOTALS_CAP * 2 :]
+            cards[n] = b
+        merged["cards"] = cards
+    return merged
+
+
 def _dealer_dist(dealers: dict, name: str, cards: int | None, dealer_key: str = "") -> tuple[float, list[float]] | None:
-    """庄家终局分布 (爆率, 非爆点数样本)：优先当前张数桶（样本≥3），其次聚合（样本≥8）。"""
+    """庄家终局分布 (爆率, 非爆点数样本)：本庄桶(≥3) → 本庄聚合(≥8) → 全局桶(≥3) → 全局聚合(≥8)。
+
+    v1.23.10 起样本不足时用其余所有庄家的画像合计代表，直到本庄画像达标。
+    """
     entry = _dealer_lookup(dealers, name, dealer_key)
     if isinstance(cards, int) and cards > 0:
         bucket = (entry.get("cards") or {}).get(str(cards)) or {}
@@ -263,6 +290,15 @@ def _dealer_dist(dealers: dict, name: str, cards: int | None, dealer_key: str = 
         if r >= _MIN_CARD_SAMPLES and t:
             return min(1.0, b / r), list(t)
     r, b, t = _dealer_effective(entry)
+    if r >= _MIN_DEALER_SAMPLES and t:
+        return min(1.0, b / r), list(t)
+    g = _global_dealer_entry(dealers, dealer_key, name)
+    if isinstance(cards, int) and cards > 0:
+        bucket = (g.get("cards") or {}).get(str(cards)) or {}
+        r, b, t = _dealer_effective(bucket)
+        if r >= _MIN_CARD_SAMPLES and t:
+            return min(1.0, b / r), list(t)
+    r, b, t = _dealer_effective(g)
     if r >= _MIN_DEALER_SAMPLES and t:
         return min(1.0, b / r), list(t)
     return None
@@ -470,7 +506,7 @@ def _threshold_from_stats(rounds: int, busts: int, totals: list[float], min_samp
 def _threshold_for(
     cfg: dict, dealers: dict, dealer_name: str, dealer_cards: int | None = None, dealer_key: str = ""
 ) -> float:
-    """停牌阈值：优先用「当前庄家手牌张数」对应分桶的画像，其次聚合画像，都不够退配置基准。
+    """停牌阈值：本庄桶 → 本庄聚合 → 全局桶 → 全局聚合，都不够才退配置基准（v1.23.10）。
 
     平局算输、爆率高可低停（赌庄家爆）的推导见 _threshold_from_stats；
     画像推导受爆牌红线夹取（≤6.5），配置基准不受红线限制（用户显式选择优先）。
@@ -484,6 +520,17 @@ def _threshold_for(
         if v is not None:
             return v
     r, b, t = _dealer_effective(entry)
+    v = _threshold_from_stats(r, b, t, _MIN_DEALER_SAMPLES)
+    if v is not None:
+        return v
+    g = _global_dealer_entry(dealers, dealer_key, dealer_name)
+    if isinstance(dealer_cards, int) and dealer_cards > 0:
+        bucket = (g.get("cards") or {}).get(str(dealer_cards)) or {}
+        r, b, t = _dealer_effective(bucket)
+        v = _threshold_from_stats(r, b, t, _MIN_CARD_SAMPLES)
+        if v is not None:
+            return v
+    r, b, t = _dealer_effective(g)
     v = _threshold_from_stats(r, b, t, _MIN_DEALER_SAMPLES)
     return base if v is None else v
 
@@ -518,20 +565,26 @@ def _points_dist_text(busts: int, totals: list[float]) -> str:
     return "/".join(items)
 
 
-def _dealer_profile_text(dealers: dict, name: str, cards: int | None = None, dealer_key: str = "") -> str:
-    """结算推送的庄家画像：本局张数分桶完整分布（逐点数次数+爆数）前置，聚合画像殿后。"""
-    entry = _dealer_lookup(dealers, name, dealer_key)
+def _profile_text_for(entry: dict, cards: int | None) -> str:
+    """画像展示文本：只展示当前手牌张数分桶（点数分布+爆数，v1.23.10）；桶无样本退聚合画像。"""
     rounds, busts, totals = _dealer_effective(entry)
     if not rounds:
         return ""
-    text = _profile_core(rounds, busts, totals)
     if isinstance(cards, int) and cards > 0:
         bucket = (entry.get("cards") or {}).get(str(cards)) or {}
         br, bb, bt = _dealer_effective(bucket)
         if br:
-            # 本局张数分桶逐点数分布（EV 决策的真正输入）置前，聚合画像殿后（v1.23.9）
-            text = f"{cards}张 {br}局：{_points_dist_text(bb, bt)}｜{text}"
-    return text
+            return f"{cards}张 {br}局：{_points_dist_text(bb, bt)}"
+    return _profile_core(rounds, busts, totals)
+
+
+def _dealer_profile_text(dealers: dict, name: str, cards: int | None = None, dealer_key: str = "") -> str:
+    """结算推送的庄家画像：本庄有样本用本庄；否则用其余用户合计代表并标注「全局画像」（v1.23.10）。"""
+    text = _profile_text_for(_dealer_lookup(dealers, name, dealer_key), cards)
+    if text:
+        return text
+    text = _profile_text_for(_global_dealer_entry(dealers, dealer_key, name), cards)
+    return f"全局画像 {text}" if text else ""
 
 
 def _bump(bucket: dict, delta: int) -> None:
