@@ -1,5 +1,5 @@
 # =============================================================================
-# AWBotNest 插件：天空游戏 (skyGame) v1.23.4
+# AWBotNest 插件：天空游戏 (skyGame) v1.23.5
 #
 # 天空系列游戏的统一入口：Vue 配置界面左侧按游戏分组，各游戏逻辑拆到
 # games/ 子模块，互不干扰。当前收录：
@@ -27,7 +27,7 @@ from .games import hdsky_auth
 __plugin__ = {
     "name": "天空游戏",
     "id": "skyGame",
-    "version": "1.23.4",
+    "version": "1.23.5",
     "author": "Yy",
     "description": "天空系列游戏统一入口：炸金花/养马/十点半自动参与、幸运轮盘免费抽奖，左侧按游戏分组配置。",
     "scope": "user",
@@ -533,6 +533,10 @@ __plugin__ = {
         },
     },
     "changelog": (
+        "v1.23.5 调整：\n"
+        "- 十点半庄家画像改为按稳定 id（accountId/userId）累计：观察阶段把 rid 与庄家 "
+        "id 配对暂存，结算时按 id 记入画像；displayName 仅作展示名，玩家改名后"
+        "画像自动归并不再另起一摊（旧名字键回退兼容）；\n"
         "v1.23.4 修复：\n"
         "- EV 决策从未生效（v1.21.0 接线 bug）：庄家实际在 game.dealer 顶层字段，"
         "旧代码在 players 里找 dealer=True 永远找不到（每人 dealer 都是 False），"
