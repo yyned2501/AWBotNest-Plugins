@@ -586,7 +586,10 @@ async def _once(ctx: object, cfg: dict, client: HdskyClient) -> None:
     phase = game.get("phase")
     actions = game.get("actions") or []
     limits = game.get("limits") or {}
-    dealer_p = next((p for p in players if isinstance(p, dict) and p.get("dealer")), None)
+    dealer_p = game.get("dealer")
+    if not isinstance(dealer_p, dict):
+        # 兼容旧结构：庄家作为 players 成员标记 dealer=True（线上实际是顶层 game.dealer）
+        dealer_p = next((p for p in players if isinstance(p, dict) and p.get("dealer")), None)
     rid = game.get("roundId")
     # 观察庄家手牌张数（按 roundId 取最大值暂存，供结算时配对计入按张数分桶的画像）
     _observe_dealer_cards(ctx, rid, dealer_p)

@@ -420,6 +420,28 @@ def _draw_state(total: float, actions: list[str] | None = None) -> dict[str, obj
     )
 
 
+def _draw_state_top_dealer(total: float, dealer: dict[str, object]) -> dict[str, object]:
+    """线上真实结构：庄家是顶层 game.dealer，players 里每人 dealer 都是 False。"""
+    state = _draw_state(total)
+    state["game"]["dealer"] = dealer
+    state["game"]["players"] = [p for p in state["game"]["players"] if not p.get("dealer")]
+    return state
+
+
+@pytest.mark.asyncio
+async def test_player_draw_uses_ev_with_top_level_dealer() -> None:
+    """v1.23.4 回归：线上庄家在 game.dealer 顶层字段，必须能命中画像走 EV。"""
+    ctx = _FakeCtx()
+    ctx.kv.set("tenhalf:dealers", json.dumps({"麦克格雷涛": _EV_DEALER}))
+    state = _draw_state_top_dealer(9.5, {"displayName": "麦克格雷涛", "cardCount": 2, "bust": False, "total": None})
+    client = _FakeClient(state, _OK)
+
+    await _once(ctx, {"tenhalf_stand_threshold": 20}, client)  # 阈值故意给高，验证没走阈值路径
+
+    assert client.posts and client.posts[0][1]["action"] == "stand"
+    assert any("EV" in msg for _, msg in ctx.log.records)
+
+
 @pytest.mark.asyncio
 async def test_player_draw_hits_below_threshold() -> None:
     ctx = _FakeCtx()
