@@ -21,10 +21,13 @@
 #     庄家爆牌 → 停牌（未爆即赢）
 #     庄家点数可见 → 点质量分布进 EV；庄家 5 张未爆（五小）→ 停牌认亏
 #     庄家画像样本足够 → EV 决策：停牌 EV（画像点数分布 + 爆率）对比要牌 EV
-#     （52 张先验递推，含五小 ×5 收益与爆牌损失），择优（v1.21.0）
+#     （52 张先验递推，含五小 ×5 收益与爆牌损失），择优（v1.21.0）——
+#     全程 EV 决策，不再用点数阈值停牌（v1.23.7）；4 张时差一张成五小，
+#     EV 递推自然包含（如 8.5 点 4 张：1/2/JQK 共 20 张可成五小 ×5）
 #     画像不足 → 退 v1.20.0 阈值逻辑（画像推导阈值受爆牌红线 6.5 夹取）
 #   fold（认输）仅用于庄家五小已定且我方 0 张时止损：只输本金 ×1，避免坐等 ×5（v1.23.6）
-#   每次提交的动作记入本局决策轨迹（点数/手牌/拿牌EV/停牌EV），结算推送时随表格展示
+#   每次提交的动作记入本局决策轨迹（点数/手牌/拿牌EV/停牌EV），结算推送时
+#   每条决策单独一行展示（半角括号，动作在首；v1.23.7）
 #
 # 庄家画像：按庄家名统计结算点数/爆牌率（kv 持久化），并按庄家终局手牌张数分桶
 # （结算只有点数没有张数，张数靠轮询观察 players[].cardCount 按 roundId 暂存配对）。
@@ -106,15 +109,15 @@ def _hand_text(cards: object) -> str:
 
 
 def _decide_text(total: float, cards: object, action: str | None, ev_hit: float | None, ev_stand: float | None) -> str:
-    """一条决策轨迹文本：动作为首、点数与手牌居中、EV 对比收尾。"""
+    """一条决策轨迹文本：动作为首、点数与手牌居中、EV 对比收尾（半角括号）。"""
     label = _ACTION_LABELS.get(action or "", str(action or ""))
     head = f"{label} {total:g}"
     hand = _hand_text(cards)
     if hand:
-        head += f"（{hand}）"
+        head += f"({hand})"
     if ev_hit is None or ev_stand is None:
         return head
-    return f"{head}：拿牌ev（{ev_hit * 100:.0f}）>停牌ev（{ev_stand * 100:.0f}）"
+    return f"{head}：拿牌ev({ev_hit * 100:.0f})>停牌ev({ev_stand * 100:.0f})"
 
 
 def _record_decision(
@@ -580,7 +583,9 @@ async def _settle_round(ctx: object, cfg: dict, rid: object, settlement: dict) -
         rows.append(["我方牌面", str(me.get("handLabel"))])
     steps = _pop_decision_log(ctx, rid)
     if steps:
-        rows.append(["📜 决策轨迹", "\n".join(_decide_text(*s) for s in steps)])
+        rows.append(["📜 决策轨迹", _decide_text(*steps[0])])
+        for s in steps[1:]:  # 每条决策单独一行，不拼进同一格（表格折行效果差）
+            rows.append(["", _decide_text(*s)])
     if me.get("resultText"):
         rows.append(["结果", str(me.get("resultText"))])
     rows.append(["盈亏", f"{'+' if delta >= 0 else ''}{delta:,} 银元"])
