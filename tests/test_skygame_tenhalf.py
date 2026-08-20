@@ -16,6 +16,7 @@ from plugins.skyGame.games.tenhalf import (
     _bust_prob,
     _catch_up_settlement,
     _dealer_dist,
+    _dealer_profile_text,
     _decide,
     _decide_ev,
     _decide_text,
@@ -294,6 +295,25 @@ def test_threshold_prefers_card_bucket_then_aggregate() -> None:
     assert _threshold_for({"tenhalf_stand_threshold": 8}, dealers, "涛", dealer_cards=3) == 5.5
     # 未提供张数 → 直接用聚合
     assert _threshold_for({"tenhalf_stand_threshold": 8}, dealers, "涛") == 5.5
+
+
+def test_dealer_profile_text_shows_card_bucket_first() -> None:
+    """结算推送庄家行（v1.23.8）：本局张数分桶完整画像前置（决策依据），聚合殿后。"""
+    dealers = {
+        "涛": {
+            "rounds": 30,
+            "busts": 10,
+            "totals": [8.9] * 28,
+            "cards": {"4": {"rounds": 3, "busts": 1, "totals": [9.0] * 2}},
+        }
+    }
+    text = _dealer_profile_text(dealers, "涛", cards=4)
+    assert text == "4张 3局·均 9.0 点·爆率 33%｜30局·均 8.9 点·爆率 33%"
+    # 桶无样本 → 退回纯聚合画像
+    plain = {"涛": {"rounds": 30, "busts": 10, "totals": [8.9] * 28}}
+    assert _dealer_profile_text(plain, "涛", cards=4) == "30局·均 8.9 点·爆率 33%"
+    assert _dealer_profile_text(plain, "涛") == "30局·均 8.9 点·爆率 33%"
+    assert _dealer_profile_text({}, "涛") == ""
 
 
 def test_observe_and_pop_dealer_obs() -> None:

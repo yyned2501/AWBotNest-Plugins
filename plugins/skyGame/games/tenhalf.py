@@ -497,22 +497,29 @@ def _dealer_display_name(dealers: dict, name: str, dealer_key: str) -> str:
     return name
 
 
-def _dealer_profile_text(dealers: dict, name: str, cards: int | None = None, dealer_key: str = "") -> str:
-    entry = _dealer_lookup(dealers, name, dealer_key)
-    rounds, busts, totals = _dealer_effective(entry)
-    if not rounds:
-        return ""
+def _profile_core(rounds: int, busts: int, totals: list[float]) -> str:
+    """单份画像文本：局数，有点数样本拼均点，有爆牌拼爆率。"""
     parts = [f"{rounds}局"]
     if totals:
         parts.append(f"均 {sum(totals) / len(totals):.1f} 点")
     if busts:
         parts.append(f"爆率 {busts / rounds:.0%}")
-    text = "·".join(parts)
+    return "·".join(parts)
+
+
+def _dealer_profile_text(dealers: dict, name: str, cards: int | None = None, dealer_key: str = "") -> str:
+    """结算推送的庄家画像：本局手牌张数分桶画像前置（决策依据），聚合画像殿后。"""
+    entry = _dealer_lookup(dealers, name, dealer_key)
+    rounds, busts, totals = _dealer_effective(entry)
+    if not rounds:
+        return ""
+    text = _profile_core(rounds, busts, totals)
     if isinstance(cards, int) and cards > 0:
         bucket = (entry.get("cards") or {}).get(str(cards)) or {}
-        br, bb, _bt = _dealer_effective(bucket)
+        br, bb, bt = _dealer_effective(bucket)
         if br:
-            text += f"｜{cards}张 {br}局爆率 {bb / br:.0%}"
+            # 本局张数分桶完整画像（局数/均点/爆率）置前，聚合画像殿后作参考（v1.23.8）
+            text = f"{cards}张 {_profile_core(br, bb, bt)}｜{text}"
     return text
 
 
