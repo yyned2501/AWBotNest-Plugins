@@ -1,5 +1,5 @@
 # =============================================================================
-# AWBotNest 插件：天空游戏 (skyGame) v1.23.15
+# AWBotNest 插件：天空游戏 (skyGame) v1.23.16
 #
 # 天空系列游戏的统一入口：Vue 配置界面左侧按游戏分组，各游戏逻辑拆到
 # games/ 子模块，互不干扰。当前收录：
@@ -15,6 +15,7 @@
 #   games/zhajinhua/     炸金花包（详见 zhajinhua/__init__.py）
 #   games/horse.py       养马养护循环
 #   games/tenhalf.py     十点半参与循环
+#   games/ai_review.py   AI 评价通用模块（各游戏结算后调 review() 生成心路历程）
 #   games/drop_guard.py  掉落守卫（/info 剩余掉落为 0 时自动暂停各游戏新加入）
 #   games/lucky.py       幸运轮盘免费抽奖（每日到点抽掉当日免费次数）
 # =============================================================================
@@ -27,7 +28,7 @@ from .games import hdsky_auth
 __plugin__ = {
     "name": "天空游戏",
     "id": "skyGame",
-    "version": "1.23.15",
+    "version": "1.23.16",
     "author": "Yy",
     "description": "天空系列游戏统一入口：炸金花/养马/十点半自动参与、幸运轮盘免费抽奖，左侧按游戏分组配置。",
     "scope": "user",
@@ -485,14 +486,46 @@ __plugin__ = {
             "help": "报名/要牌停牌决策/结算推送",
             "order": 44,
         },
-        "tenhalf_ai_comment": {
+        # ── AI 评价（v1.23.16：十点半旧 tenhalf_ai_comment 迁移至此）──
+        "ai_review_enabled": {
             "type": "boolean",
             "default": True,
-            "label": "AI 心路历程总结",
-            "section": "十点半",
-            "help": "结算后用平台 AI 在群聊总结本局拿牌/停牌/认输的心路历程：赢了炫耀决策、"
-            "输了吐槽庄家运气好（带庄家简称），不会出现 EV 数值；平台未接入 AI 时自动跳过",
+            "label": "AI 评价总开关",
+            "section": "AI 评价",
+            "help": "各游戏结算/结果后用平台 AI 在群聊总结心路历程：赢了炫耀决策、输了吐槽"
+            "对手运气好，不会出现 EV 数值；平台未接入 AI 时自动跳过",
             "order": 45,
+        },
+        "ai_review_games": {
+            "type": "multiselect",
+            "default": ["tenhalf"],
+            "label": "评价的游戏",
+            "section": "AI 评价",
+            "options": [
+                {"value": "tenhalf", "label": "十点半"},
+                {"value": "zjh", "label": "炸金花"},
+                {"value": "horse", "label": "养马"},
+                {"value": "lucky", "label": "幸运轮盘"},
+            ],
+            "help": "勾选哪些游戏结算后生成 AI 评价；各游戏独立开关",
+            "order": 46,
+        },
+        "ai_review_groups": {
+            "type": "text",
+            "default": "",
+            "label": "发送到的群 ID",
+            "section": "AI 评价",
+            "help": "一行一个群 ID（支持 -100 开头数字或 @用户名）；留空=走通知中心原渠道（管理员私聊）",
+            "order": 47,
+        },
+        "ai_review_prompt": {
+            "type": "text",
+            "default": "",
+            "label": "自定义提示词模板",
+            "section": "AI 评价",
+            "help": "可选。占位符 {game}/{actions}/{opponent}/{result}/{tone} 分别替换为"
+            "游戏名、动作序列、对手简称、结果文本、语气指令（按输赢自动生成）；留空=内置默认模板",
+            "order": 48,
         },
         # ── 全局设置（掉落守卫） ──
         "drop_guard_enabled": {
@@ -542,6 +575,11 @@ __plugin__ = {
         },
     },
     "changelog": (
+        "v1.23.16 调整：\n"
+        "- AI 评价抽成 games/ai_review.py 通用模块，炸金花/养马/十点半/幸运轮盘结算后都可生成「心路历程"
+        "群聊消息」（各游戏独立开关，新增「AI 评价」配置分组）；\n"
+        "- 可自定义提示词模板（占位符 {game}/{actions}/{opponent}/{result}/{tone}），可指定直发群 ID\n"
+        "（一行一个，留空走通知中心原渠道）；十点半旧开关 tenhalf_ai_comment 迁移合并；\n"
         "v1.23.15 调整：\n"
         "- 十点半结算后用平台 AI 在群聊总结本局拿牌/停牌/认输的心路历程：赢了炫耀决策好、"
         "输了吐槽没办法、庄家运气好（带庄家简称），平局轻松调侃；prompt 只含动作序列与输赢结果、"

@@ -25,7 +25,7 @@ import asyncio
 import time
 from typing import Any
 
-from .. import drop_guard, hdsky_auth
+from .. import ai_review, drop_guard, hdsky_auth
 from ..hdsky import HdskyClient
 from .zjh_hand import (
     _acquire_hand_after_peek,
@@ -576,6 +576,17 @@ async def _poll_loop(ctx: object) -> None:
                         if last_delta is not None:
                             await _notify_game_result(
                                 ctx, cfg, game_data, last_round_hand, last_round_hand_type, last_delta
+                            )
+                            # AI 评价（v1.23.16）：结算后总结本局心路历程，开关在「AI 评价」配置
+                            hand_text = f"手牌 {last_round_hand}（{last_round_hand_type}）"
+                            await ai_review.review(
+                                ctx,
+                                cfg,
+                                "zjh",
+                                int(last_delta),
+                                hand_text,
+                                actions=hand_text,
+                                rid=last_result_rid,
                             )
                 if cfg.get("zjh_profile_enabled", True):
                     profile_store.flush()

@@ -70,6 +70,11 @@ const DEFAULTS = {
   tenhalf_bet_amount: 100,
   tenhalf_stand_threshold: 8,
   tenhalf_notify: true,
+  // AI 评价（通用模块）
+  ai_review_enabled: true,
+  ai_review_games: ['tenhalf'],
+  ai_review_groups: '',
+  ai_review_prompt: '',
 }
 
 // 草料选项（与后端 config_schema 一致）
@@ -79,6 +84,14 @@ const FEED_TYPES = [
   { value: 'divine', label: '仙草（1000银元 +60饱腹 +50体力）' },
 ]
 
+// 可 AI 评价的游戏（与后端 config_schema ai_review_games 一致）
+const AI_REVIEW_GAMES = [
+  { value: 'tenhalf', label: '十点半' },
+  { value: 'zjh', label: '炸金花' },
+  { value: 'horse', label: '养马' },
+  { value: 'lucky', label: '幸运轮盘' },
+]
+
 // 左侧分组：按游戏归类
 const GROUPS = [
   { key: 'global', label: '全局设置', icon: '⚙️' },
@@ -86,6 +99,7 @@ const GROUPS = [
   { key: 'zjh', label: '炸金花', icon: '🃏' },
   { key: 'tenhalf', label: '十点半', icon: '🎲' },
   { key: 'lucky', label: '幸运轮盘', icon: '🎰' },
+  { key: 'ai', label: 'AI 评价', icon: '🤖' },
 ]
 
 const group = ref('global')
@@ -590,6 +604,61 @@ async function renewNow() {
             <button class="btn primary lg" :disabled="saving" @click="save">{{ saving ? '保存中…' : '保存配置' }}</button>
           </div>
         </template>
+
+        <!-- ============ AI 评价 ============ -->
+        <template v-else-if="group === 'ai'">
+          <h3 class="det-title">AI 评价（心路历程）</h3>
+
+          <section class="card">
+            <div class="card-h">基础设置</div>
+            <label class="row switch">
+              <input v-model="cfg.ai_review_enabled" type="checkbox" />
+              <span>启用 AI 评价</span>
+            </label>
+            <span class="help" style="margin-top:-4px">
+              各游戏结算/结果后用平台 AI 在群聊总结心路历程：赢了炫耀决策、输了吐槽对手运气好，
+              不会出现 EV 数值；平台未接入 AI 时自动跳过
+            </span>
+            <div class="fld">
+              <span class="lbl">评价的游戏（各游戏独立开关）</span>
+              <div class="ai-check-group">
+                <label v-for="g in AI_REVIEW_GAMES" :key="g.value" class="row switch ai-check">
+                  <input
+                    type="checkbox"
+                    :value="g.value"
+                    v-model="cfg.ai_review_games"
+                  />
+                  <span>{{ g.label }}</span>
+                </label>
+              </div>
+              <span class="help">勾选哪些游戏结算后生成 AI 评价消息</span>
+            </div>
+          </section>
+
+          <section class="card">
+            <div class="card-h">发送目标</div>
+            <div class="fld">
+              <span class="lbl">发送到的群（一行一个ID）</span>
+              <textarea v-model="cfg.ai_review_groups" class="inp" rows="3" spellcheck="false"></textarea>
+              <span class="help">支持 -100 开头数字 ID 或 @用户名；留空=走通知中心原渠道（管理员私聊）</span>
+            </div>
+          </section>
+
+          <section class="card">
+            <div class="card-h">提示词模板（可选）</div>
+            <div class="fld">
+              <textarea v-model="cfg.ai_review_prompt" class="inp" rows="4" spellcheck="false"></textarea>
+              <span class="help">
+                占位符：{'{game}'} 游戏名、{'{actions}'} 动作序列、{'{opponent}'} 对手简称、
+                {'{result}'} 结果文本、{'{tone}'} 语气指令（按输赢自动生成）；留空=内置默认模板
+              </span>
+            </div>
+          </section>
+
+          <div class="savebar">
+            <button class="btn primary lg" :disabled="saving" @click="save">{{ saving ? '保存中…' : '保存配置' }}</button>
+          </div>
+        </template>
       </div>
     </div>
   </div>
@@ -640,7 +709,8 @@ async function renewNow() {
 .inp:focus { outline: none; border-color: var(--accent, #6ea8fe); }
 .inp[type='number'] { max-width: 150px; }
 textarea.inp { resize: vertical; font-family: inherit; }
-
+.ai-check-group { display: flex; flex-wrap: wrap; gap: 8px 18px; }
+.ai-check { gap: 6px; }
 .btn {
   padding: 7px 14px; border-radius: 6px; cursor: pointer; font-size: 13px;
   background: var(--bg-card, #12141c); color: var(--text-secondary, #b9c0cc);

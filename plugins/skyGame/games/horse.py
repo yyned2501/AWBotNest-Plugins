@@ -29,7 +29,7 @@ import datetime
 import json
 import re
 
-from . import drop_guard, hdsky_auth
+from . import ai_review, drop_guard, hdsky_auth
 from .hdsky import HdskyClient, request_key
 
 _task: asyncio.Task[None] | None = None
@@ -211,6 +211,12 @@ async def _notify_result(
     if fallback.startswith("遛马") or result.get("eventKind") is not None or result.get("bonusAmount") is not None:
         headers, rows, caption = _format_walk_table(payload, fallback, walk_today, walk_max)
         await ctx.notify_table(headers, rows, caption=caption, level="success" if ok else "warning", category="养马")
+        # AI 评价（v1.23.16）：遛马有随机事件/奖惩才有心路历程可讲，失败不评
+        if ok:
+            bonus = int(result.get("bonusAmount", 0) or 0)
+            penalty = int(result.get("penaltyAmount", 0) or 0)
+            note = str(result.get("eventNote") or result.get("message") or caption).strip()
+            await ai_review.review(ctx, cfg, "horse", bonus - penalty, note, actions="遛马")
         return
     msg = result.get("message") or fallback
     if ok:
