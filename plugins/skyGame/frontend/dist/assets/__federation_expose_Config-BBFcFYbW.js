@@ -1247,7 +1247,7 @@ return (_ctx, _cache) => {
                                 }, null, 512), [
                                   [_vModelText, cfg.ai_review_groups]
                                 ]),
-                                _cache[179] || (_cache[179] = _createElementVNode("span", { class: "help" }, "支持 -100 开头数字 ID 或 @用户名；留空=走通知中心原渠道（管理员私聊）", -1))
+                                _cache[179] || (_cache[179] = _createElementVNode("span", { class: "help" }, "一行一个；由你的用户账号直发（同私聊 /info 的通道，账号需已加入目标群）；留空=走通知中心原渠道（管理员私聊）", -1))
                               ])
                             ]),
                             _createElementVNode("section", _hoisted_116, [
@@ -1286,6 +1286,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const Config = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-9817857e"]]);
+const Config = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-25cfffc6"]]);
 
 export { Config as default };

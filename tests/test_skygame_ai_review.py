@@ -64,10 +64,11 @@ class _FakeBot:
 
 
 class _FakeCtx:
-    def __init__(self, ai: object | None = None, bot: object | None = None) -> None:
+    def __init__(self, ai: object | None = None, bot: object | None = None, user: object | None = None) -> None:
         self.log = _FakeLog()
         self.ai = ai
         self.bot = bot
+        self.user = user
         self.notifications: list[tuple[object, str]] = []
 
     async def notify(self, message: object, *args: object, **kwargs: object) -> None:
@@ -75,11 +76,12 @@ class _FakeCtx:
 
 
 def _ctx(
-    ai_reply: str | None = "还好我稳住了！", with_bot: bool = False
+    ai_reply: str | None = "还好我稳住了！", with_bot: bool = False, with_user: bool = False
 ) -> tuple[_FakeCtx, _FakeAI | None, _FakeBot | None]:
     ai = _FakeAI(reply=ai_reply) if ai_reply is not None else None
     bot = _FakeBot() if with_bot else None
-    return _FakeCtx(ai=ai, bot=bot), ai, bot
+    user = _FakeBot() if with_user else None
+    return _FakeCtx(ai=ai, bot=bot, user=user), ai, bot
 
 
 # ── 简称 ──
@@ -179,15 +181,28 @@ async def test_review_notify_channel_by_default() -> None:
 
 @pytest.mark.asyncio
 async def test_review_sends_to_configured_groups() -> None:
-    """配置了 ai_review_groups → 直发群（数字转 int，@用户名原样）。"""
-    ctx, _, bot = _ctx(with_bot=True)
+    """配置了 ai_review_groups → 用用户账号直发群（同私聊 /info 的通道；
+    数字转 int，@用户名原样），成功时不再走通知中心。"""
+    ctx, _, _ = _ctx(with_user=True)
+    assert ctx.user is not None
     cfg = {"ai_review_groups": "-100123\n@chat_x"}
     await review(ctx, cfg, "tenhalf", -100, "负", opponent="南凝 徐", actions=None)
-    assert bot and len(bot.sent) == 2
-    assert bot.sent[0][0] == -100123 and isinstance(bot.sent[0][0], int)
-    assert bot.sent[1][0] == "@chat_x"
-    assert all("心路历程" in text for _, text in bot.sent)
-    assert not ctx.notifications  # 直发群时不再走通知中心
+    assert len(ctx.user.sent) == 2
+    assert ctx.user.sent[0][0] == -100123 and isinstance(ctx.user.sent[0][0], int)
+    assert ctx.user.sent[1][0] == "@chat_x"
+    assert all("心路历程" in text for _, text in ctx.user.sent)
+    assert not ctx.notifications  # 直发群成功时不再走通知中心
+
+
+@pytest.mark.asyncio
+async def test_review_sends_via_bot_when_no_user() -> None:
+    """平台未提供 ctx.user 时回退所选 Bot 直发。"""
+    ctx, _, _ = _ctx(with_bot=True)
+    assert ctx.bot is not None
+    await review(ctx, {"ai_review_groups": "-100123"}, "tenhalf", 198, "胜")
+    assert len(ctx.bot.sent) == 1
+    assert ctx.bot.sent[0][0] == -100123
+    assert not ctx.notifications
 
 
 @pytest.mark.asyncio
@@ -208,14 +223,20 @@ async def test_review_skips_without_ai() -> None:
 
 @pytest.mark.asyncio
 async def test_review_failure_does_not_raise() -> None:
-    """AI 抛异常 / 群发送失败 → 静默记日志，不冒泡。"""
+    """AI 抛异常 → 静默记日志，不冒泡。"""
     ctx = _FakeCtx(ai=_FakeAI(fail=RuntimeError("ai down")), bot=_FakeBot())
     await review(ctx, {"ai_review_groups": "-100123"}, "tenhalf", 198, "胜")
     assert any("AI 评价失败" in msg for _, msg in ctx.log.records)
-    ctx, _, _ = _ctx(with_bot=False)
-    ctx.bot = _FakeBot(fail=RuntimeError("bot down"))
-    await review(ctx, {"ai_review_groups": "-1"}, "tenhalf", 198, "胜")
+
+
+@pytest.mark.asyncio
+async def test_review_group_send_failure_falls_back_to_notify() -> None:
+    """直发群失败 → 记 warning 并回退通知中心，消息不丢。"""
+    ctx = _FakeCtx(ai=_FakeAI(), user=_FakeBot(fail=RuntimeError("peer invalid")))
+    await review(ctx, {"ai_review_groups": "-100123"}, "tenhalf", 198, "胜")
     assert any("直发群" in msg for _, msg in ctx.log.records)
+    assert any("回退" in msg for _, msg in ctx.log.records)
+    assert any("心路历程" in str(msg) for msg, _ in ctx.notifications)
 
 
 @pytest.mark.asyncio
