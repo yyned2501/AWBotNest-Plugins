@@ -511,7 +511,7 @@ async def test_settle_ai_commentary_pushes_win_and_loss_tones() -> None:
     settled = _game(active=False, last_result=_last_result(rid=777, delta=198, dealer_label="8.5点"))
     await _once(ctx, {}, _FakeClient(settled, _OK))
     assert ai.calls and "炫耀" in ai.calls[0][0] and "麦" in ai.calls[0][0]
-    assert any("心路历程" in str(msg) and "还好我稳住了没贪！" in str(msg) for msg, _ in ctx.notifications)
+    assert any(str(msg) == "还好我稳住了没贪！" for msg, _ in ctx.notifications)  # 纯内容，无前缀
     # 输局：吐槽庄家运气好（推荐正常 default cfg 也走 AI）
     ctx = _FakeCtx()
     ai = _FakeAI(reply="没办法，他运气太好了")
@@ -530,7 +530,7 @@ async def test_ai_commentary_skips_without_ai_or_disabled() -> None:
     ctx = _FakeCtx()  # ctx.ai 为 None
     _record_decision(ctx, 777, 9.0, ["6♣", "3♣"], "stand", None, None, None)
     await _once(ctx, {}, _FakeClient(_game(active=False, last_result=_last_result(rid=777, delta=198)), _OK))
-    assert not any("心路历程" in str(msg) for msg, _ in ctx.notifications)
+    assert not any("还好我稳住了！" in str(msg) for msg, _ in ctx.notifications)
     assert any("十点半" in str(kw) for _, _, kw in ctx.tables)  # 结算表格正常推送
     ctx = _FakeCtx()
     ai = _FakeAI()
@@ -552,7 +552,7 @@ async def test_ai_commentary_failure_does_not_block_settlement() -> None:
     _record_decision(ctx, 777, 9.0, ["6♣", "3♣"], "stand", None, None, None)
     await _once(ctx, {}, _FakeClient(_game(active=False, last_result=_last_result(rid=777, delta=198)), _OK))
     assert any("十点半" in str(kw) for _, _, kw in ctx.tables)  # 主流程不受影响
-    assert not any("心路历程" in str(msg) for msg, _ in ctx.notifications)
+    assert not any("还好我稳住了！" in str(msg) for msg, _ in ctx.notifications)
     assert any("AI 评价失败" in msg for _, msg in ctx.log.records)
 
 

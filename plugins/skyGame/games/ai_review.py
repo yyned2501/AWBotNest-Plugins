@@ -149,7 +149,7 @@ async def _push(ctx: object, cfg: dict, label: str, text: str) -> None:
     """发送心路历程：配置了 ai_review_groups 就逐个群直发（优先 ctx.user 用户账号，
     同私聊 /info 的通道；无用户账号再回退 Bot），全部成功不再走通知中心；
     任一失败则回退 ctx.notify 兜底，保证消息不丢。"""
-    message = f"🗣 {label}心路历程：{text}"
+    message = text
     groups = _group_ids(cfg)
     if not groups:
         await _notify(ctx, label, message)
