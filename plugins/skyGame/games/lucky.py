@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import datetime
 
-from . import hdsky_auth
+from . import ai_review, hdsky_auth
 from .hdsky import HdskyClient, request_key
 
 _KV_LAST_DRAW_DATE = "lucky:last_draw_date"
@@ -90,6 +90,8 @@ async def draw_free_spins(ctx: object, cfg: dict, client: HdskyClient) -> bool:
         await ctx.notify(msg, category="幸运轮盘")
     except Exception as e:
         ctx.log.warning("幸运轮盘通知发送失败（渠道暂不可用）: %r", e)
+    # AI 评价（v1.23.16）：抽奖结果有输有赢，开关在「AI 评价」配置
+    await ai_review.review(ctx, cfg, "lucky", int(result.get("silverGain", 0) or 0), msg, actions="幸运轮盘免费抽奖")
     return True
 
 

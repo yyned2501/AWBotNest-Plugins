@@ -13,13 +13,10 @@ import json
 import pytest
 
 from plugins.skyGame.games.tenhalf import (
-    _action_sequence_text,
-    _ai_commentary_prompt,
     _bust_prob,
     _catch_up_settlement,
     _dealer_dist,
     _dealer_profile_text,
-    _dealer_short_name,
     _decide,
     _decide_ev,
     _decide_text,
@@ -500,29 +497,7 @@ async def test_settlement_pairs_observed_card_count() -> None:
     assert json.loads(str(ctx.kv.get("tenhalf:dealer_cards"))) == {}
 
 
-# ── AI 心路历程（v1.23.15）──
-
-
-def test_dealer_short_name_abbrev() -> None:
-    """庄家简称：去空白取前 2 字；短名原样。"""
-    assert _dealer_short_name("麦克格雷涛") == "麦克"
-    assert _dealer_short_name("南凝 徐") == "南凝"
-    assert _dealer_short_name("飞亦") == "飞亦"
-    assert _dealer_short_name(" ") == "庄家"
-
-
-def test_action_sequence_and_ai_prompt_no_ev() -> None:
-    """动作序列只含动作与点数；prompt/system 不允许出现 EV 相关词，输赢口吻分开。"""
-    steps = [[0.0, "", "hit", -0.60, None, None], [3.0, "A♥ 2♣", "stand", None, None, None]]
-    assert _action_sequence_text(steps) == "要牌 0点 → 停牌 3点"
-    for delta in (198, -100, 0):
-        system, prompt = _ai_commentary_prompt("麦克", delta, "胜", steps)
-        assert "ev" not in system.lower() and "ev" not in prompt.lower()  # 绝不漏 EV
-        assert "概率" not in system and "期望" not in system
-        assert "麦" in prompt or "麦克" in prompt  # 庄家简称已带入
-    assert "炫耀" in _ai_commentary_prompt("麦克", 198, "胜", steps)[1]
-    assert "运气太好" in _ai_commentary_prompt("麦克", -100, "负", steps)[1]
-    assert "调侃" in _ai_commentary_prompt("麦克", 0, "和", steps)[1]
+# ── AI 评价（v1.23.16 起由 games/ai_review.py 通用模块承担，集成链路见 test_skygame_ai_review.py）──
 
 
 @pytest.mark.asyncio
@@ -578,7 +553,7 @@ async def test_ai_commentary_failure_does_not_block_settlement() -> None:
     await _once(ctx, {}, _FakeClient(_game(active=False, last_result=_last_result(rid=777, delta=198)), _OK))
     assert any("十点半" in str(kw) for _, _, kw in ctx.tables)  # 主流程不受影响
     assert not any("心路历程" in str(msg) for msg, _ in ctx.notifications)
-    assert any("AI 心路历程失败" in msg for _, msg in ctx.log.records)
+    assert any("AI 评价失败" in msg for _, msg in ctx.log.records)
 
 
 # ── 报名阶段 ──
