@@ -391,28 +391,43 @@ def test_decide_ev_prefers_higher_ev_action() -> None:
     assert _decide_ev(5, 0, [], False, None, dist)[0] is None
 
 
-def test_decide_ev_five_small_three_way_choice() -> None:
-    """庄家 5 张（v1.23.13）：≠五小已定，停牌 EV 按「5张」桶条件分布算，认输第三选项择优。"""
-    # 无画像样本：停牌保守按五小定局 -5；0 张先要牌 EV -0.61 优于认输 -1（玩家爆牌恒 -1）
+def test_decide_ev_five_small_fold_gate() -> None:
+    """庄家 5 张（v1.23.13+）：停牌 EV 按「5张」桶条件分布算；认输是止损通道（v1.23.14
+    用户实测）——只在首手（0 张未拿牌）且停牌 EV ≤ -1 时认输，否则拿/停择优。"""
+    # 无画像样本（five_bust_p=None）：停牌保守按五小定局 -5 ≤ -1 → 首手认输 -1 止损
     action, reason, ev_hit, ev_stand, ev_fold = _decide_ev(
         0, 0, ["hit", "stand", "fold"], False, None, (0.0, []), dealer_five_small=True
     )
-    assert action == "hit" and ev_fold == -1.0 and ev_stand == -5.0
-    assert ev_hit == pytest.approx(-0.6095, abs=1e-4) and ev_hit > ev_fold > ev_stand
-    # 4 张 4.5 点：成五小牌 36/52 ≈ 69%，追五小 EV +3.15 最优（停牌 -5/认输 -1 殿后）
+    assert action == "fold" and ev_fold == -1.0 and ev_stand == -5.0 and "认输" in reason
+    assert ev_hit == pytest.approx(-0.6095, abs=1e-4)
+    # 4 张 4.5 点：已拿牌无认输，追五小 EV +3.15 最优（成五小牌 36/52 ≈ 69%）
     action, _, ev_hit, ev_stand, ev_fold = _decide_ev(
         4.5, 4, ["hit", "stand", "fold"], False, None, (0.0, []), dealer_five_small=True
     )
-    assert action == "hit" and ev_hit == pytest.approx(3.1538, abs=1e-4) and ev_fold == -1.0
-    # 画像 5张桶（10 局 7 爆，5822 实证）：停牌 EV = 0.99×70% - 5×30% = -0.807 > 认输 -1，
-    # 0 张先要牌 -0.529 最优——不再因「疑似五小」无谓认输
+    assert action == "hit" and ev_hit == pytest.approx(3.1538, abs=1e-4) and ev_fold is None
+    # 画像 5张桶（10 局 7 爆，5822 实证）：停牌 EV = 0.99×70% - 5×30% = -0.807 > -1，
+    # 认输不参与对比，0 张在拿/停间择优：要牌 -0.79 最优——不再因「疑似五小」无谓认输
     five_dist = (0.7, [5.0, 5.0, 5.0])
     action, reason, ev_hit, ev_stand, ev_fold = _decide_ev(
         0, 0, ["hit", "stand", "fold"], False, None, five_dist, dealer_five_small=True, five_bust_p=0.7
     )
-    assert action == "hit" and ev_hit == pytest.approx(-0.5290, abs=1e-4)
-    assert ev_stand == pytest.approx(-0.8070, abs=1e-4) and ev_stand > ev_fold  # 停牌也优于认输
-    # 五小概率大（爆率 30%）且 9.5 点必爆：hit 与认输同 EV -1，同分折确定性认输
+    assert action == "hit" and ev_hit == pytest.approx(-0.7918, abs=1e-4)
+    assert ev_stand == pytest.approx(-0.8070, abs=1e-4) and ev_fold == -1.0
+    assert "庄家5张" in reason
+    # 五小概率大（爆率 30%）+ 首手 0 张：停牌 EV = 0.3×0.99 - 0.7×5 = -3.2 ≤ -1 → 认输止损
+    action, _, ev_hit, ev_stand, ev_fold = _decide_ev(
+        0,
+        0,
+        ["hit", "stand", "fold"],
+        False,
+        None,
+        (0.3, [5.0, 5.0, 5.0]),
+        dealer_five_small=True,
+        five_bust_p=0.3,
+    )
+    assert action == "fold" and ev_fold == -1.0 and ev_stand == pytest.approx(-3.203, abs=1e-3)
+    assert "认输" in reason
+    # 同场景但已拿了 2 张牌（9.5 点）：认输入口关闭，只能拿/停择优 → 停牌 -3.20 ≥ 要牌 -3.62
     action, _, ev_hit, ev_stand, ev_fold = _decide_ev(
         9.5,
         2,
@@ -423,8 +438,7 @@ def test_decide_ev_five_small_three_way_choice() -> None:
         dealer_five_small=True,
         five_bust_p=0.3,
     )
-    assert action == "fold" and ev_fold == -1.0 and ev_hit == -1.0
-    assert "认输" in reason
+    assert action == "stand" and ev_fold is None and ev_stand > ev_hit
     # 门户未开放认输：无第三选项，要牌/停牌照常择优（9 点 3 张：要牌 -0.47 > 停牌 -5）
     action, _, ev_hit, ev_stand, ev_fold = _decide_ev(
         9, 3, ["hit", "stand"], False, None, (0.0, []), dealer_five_small=True
@@ -436,12 +450,10 @@ def test_decide_ev_five_small_three_way_choice() -> None:
 
 
 def test_decide_text_appends_fold_ev() -> None:
-    """决策轨迹追加认输 EV 第三值（半角括号、动态符号、×100 取整）。"""
-    # 5822 场景：拿牌 -53 最优、停牌 -81 优于认输 -100
-    assert _decide_text(0, [], "hit", -0.529, -0.807, -1.0) == "要牌 0：拿牌ev(-53)>停牌ev(-81) 认输ev(-100)"
-    assert _decide_text(4.5, ["A♥", "3♣", "J♥", "Q♣"], "hit", 3.1538, -5.0, -1.0).endswith(
-        "拿牌ev(315)>停牌ev(-500) 认输ev(-100)"
-    )
+    """决策轨迹追加认输 EV 第三值（半角括号、动态符号、×100 取整）；中态（已拿牌）无认输。"""
+    # 5822 场景：拿牌 -79 最优、停牌 -81 优于认输 -100（认输在首手轨迹展示但未选用）
+    assert _decide_text(0, [], "hit", -0.7918, -0.807, -1.0) == "要牌 0：拿牌ev(-79)>停牌ev(-81) 认输ev(-100)"
+    assert _decide_text(4.5, ["A♥", "3♣", "J♥", "Q♣"], "hit", 3.1538, -5.0, None).endswith("拿牌ev(315)>停牌ev(-500)")
     # 常规路径（无认输选项）：保持两值对比，不带认输 EV
     assert _decide_text(5, [], "hit", -0.37, -0.4) == "要牌 5：拿牌ev(-37)>停牌ev(-40)"
 
@@ -643,8 +655,9 @@ async def test_player_draw_skipped_when_not_joined_or_out() -> None:
 
 @pytest.mark.asyncio
 async def test_player_draw_ev_choices_when_dealer_five_small() -> None:
-    """庄家 5 张（v1.23.13）：无画像照常要牌止损，画像爆率大赌爆，五小概率大认输。"""
-    # 无画像样本 + 0 张：停牌保守 -5/认输 -1，先要牌 -0.61 最优（不再无谓认输）
+    """庄家 5 张：认输是首手止损通道（v1.23.14）——无画像/五小概率大 → 首手认输，
+    爆率大 → 拿/停择优赌爆；已拿牌则认输入口关闭。"""
+    # 无画像样本 + 首手 0 张：停牌保守 -5 ≤ -1 → 认输 -1 止损
     ctx = _FakeCtx()
     client = _FakeClient(
         _game(
@@ -659,10 +672,11 @@ async def test_player_draw_ev_choices_when_dealer_five_small() -> None:
         _OK,
     )
     await _once(ctx, {}, client)
-    assert client.posts and client.posts[0][1]["action"] == "hit"
+    assert client.posts and client.posts[0][1]["action"] == "fold"
+    assert any("认输" in msg for _, msg in ctx.log.records)
     steps = _pop_decision_log(ctx, 501)
-    assert steps and steps[0][2] == "hit" and steps[0][5] == -1.0  # 认输进了轨迹对比
-    # 画像 5张桶（10 局 7 爆，5822 实证）：0 张先要牌 -0.53，停牌 -0.81 也优于认输
+    assert steps and steps[0][2] == "fold" and steps[0][5] == -1.0  # 认输进轨迹
+    # 画像 5张桶（10 局 7 爆，5822 实证）：停牌 EV -0.81 > -1，0 张拿/停择优 → 要牌赌爆
     ctx = _FakeCtx()
     ctx.kv.set(
         "tenhalf:dealers",
@@ -693,8 +707,39 @@ async def test_player_draw_ev_choices_when_dealer_five_small() -> None:
     await _once(ctx, {}, client)
     assert client.posts and client.posts[0][1]["action"] == "hit"
     steps = _pop_decision_log(ctx, 501)
-    assert steps and steps[0][5] == -1.0  # 地板：认输 -100 参与对比但垫底
-    # 五小概率大（10 局 3 爆）+ 9.5 点必爆：hit 与认输同 EV，同分折确定性认输
+    assert steps and steps[0][2] == "hit" and steps[0][5] == -1.0  # 认输未选用但进轨迹三值
+    # 五小概率大（10 局 3 爆）+ 首手 0 张：停牌 EV -3.2 ≤ -1 → 认输止损
+    ctx = _FakeCtx()
+    ctx.kv.set(
+        "tenhalf:dealers",
+        json.dumps(
+            {
+                "涛": {
+                    "name": "涛",
+                    "rounds": 10,
+                    "busts": 3,
+                    "totals": [5.0] * 7,
+                    "cards": {"5": {"rounds": 10, "busts": 3, "totals": [5.0] * 7}},
+                }
+            }
+        ),
+    )
+    client = _FakeClient(
+        _game(
+            phase="player_draw",
+            actions=["fold", "hit", "stand"],
+            players=[
+                {"isSelf": True, "betAmount": 100, "cardCount": 0},
+                {"dealer": True, "displayName": "涛", "cardCount": 5},
+            ],
+            self_total=0,
+        ),
+        _OK,
+    )
+    await _once(ctx, {}, client)
+    assert client.posts and client.posts[0][1]["action"] == "fold"
+    assert any("认输" in msg for _, msg in ctx.log.records)
+    # 已拿了 2 张（9.5 点必爆）：无认输入口，只能拿/停择优 → 停牌（-3.20 ≥ -3.62）
     ctx = _FakeCtx()
     ctx.kv.set(
         "tenhalf:dealers",
@@ -723,8 +768,7 @@ async def test_player_draw_ev_choices_when_dealer_five_small() -> None:
         _OK,
     )
     await _once(ctx, {}, client)
-    assert client.posts and client.posts[0][1]["action"] == "fold"
-    assert any("认输" in msg for _, msg in ctx.log.records)
+    assert client.posts and client.posts[0][1]["action"] == "stand"
     # 庄家已爆（5 张 bust=True）：停牌即赢，认输选项不生效
     client = _FakeClient(
         _game(
