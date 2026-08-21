@@ -8,7 +8,8 @@
 # 配置（config_schema + 前端 Config.vue「AI 评价」分组）：
 #   ai_review_enabled  总开关（默认开）
 #   ai_review_games    多选参与评价的游戏（默认含十点半；支持 zjh/horse/tenhalf/lucky）
-#   ai_review_groups   发送到指定群 ID（一行一个，空=走 ctx.notify 通知中心原渠道）
+#   ai_review_groups   发送到指定群 ID（一行一个；由用户账号直发，同私聊 /info 的通道，
+#                      空=走 ctx.notify 通知中心原渠道）
 #   ai_review_prompt   自定义提示词模板（占位符 {game}/{actions}/{opponent}/{result}/{tone}；
 #                      config_schema 已预填 DEFAULT_TEMPLATE，前端可一键恢复默认）
 #
@@ -145,24 +146,36 @@ async def review(
 
 
 async def _push(ctx: object, cfg: dict, label: str, text: str) -> None:
-    """发送心路历程：配置了 ai_review_groups 就逐个群直发，否则走 ctx.notify 原渠道。"""
+    """发送心路历程：配置了 ai_review_groups 就逐个群直发（优先 ctx.user 用户账号，
+    同私聊 /info 的通道；无用户账号再回退 Bot），全部成功不再走通知中心；
+    任一失败则回退 ctx.notify 兜底，保证消息不丢。"""
     message = f"🗣 {label}心路历程：{text}"
     groups = _group_ids(cfg)
     if not groups:
-        try:
-            await ctx.notify(message, category=label)
-        except Exception as e:
-            ctx.log.warning("AI 评价通知发送失败（渠道暂不可用）: %r", e)
+        await _notify(ctx, label, message)
         return
-    bot = getattr(ctx, "bot", None)
-    if bot is None or not callable(getattr(bot, "send", None)):
-        ctx.log.debug("AI 评价跳过群直发：平台未提供 ctx.bot.send")
+    client = getattr(ctx, "user", None) or getattr(ctx, "bot", None)
+    if client is None or not callable(getattr(client, "send", None)):
+        ctx.log.debug("AI 评价跳过群直发：平台未提供 ctx.user/ctx.bot.send")
         return
+    failed = False
     for raw in groups:
         try:
             chat_id: object = raw
             if raw.lstrip("-").isdigit():
                 chat_id = int(raw)
-            await bot.send(chat_id, message)
+            await client.send(chat_id, message)
         except Exception as e:
+            failed = True
             ctx.log.warning("AI 评价直发群 %s 失败: %r", raw, e)
+    if failed:
+        ctx.log.warning("AI 评价群直发未全部成功，已回退通知中心")
+        await _notify(ctx, label, message)
+
+
+async def _notify(ctx: object, label: str, message: str) -> None:
+    """走通知中心（默认管理员私聊）发送；失败只记日志不冒泡。"""
+    try:
+        await ctx.notify(message, category=label)
+    except Exception as e:
+        ctx.log.warning("AI 评价通知发送失败（渠道暂不可用）: %r", e)

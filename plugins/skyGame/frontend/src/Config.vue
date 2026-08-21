@@ -645,7 +645,7 @@ async function renewNow() {
             <div class="fld">
               <span class="lbl">发送到的群（一行一个ID）</span>
               <textarea v-model="cfg.ai_review_groups" class="inp" rows="3" spellcheck="false"></textarea>
-              <span class="help">支持 -100 开头数字 ID 或 @用户名；留空=走通知中心原渠道（管理员私聊）</span>
+              <span class="help">一行一个；由你的用户账号直发（同私聊 /info 的通道，账号需已加入目标群）；留空=走通知中心原渠道（管理员私聊）</span>
             </div>
           </section>
 
