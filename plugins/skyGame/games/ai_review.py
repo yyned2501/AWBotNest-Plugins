@@ -9,8 +9,8 @@
 #   ai_review_enabled  总开关（默认开）
 #   ai_review_games    多选参与评价的游戏（默认含十点半；支持 zjh/horse/tenhalf/lucky）
 #   ai_review_groups   发送到指定群 ID（一行一个，空=走 ctx.notify 通知中心原渠道）
-#   ai_review_prompt   自定义提示词模板（占位符 {game}/{actions}/{opponent}/{result}/{tone}，
-#                      空=内置默认模板）
+#   ai_review_prompt   自定义提示词模板（占位符 {game}/{actions}/{opponent}/{result}/{tone}；
+#                      config_schema 已预填 DEFAULT_TEMPLATE，前端可一键恢复默认）
 #
 # 容错：平台未接入 AI / 调用失败 / 发送失败都只记日志，绝不阻塞结算主流程。
 
@@ -25,7 +25,9 @@ _GAME_LABELS = {
     "lucky": "幸运轮盘",
 }
 
-_DEFAULT_TEMPLATE = (
+# 内置默认模板：config_schema 的 ai_review_prompt 默认值直接引用本常量（前端「恢复默认
+# 模板」按钮还原同一文案）；保留 or DEFAULT_TEMPLATE 兜底旧用户保存过空值的键
+DEFAULT_TEMPLATE = (
     "本局我先后做了这样的决定：{actions}。对手是「{opponent}」，本局结果：{result}。"
     "{tone}。直接输出要说的话，不要解释。"
 )
@@ -75,7 +77,7 @@ def _build_prompt(cfg: dict, game: str, opponent_short: str, delta: int, result_
         "{result}": result_text or "无",
         "{tone}": _tone_text(delta, opponent_short),
     }
-    template = str(cfg.get("ai_review_prompt", "") or "").strip() or _DEFAULT_TEMPLATE
+    template = str(cfg.get("ai_review_prompt", "") or "").strip() or DEFAULT_TEMPLATE
     prompt = template
     for key, value in mapping.items():
         prompt = prompt.replace(key, value)

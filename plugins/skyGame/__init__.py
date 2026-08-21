@@ -1,5 +1,5 @@
 # =============================================================================
-# AWBotNest 插件：天空游戏 (skyGame) v1.23.16
+# AWBotNest 插件：天空游戏 (skyGame) v1.23.17
 #
 # 天空系列游戏的统一入口：Vue 配置界面左侧按游戏分组，各游戏逻辑拆到
 # games/ 子模块，互不干扰。当前收录：
@@ -23,12 +23,12 @@
 from __future__ import annotations
 
 from . import games
-from .games import hdsky_auth
+from .games import ai_review, hdsky_auth
 
 __plugin__ = {
     "name": "天空游戏",
     "id": "skyGame",
-    "version": "1.23.16",
+    "version": "1.23.17",
     "author": "Yy",
     "description": "天空系列游戏统一入口：炸金花/养马/十点半自动参与、幸运轮盘免费抽奖，左侧按游戏分组配置。",
     "scope": "user",
@@ -520,11 +520,12 @@ __plugin__ = {
         },
         "ai_review_prompt": {
             "type": "text",
-            "default": "",
+            "default": ai_review.DEFAULT_TEMPLATE,
             "label": "自定义提示词模板",
             "section": "AI 评价",
-            "help": "可选。占位符 {game}/{actions}/{opponent}/{result}/{tone} 分别替换为"
-            "游戏名、动作序列、对手简称、结果文本、语气指令（按输赢自动生成）；留空=内置默认模板",
+            "help": "已预填内置默认模板，可自由修改（前端可一键恢复默认）。占位符 {game}/{actions}/"
+            "{opponent}/{result}/{tone} 分别替换为游戏名、动作序列、对手简称、结果文本、"
+            "语气指令（按输赢自动生成）；留空也等价于默认模板",
             "order": 48,
         },
         # ── 全局设置（掉落守卫） ──
@@ -575,6 +576,8 @@ __plugin__ = {
         },
     },
     "changelog": (
+        "v1.23.17 调整：\n"
+        "- AI 评价提示词模板前端默认预填内置模板并新增「恢复默认模板」按钮；\n"
         "v1.23.16 调整：\n"
         "- AI 评价抽成 games/ai_review.py 通用模块，炸金花/养马/十点半/幸运轮盘结算后都可生成「心路历程"
         "群聊消息」（各游戏独立开关，新增「AI 评价」配置分组）；\n"
