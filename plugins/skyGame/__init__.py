@@ -23,7 +23,7 @@
 from __future__ import annotations
 
 from . import games
-from .games import ai_review, hdsky_auth
+from .games import hdsky_auth
 
 __plugin__ = {
     "name": "天空游戏",
@@ -520,7 +520,13 @@ __plugin__ = {
         },
         "ai_review_prompt": {
             "type": "text",
-            "default": ai_review.DEFAULT_TEMPLATE,
+            # 注意：config_schema 走平台静态 AST 字面量解析（不 import 模块），不能引用
+            # 模块常量；此处内联与 games/ai_review.py DEFAULT_TEMPLATE 同一文案，
+            # 一致性由 tests/test_skygame_ai_review.py 的 schema-default 断言兜底
+            "default": (
+                "本局我先后做了这样的决定：{actions}。对手是「{opponent}」，本局结果：{result}。"
+                "{tone}。直接输出要说的话，不要解释。"
+            ),
             "label": "自定义提示词模板",
             "section": "AI 评价",
             "help": "已预填内置默认模板，可自由修改（前端可一键恢复默认）。占位符 {game}/{actions}/"
