@@ -705,6 +705,9 @@ async def _settle_round(ctx: object, cfg: dict, rid: object, settlement: dict) -
         shown = _dealer_display_name(_load_json(ctx.kv, _DEALERS_KEY), dealer_name, dealer_key)
         profile = _dealer_profile_text(_load_json(ctx.kv, _DEALERS_KEY), dealer_name, dealer_cards, dealer_key)
         rows.append(["庄家", f"{shown}（{profile}）" if profile else shown])
+    dealer_label = settlement.get("dealerHandLabel")
+    if dealer_label:
+        rows.append(["庄家牌面", str(dealer_label)])
     if me.get("handLabel"):
         rows.append(["我方牌面", str(me.get("handLabel"))])
     steps = _pop_decision_log(ctx, rid)
