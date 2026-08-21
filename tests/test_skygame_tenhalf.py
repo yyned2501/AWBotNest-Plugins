@@ -718,6 +718,9 @@ async def test_settlement_push_includes_decision_trace() -> None:
     headers, rows, _ = ctx.tables[0]
     labels = [str(row[0]) for row in rows]
     assert "📜 决策轨迹" in labels
+    assert "庄家牌面" in labels
+    dealer_row = next(row for row in rows if row[0] == "庄家牌面")
+    assert str(dealer_row[1]) == "8.5点"  # 本局庄家终局点数（dealerHandLabel）
     trace_rows = [row for row in rows if str(row[0]).startswith("📜 决策轨迹") or row[0] == ""]
     # 首行带标题、后续行空 label，且不含 \n 拼接（每条单独成行）
     assert len(trace_rows) >= 2
@@ -763,6 +766,20 @@ async def test_settlement_loss_notifies_success_level() -> None:
     assert len(ctx.tables) == 1
     _, _, kwargs = ctx.tables[0]
     assert kwargs.get("level") == "success"
+
+
+@pytest.mark.asyncio
+async def test_settlement_push_shows_dealer_hand_label() -> None:
+    """结算推送含本局庄家牌面（dealerHandLabel），与「我方牌面」对称展示（v1.23.12）。"""
+    ctx = _FakeCtx()
+    last = _last_result(rid=888, delta=-50, dealer_label="11点")
+    await _once(ctx, {}, _FakeClient(_game(active=False, last_result=last), _OK))
+
+    assert len(ctx.tables) == 1
+    labels = [str(row[0]) for row in ctx.tables[0][1]]
+    assert "庄家牌面" in labels and "我方牌面" in labels
+    dealer_row = next(row for row in ctx.tables[0][1] if row[0] == "庄家牌面")
+    assert str(dealer_row[1]) == "11点"
 
 
 @pytest.mark.asyncio
