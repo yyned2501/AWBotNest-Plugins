@@ -171,12 +171,13 @@ def test_group_ids_parsing() -> None:
 
 @pytest.mark.asyncio
 async def test_review_notify_channel_by_default() -> None:
-    """无群配置 → 走 ctx.notify 通知中心，消息带游戏名前缀。"""
+    """无群配置 → 走 ctx.notify 通知中心，消息只含 AI 内容（无表情/心路历程前缀）。"""
     ctx, ai, _ = _ctx()
     steps = [[0.0, "", "hit", None, None, None]]
     await review(ctx, {}, "tenhalf", 198, "胜", opponent="麦克格雷涛", actions=steps, labels={"hit": "要牌"})
     assert ai and ai.calls and "炫耀" in ai.calls[0][0] and "麦克" in ai.calls[0][0]
-    assert any("十点半心路历程" in str(msg) and "还好我稳住了！" in str(msg) for msg, _ in ctx.notifications)
+    assert any(str(msg) == "还好我稳住了！" for msg, _ in ctx.notifications)
+    assert all("🗣" not in str(msg) and "心路历程" not in str(msg) for msg, _ in ctx.notifications)
 
 
 @pytest.mark.asyncio
@@ -190,7 +191,7 @@ async def test_review_sends_to_configured_groups() -> None:
     assert len(ctx.user.sent) == 2
     assert ctx.user.sent[0][0] == -100123 and isinstance(ctx.user.sent[0][0], int)
     assert ctx.user.sent[1][0] == "@chat_x"
-    assert all("心路历程" in text for _, text in ctx.user.sent)
+    assert all(text == "还好我稳住了！" for _, text in ctx.user.sent)  # 只发内容，无表情/前缀
     assert not ctx.notifications  # 直发群成功时不再走通知中心
 
 
@@ -236,7 +237,7 @@ async def test_review_group_send_failure_falls_back_to_notify() -> None:
     await review(ctx, {"ai_review_groups": "-100123"}, "tenhalf", 198, "胜")
     assert any("直发群" in msg for _, msg in ctx.log.records)
     assert any("回退" in msg for _, msg in ctx.log.records)
-    assert any("心路历程" in str(msg) for msg, _ in ctx.notifications)
+    assert any(str(msg) == "还好我稳住了！" for msg, _ in ctx.notifications)
 
 
 @pytest.mark.asyncio
@@ -246,4 +247,4 @@ async def test_review_all_games_labels() -> None:
         ctx, ai, _ = _ctx()
         await review(ctx, {"ai_review_games": [game]}, game, 50, "结果文本", actions="走了几步")
         assert ai and ai.calls and label in ai.calls[0][1] or ""
-        assert any(label in str(msg) for msg, _ in ctx.notifications)
+        assert all(str(msg) == "还好我稳住了！" for msg, _ in ctx.notifications)  # 纯内容，无游戏名前缀
