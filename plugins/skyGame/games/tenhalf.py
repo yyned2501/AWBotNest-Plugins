@@ -17,6 +17,9 @@
 #   lastResult 出现新局 → 结算入账：通知 + 累计/当日战绩 + 庄家画像（按 roundId 去重）
 #   signup 且可加入 → 按配置下注额报名（夹在门户最小下注与单桌人均上限之间）
 #   推送策略：每局只在报名成功与结算时各推一次，要牌/停牌过程不推送（只记日志）
+#   结算后若有本局决策轨迹，用平台 AI 在群聊总结「心路历程」（v1.23.15）：赢了炫决策、
+#   输了吐槽庄家运气好（带庄家简称）；prompt 只喂动作序列与输赢，绝不含 EV 数值；
+#   平台无 AI/失败静默跳过，不阻塞结算
 #   player_draw 且轮到我方（已报名、未出局）：
 #     庄家已爆（total>10.5 实锤；bust 字段轮询时不可见，v1.23.13）→ 停牌即赢
 #     庄家点数可见 → 点质量分布进 EV；庄家 5 张 → 画像 EV 递推 + 首手认输门控
@@ -760,6 +763,78 @@ async def _safe_notify_table(ctx: object, header: list, rows: list, **kwargs: ob
         ctx.log.warning("十点半通知发送失败（渠道暂不可用）: %r", e)
 
 
+def _dealer_short_name(display_name: str) -> str:
+    """庄家展示名简称（AI 吐槽用）：去空白，多于 2 字符取前 2——
+    「麦克格雷涛」→「麦克」、「南凝 徐」→「南凝」、短名原样。"""
+    name = str(display_name or "").replace(" ", "").strip()
+    return name[:2] or "庄家"
+
+
+def _action_sequence_text(steps: list[list[object]]) -> str:
+    """决策轨迹转自然动作序列（只要动作与点数，不掺 EV 数值，供 AI prompt）。"""
+    parts = []
+    for total, _hand, action, *_rest in steps:
+        label = _ACTION_LABELS.get(str(action), str(action))
+        parts.append(f"{label} {total:g}点")
+    return " → ".join(parts) or "观望"
+
+
+def _ai_commentary_prompt(
+    dealer_short: str, delta: int, result_text: str, steps: list[list[object]]
+) -> tuple[str, str]:
+    """构造心路历程 AI 的 (system, prompt)（v1.23.15）。
+
+    只给动作过程与输赢结果，不暴露 EV/算法细节；赢了炫决策、输了吐槽
+    庄家运气好并带出庄家简称，群聊口吻。"""
+    seq = _action_sequence_text(steps)
+    if delta > 0:
+        tone = "本局我赢了，请得意地炫耀一下自己的决策（比如忍住没贪、跑得快），别谦虚"
+    elif delta < 0:
+        tone = f"本局我输了，请吐槽一下没办法、对手庄家{dealer_short}运气太好，认命但不服气"
+    else:
+        tone = "本局不亏不赚，轻松调侃一句就好"
+    system = (
+        "你是十点半纸牌游戏玩家的社交嘴替，用中文群聊口吻说话，1～2 句话、40 字以内，"
+        "可以带一两个 emoji。绝对不要暴露任何数据分析或计算过程，也不要说胜率、算法、"
+        "机器人这些词，更不要报具体数字，像个普通玩家一样说话。"
+    )
+    prompt = (
+        f"本局我先后做了这样的决定：{seq}。庄家是「{dealer_short}」，"
+        f"本局结果：{result_text or '无'}。{tone}。直接输出要说的话，不要解释。"
+    )
+    return system, prompt
+
+
+async def _ai_commentary(
+    ctx: object,
+    cfg: dict,
+    rid: object,
+    dealer_name: str,
+    delta: int,
+    result_text: str,
+    steps: list[list[object]],
+) -> None:
+    """结算后用平台 AI 在群聊总结本局拿牌/停牌/认输的心路历程（v1.23.15）。
+
+    赢了炫耀决策好、输了吐槽庄家运气好（带庄家简称），不涉及 EV 数值；
+    平台未接入 AI / 开关关闭 / 调用失败都只记日志，绝不阻塞结算主流程。"""
+    if not cfg.get("tenhalf_ai_comment", True) or not steps:
+        return
+    ai = getattr(ctx, "ai", None)
+    if ai is None or not callable(getattr(ai, "chat", None)):
+        ctx.log.debug("十点半 AI 心路历程跳过：平台未提供 ctx.ai.chat")
+        return
+    try:
+        system, prompt = _ai_commentary_prompt(_dealer_short_name(dealer_name), delta, result_text, steps)
+        text = str(await ai.chat(prompt, system=system, temperature=0.9) or "").strip()
+        if not text:
+            return
+        await _safe_notify(ctx, f"🗣 十点半心路历程：{text}", category="十点半")
+        ctx.log.info("十点半 #%s AI 心路历程已推送", rid)
+    except Exception as e:
+        ctx.log.warning("十点半 AI 心路历程失败（跳过）: %r", e)
+
+
 async def _settle_round(ctx: object, cfg: dict, rid: object, settlement: dict) -> None:
     """入账一局结算：记庄家画像；我方参局才入账战绩并推送（输赢统一 success）。"""
     dealer_cards, observed_key = _pop_dealer_obs(ctx, rid)
@@ -796,6 +871,8 @@ async def _settle_round(ctx: object, cfg: dict, rid: object, settlement: dict) -
     caption = f"🎲 十点半 #{rid} 结算 {'+' if delta >= 0 else ''}{delta:,} 银元"
     # 输赢都走 success：正常结算不算异常，不用 warning 刷屏
     await _safe_notify_table(ctx, ["项目", "内容"], rows, caption=caption, level="success", category="十点半")
+    # AI 心路历程（v1.23.15）：本局有决策轨迹才总结，赢/输/平各自口吻，不涉及 EV
+    await _ai_commentary(ctx, cfg, rid, dealer_name, delta, str(me.get("resultText") or ""), steps)
 
 
 async def _handle_settlement(ctx: object, cfg: dict, game: dict) -> None:
