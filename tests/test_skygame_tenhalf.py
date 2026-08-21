@@ -13,10 +13,13 @@ import json
 import pytest
 
 from plugins.skyGame.games.tenhalf import (
+    _action_sequence_text,
+    _ai_commentary_prompt,
     _bust_prob,
     _catch_up_settlement,
     _dealer_dist,
     _dealer_profile_text,
+    _dealer_short_name,
     _decide,
     _decide_ev,
     _decide_text,
@@ -28,6 +31,7 @@ from plugins.skyGame.games.tenhalf import (
     _pop_dealer_obs,
     _pop_decision_log,
     _record_dealer,
+    _record_decision,
     _stand_ev,
     _threshold_for,
     start,
@@ -117,6 +121,7 @@ class _FakeCtx:
     def __init__(self) -> None:
         self.kv = _FakeKV()
         self.log = _FakeLog()
+        self.ai = None
         self.notifications: list[tuple[object, str]] = []
         self.tables: list[tuple[list[str], list[list[object]], dict[str, object]]] = []
         self.schedules: list[tuple[object, str, dict[str, object]]] = []
@@ -137,6 +142,21 @@ class _FakeCtx:
         self.tables.append((list(headers), [list(row) for row in rows], dict(kwargs)))
         table = ("table", list(headers), [list(row) for row in rows])
         self.notifications.append((table, str(kwargs.get("level", "info"))))
+
+
+class _FakeAI:
+    """平台 ctx.ai 桩：记录 prompt/system，返回固定回复；可配置抛异常。"""
+
+    def __init__(self, reply: str = "还好我稳住了！", fail: Exception | None = None) -> None:
+        self.reply = reply
+        self.fail = fail
+        self.calls: list[tuple[str, str | None, float | None]] = []
+
+    async def chat(self, prompt: str, system: str | None = None, temperature: float = 0.9) -> str:
+        self.calls.append((prompt, system, temperature))
+        if self.fail is not None:
+            raise self.fail
+        return self.reply
 
 
 class _FakeClient:
@@ -478,6 +498,87 @@ async def test_settlement_pairs_observed_card_count() -> None:
     entry = json.loads(str(ctx.kv.get("tenhalf:dealers")))["麦克格雷涛"]
     assert entry["cards"]["3"]["busts"] == 1  # 11点>10.5 计爆
     assert json.loads(str(ctx.kv.get("tenhalf:dealer_cards"))) == {}
+
+
+# ── AI 心路历程（v1.23.15）──
+
+
+def test_dealer_short_name_abbrev() -> None:
+    """庄家简称：去空白取前 2 字；短名原样。"""
+    assert _dealer_short_name("麦克格雷涛") == "麦克"
+    assert _dealer_short_name("南凝 徐") == "南凝"
+    assert _dealer_short_name("飞亦") == "飞亦"
+    assert _dealer_short_name(" ") == "庄家"
+
+
+def test_action_sequence_and_ai_prompt_no_ev() -> None:
+    """动作序列只含动作与点数；prompt/system 不允许出现 EV 相关词，输赢口吻分开。"""
+    steps = [[0.0, "", "hit", -0.60, None, None], [3.0, "A♥ 2♣", "stand", None, None, None]]
+    assert _action_sequence_text(steps) == "要牌 0点 → 停牌 3点"
+    for delta in (198, -100, 0):
+        system, prompt = _ai_commentary_prompt("麦克", delta, "胜", steps)
+        assert "ev" not in system.lower() and "ev" not in prompt.lower()  # 绝不漏 EV
+        assert "概率" not in system and "期望" not in system
+        assert "麦" in prompt or "麦克" in prompt  # 庄家简称已带入
+    assert "炫耀" in _ai_commentary_prompt("麦克", 198, "胜", steps)[1]
+    assert "运气太好" in _ai_commentary_prompt("麦克", -100, "负", steps)[1]
+    assert "调侃" in _ai_commentary_prompt("麦克", 0, "和", steps)[1]
+
+
+@pytest.mark.asyncio
+async def test_settle_ai_commentary_pushes_win_and_loss_tones() -> None:
+    """结算后有决策轨迹：AI 生成心路历程入群聊；输赢口吻不同，prompt 无 EV。"""
+    # 赢局：炫耀决策
+    ctx = _FakeCtx()
+    ai = _FakeAI(reply="还好我稳住了没贪！")
+    ctx.ai = ai
+    _record_decision(ctx, 777, 9.0, ["6♣", "3♣"], "stand", None, None, None)
+    settled = _game(active=False, last_result=_last_result(rid=777, delta=198, dealer_label="8.5点"))
+    await _once(ctx, {}, _FakeClient(settled, _OK))
+    assert ai.calls and "炫耀" in ai.calls[0][0] and "麦" in ai.calls[0][0]
+    assert any("心路历程" in str(msg) and "还好我稳住了没贪！" in str(msg) for msg, _ in ctx.notifications)
+    # 输局：吐槽庄家运气好（推荐正常 default cfg 也走 AI）
+    ctx = _FakeCtx()
+    ai = _FakeAI(reply="没办法，他运气太好了")
+    ctx.ai = ai
+    _record_decision(ctx, 778, 1.5, [], "hit", None, None, None)
+    _record_decision(ctx, 778, 5.0, [], "stand", None, None, None)
+    settled = _game(active=False, last_result=_last_result(rid=778, delta=-100, dealer_label="10点"))
+    await _once(ctx, {}, _FakeClient(settled, _OK))
+    assert ai.calls and "运气太好" in ai.calls[0][0]
+    assert any("没办法" in str(msg) for msg, _ in ctx.notifications)
+
+
+@pytest.mark.asyncio
+async def test_ai_commentary_skips_without_ai_or_disabled() -> None:
+    """平台无 AI、开关关闭 → 不调 AI、不推心路历程，结算照常。"""
+    ctx = _FakeCtx()  # ctx.ai 为 None
+    _record_decision(ctx, 777, 9.0, ["6♣", "3♣"], "stand", None, None, None)
+    await _once(ctx, {}, _FakeClient(_game(active=False, last_result=_last_result(rid=777, delta=198)), _OK))
+    assert not any("心路历程" in str(msg) for msg, _ in ctx.notifications)
+    assert any("十点半" in str(kw) for _, _, kw in ctx.tables)  # 结算表格正常推送
+    ctx = _FakeCtx()
+    ai = _FakeAI()
+    ctx.ai = ai
+    _record_decision(ctx, 777, 9.0, ["6♣", "3♣"], "stand", None, None, None)
+    await _once(
+        ctx,
+        {"tenhalf_ai_comment": False},
+        _FakeClient(_game(active=False, last_result=_last_result(rid=777, delta=198)), _OK),
+    )
+    assert not ai.calls
+
+
+@pytest.mark.asyncio
+async def test_ai_commentary_failure_does_not_block_settlement() -> None:
+    """AI 调用抛异常 → 静默跳过，结算表格照常推送。"""
+    ctx = _FakeCtx()
+    ctx.ai = _FakeAI(fail=RuntimeError("ai down"))
+    _record_decision(ctx, 777, 9.0, ["6♣", "3♣"], "stand", None, None, None)
+    await _once(ctx, {}, _FakeClient(_game(active=False, last_result=_last_result(rid=777, delta=198)), _OK))
+    assert any("十点半" in str(kw) for _, _, kw in ctx.tables)  # 主流程不受影响
+    assert not any("心路历程" in str(msg) for msg, _ in ctx.notifications)
+    assert any("AI 心路历程失败" in msg for _, msg in ctx.log.records)
 
 
 # ── 报名阶段 ──
