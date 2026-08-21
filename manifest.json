@@ -1,58 +1,58 @@
 {
-  "battleroyale": {
-    "name": "大逃杀助手",
-    "version": "1.0.2",
-    "author": "Yy",
-    "description": "监听 @NextFunBot 大逃杀游戏，自动跟踪投票统计、每圈结算通知、自动下注（以少胜多规则）。",
-    "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/battleroyale.svg",
-    "path": "plugins/battleroyale/"
-  },
-  "skyRedPacket": {
-    "name": "天空红包",
-    "version": "2.5.3",
-    "author": "Yy",
-    "description": "天空小秘（bot 8907007783）拼手气红包自动抢：先抢再重试，被拒后从回调解析等待时间自动重试。",
-    "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/skyRedPacket.svg",
-    "path": "plugins/skyRedPacket/"
-  },
-  "learning": {
-    "name": "智能学习",
-    "version": "3.1.1",
-    "author": "Yy",
-    "description": "学习你的聊天偏好和说话风格，在匹配关键词的群聊中智能参与对话。冷启动：未学到偏好前不参与。",
-    "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/learning.svg",
-    "path": "plugins/learning/"
-  },
-  "scratch": {
-    "name": "天空刮奖",
-    "version": "1.6.2",
-    "author": "Yy",
-    "description": "散财童子刮刮乐自动挂机。回调文本直接累加奖金（无需等消息编辑），双重试，filter 层 Bot+回复过滤。",
-    "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/scratch.svg",
-    "path": "plugins/scratch.py"
-  },
-  "skyDropAnswer": {
-    "name": "天空答题",
-    "version": "2.1.5",
-    "author": "Yy",
-    "description": "天空答题奖励 + 开启时段内定时触发：模板管理/AI答题/自动触发掉落一体化（合并原 skyDropTrigger）。",
-    "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/skyDropAnswer.svg",
-    "path": "plugins/skyDropAnswer/"
-  },
-  "skyGame": {
-    "name": "天空游戏",
-    "version": "1.23.16",
-    "author": "Yy",
-    "description": "天空系列游戏统一入口：炸金花自动参与（Terminal EV 多人决策树 + 对手画像）、养马自动养护、十点半自动参与、门户 Cookie 自动续期、掉落配额守卫、幸运轮盘免费抽奖，Vue 左侧按游戏分组配置。",
-    "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/skyGame.svg",
-    "path": "plugins/skyGame/"
-  },
-  "juai_checkin": {
-    "name": "JUAI 自动签到",
-    "version": "1.4.2",
-    "author": "Yy",
-    "description": "每日自动签到 juai 平台（多账号）：浏览器过 recaptcha 登录并缓存 30 天 session，签到仍走 REST。",
-    "icon": "https://www.juaiapi.com/favicon.png",
-    "path": "plugins/juai_checkin.py"
-  }
+    "battleroyale": {
+        "name": "大逃杀助手",
+        "version": "1.0.2",
+        "author": "Yy",
+        "description": "监听 @NextFunBot 大逃杀游戏，自动跟踪投票统计、每圈结算通知、自动下注（以少胜多规则）。",
+        "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/battleroyale.svg",
+        "path": "plugins/battleroyale/"
+    },
+    "skyRedPacket": {
+        "name": "天空红包",
+        "version": "2.5.3",
+        "author": "Yy",
+        "description": "天空小秘（bot 8907007783）拼手气红包自动抢：先抢再重试，被拒后从回调解析等待时间自动重试。",
+        "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/skyRedPacket.svg",
+        "path": "plugins/skyRedPacket/"
+    },
+    "learning": {
+        "name": "智能学习",
+        "version": "3.1.1",
+        "author": "Yy",
+        "description": "学习你的聊天偏好和说话风格，在匹配关键词的群聊中智能参与对话。冷启动：未学到偏好前不参与。",
+        "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/learning.svg",
+        "path": "plugins/learning/"
+    },
+    "scratch": {
+        "name": "天空刮奖",
+        "version": "1.6.2",
+        "author": "Yy",
+        "description": "散财童子刮刮乐自动挂机。回调文本直接累加奖金（无需等消息编辑），双重试，filter 层 Bot+回复过滤。",
+        "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/scratch.svg",
+        "path": "plugins/scratch.py"
+    },
+    "skyDropAnswer": {
+        "name": "天空答题",
+        "version": "2.1.5",
+        "author": "Yy",
+        "description": "天空答题奖励 + 开启时段内定时触发：模板管理/AI答题/自动触发掉落一体化（合并原 skyDropTrigger）。",
+        "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/skyDropAnswer.svg",
+        "path": "plugins/skyDropAnswer/"
+    },
+    "skyGame": {
+        "name": "天空游戏",
+        "version": "1.23.17",
+        "author": "Yy",
+        "description": "天空系列游戏统一入口：炸金花自动参与（Terminal EV 多人决策树 + 对手画像）、养马自动养护、十点半自动参与、门户 Cookie 自动续期、掉落配额守卫、幸运轮盘免费抽奖，Vue 左侧按游戏分组配置。",
+        "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/skyGame.svg",
+        "path": "plugins/skyGame/"
+    },
+    "juai_checkin": {
+        "name": "JUAI 自动签到",
+        "version": "1.4.2",
+        "author": "Yy",
+        "description": "每日自动签到 juai 平台（多账号）：浏览器过 recaptcha 登录并缓存 30 天 session，签到仍走 REST。",
+        "icon": "https://www.juaiapi.com/favicon.png",
+        "path": "plugins/juai_checkin.py"
+    }
 }

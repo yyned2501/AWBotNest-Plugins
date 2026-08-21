@@ -9,6 +9,11 @@ const props = defineProps({
   host: { type: Object, required: true },
 })
 
+// AI 评价默认提示词模板（与后端 games/ai_review.py DEFAULT_TEMPLATE 同一文案）；
+// 「恢复默认模板」按钮与 DEFAULTS 都从这里取，改坏了随时一键还原
+const DEFAULT_AI_REVIEW_PROMPT =
+  '本局我先后做了这样的决定：{actions}。对手是「{opponent}」，本局结果：{result}。{tone}。直接输出要说的话，不要解释。'
+
 const DEFAULTS = {
   // 全局设置
   target_groups: '-1001326208894',
@@ -74,7 +79,7 @@ const DEFAULTS = {
   ai_review_enabled: true,
   ai_review_games: ['tenhalf'],
   ai_review_groups: '',
-  ai_review_prompt: '',
+  ai_review_prompt: DEFAULT_AI_REVIEW_PROMPT,
 }
 
 // 草料选项（与后端 config_schema 一致）
@@ -645,13 +650,16 @@ async function renewNow() {
           </section>
 
           <section class="card">
-            <div class="card-h">提示词模板（可选）</div>
+            <div class="card-h">提示词模板</div>
             <div class="fld">
               <textarea v-model="cfg.ai_review_prompt" class="inp" rows="4" spellcheck="false"></textarea>
               <span class="help">
-                占位符：{'{game}'} 游戏名、{'{actions}'} 动作序列、{'{opponent}'} 对手简称、
-                {'{result}'} 结果文本、{'{tone}'} 语气指令（按输赢自动生成）；留空=内置默认模板
+                已预填内置默认模板，可自由修改；占位符：{'{game}'} 游戏名、{'{actions}'} 动作序列、
+                {'{opponent}'} 对手简称、{'{result}'} 结果文本、{'{tone}'} 语气指令（按输赢自动生成）；留空也等价于默认模板
               </span>
+              <div class="row" style="justify-content:flex-end">
+                <button class="btn" @click="cfg.ai_review_prompt = DEFAULT_AI_REVIEW_PROMPT">恢复默认模板</button>
+              </div>
             </div>
           </section>
 
