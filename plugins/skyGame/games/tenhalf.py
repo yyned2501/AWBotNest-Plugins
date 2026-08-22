@@ -42,6 +42,9 @@
 # （结算只有点数没有张数，张数靠轮询观察 players[].cardCount 按 roundId 暂存配对）。
 # 停牌阈值优先用「当前庄家张数」对应分桶（样本≥3），其次聚合画像（样本≥8）——
 # 平局算输，目标需压过庄家均点；庄家爆率高则低点数即可停牌（赌庄家爆）。
+# 点数分布用全量计数归档（v1.23.20，每档点数一个计数，体积恒定）：修复旧版
+# 「最近 60 条样本窗口 vs 全量局数」导致明细与总局数对不上；无牌面详情的局计
+# 「未详」，展示恒等：局数 = 爆数 + Σ点数 + 未详。
 # v1.20.0 起画像阈值夹在 4～6.5（爆牌红线）：追庄家均点到 7+ 的爆牌代价
 # （>50% 爆率 × 倍数惩罚）大于压点收益，早停赌庄家自爆期望更优。
 #
@@ -86,7 +89,9 @@ _ACTION_LABELS = {"hit": "要牌", "stand": "停牌", "fold": "认输"}
 # 庄家画像样本门槛：不足不采信，退阈值/配置逻辑（按张数桶样本更稀，门槛放低）
 _MIN_DEALER_SAMPLES = 8
 _MIN_CARD_SAMPLES = 3
-_DEALER_TOTALS_CAP = 60
+# v1.23.20：点数样本由「最近 60 条滑动窗口」改为全量计数（counts）——旧窗口与
+# rounds 全量累计口径不一致（线上实例「144 局 vs 明细 60」）；旧 totals 数据在
+# 画像下次写入时自动迁移为 counts（见 _counts_of）
 # 五小（5 张不爆）直接赢，倍数 ×5（2026-08-18 实测坐实）；EV 递推的收益项
 _FIVE_SMALL_MULT = 5.0
 # 赢 1 单位下注的净收益 0.99（扣 1% 抽水，与线上「赢 +99」口径一致）
@@ -323,7 +328,10 @@ def _dealer_lookup(dealers: dict, name: str, dealer_key: str) -> dict:
 
 
 def _global_dealer_entry(dealers: dict, dealer_key: str, name: str) -> dict:
-    """其余所有庄家的画像合计（排除本人），样本不足的新庄家用它代表（v1.23.10）。"""
+    """其余所有庄家的画像合计（排除本人），样本不足的新庄家用它代表（v1.23.10）。
+
+    v1.23.20：点数计数按 counts 全量合并（旧 totals 数据经 _holder_counts 动态转换）。
+    """
     merged: dict = {}
     skip = dealer_key or name
     for key, entry in dealers.items():
@@ -331,18 +339,54 @@ def _global_dealer_entry(dealers: dict, dealer_key: str, name: str) -> dict:
             continue  # 排除本人（稳定 id 键 / displayName 键 / 展示名）
         merged["rounds"] = int(merged.get("rounds", 0) or 0) + int(entry.get("rounds", 0) or 0)
         merged["busts"] = int(merged.get("busts", 0) or 0) + int(entry.get("busts", 0) or 0)
-        totals = list(merged.get("totals") or []) + list(entry.get("totals") or [])
-        merged["totals"] = totals[-_DEALER_TOTALS_CAP * 2 :]
+        merged["counts"] = _merge_counts(merged.get("counts"), _holder_counts(entry))
         cards = dict(merged.get("cards") or {})
         for n, bucket in (entry.get("cards") or {}).items():
             b = dict(cards.get(n) or {})
             b["rounds"] = int(b.get("rounds", 0) or 0) + int(bucket.get("rounds", 0) or 0)
             b["busts"] = int(b.get("busts", 0) or 0) + int(bucket.get("busts", 0) or 0)
-            bt = list(b.get("totals") or []) + list(bucket.get("totals") or [])
-            b["totals"] = bt[-_DEALER_TOTALS_CAP * 2 :]
+            b["counts"] = _merge_counts(b.get("counts"), _holder_counts(bucket))
             cards[n] = b
         merged["cards"] = cards
     return merged
+
+
+def _counts_of(holder: dict, exclude_current: int = 0) -> dict:
+    """旧版 totals 样本列表 → 全量点数计数（v1.23.20）。
+
+    旧格式点数样本只留最近 _DEALER_TOTALS_CAP 条（滑动窗口）而 rounds 全量累计，
+    明细与总局数对不上（线上实例「144 局 vs 明细 60」）；迁移成按点数归档的全量
+    计数（0.5～10.5 共 21 档，体积恒定无需裁剪），并把窗口裁掉/缺失牌面详情的
+    局补计 unseen（rounds = busts + Σcounts + unseen 恒等）。超点脏样本仍留在
+    计数里，读取端（_dealer_effective）按 >10.5 归位 busts。
+    exclude_current：调用方已把当前局计入 rounds 时传 1，gap 只反映旧数据缺口。"""
+    counts: dict = {}
+    for v in holder.get("totals") or []:
+        try:
+            t = float(v)
+        except (TypeError, ValueError):
+            continue  # 脏样本不计（与旧 _dealer_effective 清洗一致）
+        key = f"{t:g}"
+        counts[key] = int(counts.get(key, 0) or 0) + 1
+    gap = int(holder.get("rounds", 0) or 0) - exclude_current - int(holder.get("busts", 0) or 0)
+    gap -= sum(int(c) for c in counts.values())
+    if gap > 0:
+        counts["unseen"] = int(counts.get("unseen", 0) or 0) + gap
+    return counts
+
+
+def _holder_counts(holder: dict) -> dict:
+    """画像/分桶的点数计数：新格式直接取 counts，旧格式（totals 列表）动态转换。"""
+    counts = holder.get("counts")
+    return counts if isinstance(counts, dict) else _counts_of(holder)
+
+
+def _merge_counts(a: dict, b: dict) -> dict:
+    """两个点数计数 dict 求和（unseen 一并合并）。"""
+    out = dict(a or {})
+    for k, c in (b or {}).items():
+        out[k] = int(out.get(k, 0) or 0) + int(c or 0)
+    return out
 
 
 def _five_bust_prob(dealers: dict, name: str, dealer_key: str) -> float | None:
@@ -516,10 +560,12 @@ def _dealer_key_of(dealer_p: dict | None) -> str:
 
 
 def _record_dealer(ctx: object, settlement: dict, cards: int | None = None, dealer_key: str = "") -> str:
-    """累计一条庄家结算（局数/爆牌数/近期点数样本），返回画像主键。
+    """累计一条庄家结算（局数/爆牌数/点数计数），返回画像主键。
 
     爆牌判定：文案含「爆」或点数 > 10.5（实测爆牌局的 handLabel 常不含「爆」字、
-    直接显示超点点数，如「11点」），爆牌不入点数样本。
+    直接显示超点点数，如「11点」），爆牌不入点数计数。结算囊不到牌面（无点数且
+    非爆）的局只计局数、计入 counts 的 unseen，保证「局数 = 爆数 + Σ点数 + 未详」
+    恒等（v1.23.20）。
 
     传入 cards（本局庄家终局手牌张数）时，同步计入按张数分桶的画像。
     传入 dealer_key（稳定 id）时以 id 为主键、displayName 仅作展示名（改名自动归并）；
@@ -536,22 +582,34 @@ def _record_dealer(ctx: object, settlement: dict, cards: int | None = None, deal
     entry = dealers.get(key) or {}
     entry["name"] = name
     entry["rounds"] = int(entry.get("rounds", 0) or 0) + 1
+    if "counts" not in entry:  # 旧 totals 列表一次性迁移为全量计数（v1.23.20）
+        entry["counts"] = _counts_of(entry, exclude_current=1)  # rounds 已含当前局，gap 需扣除
+        entry.pop("totals", None)
+    counts: dict = entry["counts"]
     if bust:
         entry["busts"] = int(entry.get("busts", 0) or 0) + 1
     elif total is not None:
-        totals = list(entry.get("totals") or [])
-        totals.append(total)
-        entry["totals"] = totals[-_DEALER_TOTALS_CAP:]
+        pkey = f"{total:g}"
+        counts[pkey] = int(counts.get(pkey, 0) or 0) + 1
+    else:
+        counts["unseen"] = int(counts.get("unseen", 0) or 0) + 1
+    entry["counts"] = counts
     if isinstance(cards, int) and cards > 0:
         cards_map = dict(entry.get("cards") or {})
         bucket = dict(cards_map.get(str(cards)) or {})
         bucket["rounds"] = int(bucket.get("rounds", 0) or 0) + 1
+        if "counts" not in bucket:
+            bucket["counts"] = _counts_of(bucket, exclude_current=1)
+            bucket.pop("totals", None)
+        bcounts: dict = bucket["counts"]
         if bust:
             bucket["busts"] = int(bucket.get("busts", 0) or 0) + 1
         elif total is not None:
-            bt = list(bucket.get("totals") or [])
-            bt.append(total)
-            bucket["totals"] = bt[-_DEALER_TOTALS_CAP:]
+            pkey = f"{total:g}"
+            bcounts[pkey] = int(bcounts.get(pkey, 0) or 0) + 1
+        else:
+            bcounts["unseen"] = int(bcounts.get("unseen", 0) or 0) + 1
+        bucket["counts"] = bcounts
         cards_map[str(cards)] = bucket
         entry["cards"] = cards_map
     dealers[key] = entry
@@ -601,21 +659,37 @@ def _pop_dealer_obs(ctx: object, rid: object) -> tuple[int | None, str | None]:
 def _dealer_effective(entry: dict) -> tuple[int, int, list[float]]:
     """清洗后的庄家统计 (局数, 爆牌数, 点数样本)。
 
-    兼容旧版写入的脏数据：点数 > 10.5 的样本必是爆牌（当时爆牌局被误当高点点数），
-    读出时改计爆牌并从均点样本剔除，避免均点虚高把阈值顶到上限。
+    counts 全量计数（v1.23.20）：unseen 计局不计点；爆点计数（旧版超点脏数据
+    迁移而来）读出时归位 busts，避免均点虚高把阈值顶到上限。兼容旧版 totals
+    列表：点数 > 10.5 的样本必是爆牌（当时爆牌局被误当高点点数），同口径清洗。
     """
     rounds = int(entry.get("rounds", 0) or 0)
     busts = int(entry.get("busts", 0) or 0)
     totals: list[float] = []
-    for v in entry.get("totals") or []:
-        try:
-            t = float(v)
-        except (TypeError, ValueError):
-            continue
-        if t > _TARGET:
-            busts += 1
-        else:
-            totals.append(t)
+    counts = entry.get("counts")
+    if isinstance(counts, dict):
+        for raw, c in counts.items():
+            if raw == "unseen":
+                continue
+            try:
+                t = float(raw)
+            except (TypeError, ValueError):
+                continue
+            n = int(c) if isinstance(c, (int, float)) and not isinstance(c, bool) else 0
+            if t > _TARGET:
+                busts += n
+            else:
+                totals.extend([t] * n)
+    else:
+        for v in entry.get("totals") or []:
+            try:
+                t = float(v)
+            except (TypeError, ValueError):
+                continue
+            if t > _TARGET:
+                busts += 1
+            else:
+                totals.append(t)
     return rounds, busts, totals
 
 
@@ -685,19 +759,25 @@ def _profile_core(rounds: int, busts: int, totals: list[float]) -> str:
     return "·".join(parts)
 
 
-def _points_dist_text(busts: int, totals: list[float]) -> str:
-    """逐点数出现次数分布：7点×2/7.5点×1/8点×2…/爆×3（从低到高，×1 省略）。"""
+def _points_dist_text(busts: int, totals: list[float], unseen: int = 0) -> str:
+    """逐点数出现次数分布：7点×2/7.5点×1/8点×2…/爆×3/未详×2（从低到高，×1 省略）。
+
+    unseen（v1.23.20）：结算没抓到牌面/旧窗口裁掉的局，只计局数不计点，补齐
+    「局数 = 爆数 + Σ点数 + 未详」的恒等展示。"""
     counts: dict[float, int] = {}
     for t in totals:
         counts[t] = counts.get(t, 0) + 1
     items = [f"{p:g}点×{c}" if c > 1 else f"{p:g}点" for p, c in sorted(counts.items())]
     if busts:
         items.append(f"爆×{busts}")
+    if unseen:
+        items.append(f"未详×{unseen}")
     return "/".join(items)
 
 
 def _profile_text_for(entry: dict, cards: int | None) -> str:
-    """画像展示文本：只展示当前手牌张数分桶（点数分布+爆数，v1.23.10）；桶无样本退聚合画像。"""
+    """画像展示文本：只展示当前手牌张数分桶（点数分布+爆数+未详，v1.23.10/v1.23.20）；
+    桶无样本退聚合画像。"""
     rounds, busts, totals = _dealer_effective(entry)
     if not rounds:
         return ""
@@ -705,7 +785,8 @@ def _profile_text_for(entry: dict, cards: int | None) -> str:
         bucket = (entry.get("cards") or {}).get(str(cards)) or {}
         br, bb, bt = _dealer_effective(bucket)
         if br:
-            return f"{cards}张 {br}局：{_points_dist_text(bb, bt)}"
+            bu = int(_holder_counts(bucket).get("unseen", 0) or 0)
+            return f"{cards}张 {br}局：{_points_dist_text(bb, bt, bu)}"
     return _profile_core(rounds, busts, totals)
 
 

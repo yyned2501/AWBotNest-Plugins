@@ -16,17 +16,20 @@ from plugins.skyGame.games.tenhalf import (
     _bust_prob,
     _catch_up_settlement,
     _dealer_dist,
+    _dealer_effective,
     _dealer_profile_text,
     _decide,
     _decide_ev,
     _decide_text,
     _ev_play,
+    _global_dealer_entry,
     _join_amount,
     _observe_dealer,
     _once,
     _points_dist_text,
     _pop_dealer_obs,
     _pop_decision_log,
+    _profile_text_for,
     _record_dealer,
     _record_decision,
     _stand_ev,
@@ -273,7 +276,68 @@ def test_record_dealer_counts_over_target_as_bust() -> None:
     _record_dealer(ctx, {"dealerDisplayName": "涛", "dealerHandLabel": "爆牌"})
     _record_dealer(ctx, {"dealerDisplayName": "涛", "dealerHandLabel": "8.5点"})
     dealers = json.loads(str(ctx.kv.get("tenhalf:dealers")))
-    assert dealers["涛"] == {"name": "涛", "rounds": 3, "busts": 2, "totals": [8.5]}
+    assert dealers["涛"] == {"name": "涛", "rounds": 3, "busts": 2, "counts": {"8.5": 1}}
+
+
+def test_record_dealer_missing_label_counts_unseen() -> None:
+    """结算囊不到牌面（无点数且非爆）：只计局数，计入未详，明细与总局数恒等。"""
+    ctx = _FakeCtx()
+    _record_dealer(ctx, {"dealerDisplayName": "涛", "dealerHandLabel": "8点"})
+    _record_dealer(ctx, {"dealerDisplayName": "涛", "dealerHandLabel": ""})
+    dealers = json.loads(str(ctx.kv.get("tenhalf:dealers")))
+    entry = dealers["涛"]
+    assert entry["rounds"] == 2 and entry["counts"]["8"] == 1 and entry["counts"]["unseen"] == 1
+    r, b, t = _dealer_effective(entry)
+    assert r == b + len(t) + int(entry["counts"]["unseen"])
+
+
+def test_record_dealer_cap_window_lost_regression() -> None:
+    """v1.23.20 回归：旧版样本窗口（最近 60 条）裁剪导致明细与总局数对不上
+    （线上实例 144 局 vs 明细 60）；全量计数后总局数 = 爆数 + Σ计数 恒等，无裁剪。"""
+    ctx = _FakeCtx()
+    for _ in range(80):
+        _record_dealer(ctx, {"dealerDisplayName": "涛", "dealerHandLabel": "8点"})
+    for _ in range(40):
+        _record_dealer(ctx, {"dealerDisplayName": "涛", "dealerHandLabel": "11点"})
+    entry = json.loads(str(ctx.kv.get("tenhalf:dealers")))["涛"]
+    assert entry["rounds"] == 120 and entry["busts"] == 40
+    assert entry["counts"]["8"] == 80  # 第 61 条以后不再被窗口裁掉
+    r, b, t = _dealer_effective(entry)
+    assert r == 120 and b == 40 and len(t) == 80
+
+
+def test_record_dealer_migrates_legacy_totals_with_gap() -> None:
+    """老数据（totals 只留 60 条、rounds 144）写入时自动迁移：缺口补未详84，
+    之后明细与总局数恒等（线上「1张 144局 vs 明细 60」场景）。"""
+    ctx = _FakeCtx()
+    legacy = {"name": "涛", "rounds": 144, "totals": [7.0] * 12 + [8.0] * 17 + [9.0] * 14 + [10.0] * 17}
+    ctx.kv.set("tenhalf:dealers", json.dumps({"涛": legacy}, ensure_ascii=False))
+    _record_dealer(ctx, {"dealerDisplayName": "涛", "dealerHandLabel": "8点"})
+    entry = json.loads(str(ctx.kv.get("tenhalf:dealers")))["涛"]
+    assert entry["rounds"] == 145
+    assert "totals" not in entry  # 迁移后不再保留旧窗口列表
+    assert entry["counts"]["7"] == 12 and entry["counts"]["8"] == 18 and entry["counts"]["9"] == 14
+    assert entry["counts"]["10"] == 17 and entry["counts"]["unseen"] == 84
+    r, b, t = _dealer_effective(entry)
+    assert r == b + len(t) + int(entry["counts"]["unseen"])
+    assert _profile_text_for(entry, None) == "145局·均 8.6 点"  # 全量样本均点（含迁移补齐）
+
+
+def test_global_dealer_entry_merges_counts() -> None:
+    """全局画像合并（v1.23.20）：counts 全量求和，unseen 一并合并；旧 totals 动态转换。"""
+    dealers = {
+        "甲": {
+            "rounds": 10,
+            "busts": 2,
+            "totals": [8.0] * 8,
+            "cards": {"4": {"rounds": 3, "busts": 1, "totals": [9.0] * 2}},
+        },
+        "乙": {"rounds": 5, "counts": {"7.5": 2, "unseen": 1}},
+    }
+    merged = _global_dealer_entry(dealers, "", "丙")
+    assert merged["rounds"] == 15 and merged["busts"] == 2
+    assert merged["counts"] == {"8": 8, "7.5": 2, "unseen": 1}
+    assert merged["cards"]["4"]["counts"] == {"9": 2}
 
 
 def test_record_dealer_keys_by_stable_id() -> None:
@@ -286,7 +350,7 @@ def test_record_dealer_keys_by_stable_id() -> None:
     entry = dealers["id:201"]
     assert entry["rounds"] == 2
     assert entry["name"] == "新名字"  # 展示名刷成最新
-    assert len(entry["totals"]) == 2  # 改名后的局也计入同一画像
+    assert sum(int(c) for c in entry["counts"].values()) == 2  # 改名后的局也计入同一画像
 
 
 # ── 庄家画像按手牌张数分桶 ──
@@ -300,8 +364,8 @@ def test_record_dealer_buckets_by_card_count() -> None:
     _record_dealer(ctx, {"dealerDisplayName": "涛", "dealerHandLabel": "9点"}, cards=4, dealer_key="id:9")
     entry = json.loads(str(ctx.kv.get("tenhalf:dealers")))["id:9"]
     assert entry["rounds"] == 3 and entry["busts"] == 1
-    assert entry["cards"]["3"] == {"rounds": 2, "busts": 1, "totals": [8.0]}
-    assert entry["cards"]["4"] == {"rounds": 1, "totals": [9.0]}
+    assert entry["cards"]["3"] == {"rounds": 2, "busts": 1, "counts": {"8": 1}}
+    assert entry["cards"]["4"] == {"rounds": 1, "counts": {"9": 1}}
 
 
 def test_threshold_prefers_card_bucket_then_aggregate() -> None:
@@ -335,10 +399,12 @@ def test_dealer_profile_text_shows_card_bucket_only() -> None:
 
 
 def test_points_dist_text_sorted_and_compacted() -> None:
-    """逐点数分布：从低到高、同点数合并、×1 省略、爆牌殿后、全爆只显爆。"""
+    """逐点数分布：从低到高、同点数合并、×1 省略、爆牌殿后、未详最后、全爆只显爆。"""
     assert _points_dist_text(1, [7.5, 7.0, 9.0, 7.5]) == "7点/7.5点×2/9点/爆×1"
     assert _points_dist_text(1, []) == "爆×1"
     assert _points_dist_text(0, [8.0]) == "8点"
+    assert _points_dist_text(2, [8.0], unseen=84) == "8点/爆×2/未详×84"
+    assert _points_dist_text(0, [], unseen=3) == "未详×3"
 
 
 def test_observe_and_pop_dealer_obs() -> None:
@@ -934,7 +1000,7 @@ async def test_settlement_notifies_once_and_records_stats() -> None:
     assert stats["total"] == {"rounds": 1, "net": 198, "wins": 1, "losses": 0}
     # 庄家画像入账：8.5 点一局
     dealers = json.loads(str(ctx.kv.get("tenhalf:dealers")))
-    assert dealers["麦克格雷涛"] == {"name": "麦克格雷涛", "rounds": 1, "totals": [8.5]}
+    assert dealers["麦克格雷涛"] == {"name": "麦克格雷涛", "rounds": 1, "counts": {"8.5": 1}}
 
 
 @pytest.mark.asyncio
@@ -978,7 +1044,7 @@ async def test_settlement_without_self_only_records_dealer() -> None:
 
     assert ctx.tables == [] and ctx.kv.get("tenhalf:stats") is None
     dealers = json.loads(str(ctx.kv.get("tenhalf:dealers")))
-    assert dealers["麦克格雷涛"] == {"name": "麦克格雷涛", "rounds": 1, "busts": 1}
+    assert dealers["麦克格雷涛"] == {"name": "麦克格雷涛", "rounds": 1, "busts": 1, "counts": {}}
 
 
 @pytest.mark.asyncio
