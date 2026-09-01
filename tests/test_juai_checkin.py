@@ -15,6 +15,7 @@ import httpx
 import pytest
 
 from plugins.juai_checkin import (
+    DONE_TODAY_KEY,
     HISTORY_KEY,
     LOGIN_URL,
     SESSION_KEY,
@@ -25,9 +26,13 @@ from plugins.juai_checkin import (
     _ensure_session,
     _fetch_quota_unit,
     _format_quota,
+    _load_done_emails,
     _masked_email,
     _run,
+    _save_done_emails,
+    _scheduled_tick,
     _session_alive,
+    _today_key,
 )
 
 # ─────────────────────────────────────────────────────────────
@@ -800,3 +805,161 @@ async def test_run_login_failure_isolated(monkeypatch: pytest.MonkeyPatch) -> No
     assert result["ok"] is False
     assert "登录失败" in result["accounts"][0]["message"]
     assert "reCAPTCHA token 为空" in result["accounts"][0]["message"]
+
+
+# ─────────────────────────────────────────────────────────────
+# 今日已成功账号记录 + 定时 tick 跳过/过滤行为（v1.5.0 分档重试）
+# ─────────────────────────────────────────────────────────────
+
+
+async def test_done_emails_round_trip() -> None:
+    ctx = _FakeCtx({})
+    assert _load_done_emails(ctx, "2026-09-01") == set()
+    _save_done_emails(ctx, "2026-09-01", {"A@X.com", "b@x.com"})
+    # 大小写归一后落盘（排序保证幂等，便于 diff）
+    assert ctx.kv.get(DONE_TODAY_KEY) == {"date": "2026-09-01", "emails": ["a@x.com", "b@x.com"]}
+    assert _load_done_emails(ctx, "2026-09-01") == {"a@x.com", "b@x.com"}
+    # 跨日 → 自动当空集，无需显式清理
+    assert _load_done_emails(ctx, "2026-09-02") == set()
+
+
+async def test_done_emails_handles_malformed() -> None:
+    ctx = _FakeCtx({})
+    ctx.kv.set(DONE_TODAY_KEY, "not-a-dict")
+    assert _load_done_emails(ctx, _today_key()) == set()
+    ctx.kv.set(DONE_TODAY_KEY, {"date": _today_key(), "emails": "not-a-list"})
+    assert _load_done_emails(ctx, _today_key()) == set()
+    ctx.kv.set(
+        DONE_TODAY_KEY,
+        {"date": _today_key(), "emails": ["a@x.com", 123, None, ""]},
+    )
+    assert _load_done_emails(ctx, _today_key()) == {"a@x.com"}
+
+
+async def test_run_marks_done_on_new_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    ctx = _FakeCtx({"accounts": [{"email": "a@x.com", "password": "p1"}]})
+
+    async def fake_checkin(client: Any, user_id: str, per_unit: float = 0.0, display_type: str = "") -> dict[str, Any]:
+        return {"ok": True, "already": False, "message": "签到成功"}
+
+    monkeypatch.setattr("plugins.juai_checkin._checkin_one", fake_checkin)
+    _patch_run_env(monkeypatch)
+    await _run(ctx, "测试")
+    assert _load_done_emails(ctx, _today_key()) == {"a@x.com"}
+
+
+async def test_run_marks_done_on_already_signed_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 站点报“今日已签到”也视为成功，写入今日完成集合，避免下次 tick 再拉一次
+    ctx = _FakeCtx({"accounts": [{"email": "a@x.com", "password": "p1"}]})
+
+    async def fake_checkin(client: Any, user_id: str, per_unit: float = 0.0, display_type: str = "") -> dict[str, Any]:
+        return {"ok": True, "already": True, "message": "今日已签到"}
+
+    monkeypatch.setattr("plugins.juai_checkin._checkin_one", fake_checkin)
+    _patch_run_env(monkeypatch)
+    await _run(ctx, "测试")
+    assert _load_done_emails(ctx, _today_key()) == {"a@x.com"}
+
+
+async def test_run_does_not_mark_done_on_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    ctx = _FakeCtx({"accounts": [{"email": "a@x.com", "password": "p1"}]})
+
+    async def fake_checkin(client: Any, user_id: str, per_unit: float = 0.0, display_type: str = "") -> dict[str, Any]:
+        return {"ok": False, "already": False, "message": "签到失败：间隔过短"}
+
+    monkeypatch.setattr("plugins.juai_checkin._checkin_one", fake_checkin)
+    _patch_run_env(monkeypatch)
+    await _run(ctx, "测试")
+    assert _load_done_emails(ctx, _today_key()) == set()
+
+
+async def test_run_preserves_existing_done_on_subset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """定时 tick 只跑 pending 账号，不能把之前已成功的同日报备踢掉。"""
+    ctx = _FakeCtx(
+        {
+            "accounts": [
+                {"email": "a@x.com", "password": "p1"},
+                {"email": "b@x.com", "password": "p2"},
+                {"email": "c@x.com", "password": "p3"},
+            ]
+        }
+    )
+    today = _today_key()
+    _save_done_emails(ctx, today, {"a@x.com", "b@x.com"})
+
+    async def fake_checkin(client: Any, user_id: str, per_unit: float = 0.0, display_type: str = "") -> dict[str, Any]:
+        return {"ok": True, "already": False, "message": "签到成功"}
+
+    monkeypatch.setattr("plugins.juai_checkin._checkin_one", fake_checkin)
+    _patch_run_env(monkeypatch)
+    await _run(ctx, "定时", only_accounts=[{"email": "c@x.com", "password": "p3"}])
+    assert _load_done_emails(ctx, today) == {"a@x.com", "b@x.com", "c@x.com"}
+
+
+async def test_scheduled_tick_skips_when_all_done(monkeypatch: pytest.MonkeyPatch) -> None:
+    ctx = _FakeCtx({"accounts": [{"email": "a@x.com", "password": "p1"}]})
+    _save_done_emails(ctx, _today_key(), {"a@x.com"})
+    called = {"count": 0}
+
+    async def fake_run(_ctx: Any, _source: str, only_accounts: Any = None) -> dict[str, Any]:
+        called["count"] += 1
+        return {"ok": True, "message": "不应被调用"}
+
+    monkeypatch.setattr("plugins.juai_checkin._run", fake_run)
+    await _scheduled_tick(ctx)
+    assert called["count"] == 0
+    assert any("均已签到" in line for line in ctx.logs)
+    # 跳过时无通知、无写入历史/配置
+    assert ctx.notifications == []
+    assert ctx.updated == {}
+
+
+async def test_scheduled_tick_only_passes_pending(monkeypatch: pytest.MonkeyPatch) -> None:
+    ctx = _FakeCtx(
+        {
+            "accounts": [
+                {"email": "a@x.com", "password": "p1"},
+                {"email": "b@x.com", "password": "p2"},
+                {"email": "c@x.com", "password": "p3"},
+            ]
+        }
+    )
+    _save_done_emails(ctx, _today_key(), {"A@X.com"})  # 大小写不敏感过滤
+    captured: dict[str, Any] = {}
+
+    async def fake_run(_ctx: Any, source: str, only_accounts: Any = None) -> dict[str, Any]:
+        captured["source"] = source
+        captured["only_accounts"] = only_accounts
+        return {"ok": True, "message": "ok"}
+
+    monkeypatch.setattr("plugins.juai_checkin._run", fake_run)
+    await _scheduled_tick(ctx)
+    assert captured["source"] == "定时"
+    emails = [a["email"] for a in captured["only_accounts"]]
+    assert emails == ["b@x.com", "c@x.com"]
+
+
+async def test_scheduled_tick_no_accounts_skips(monkeypatch: pytest.MonkeyPatch) -> None:
+    ctx = _FakeCtx({"accounts": []})
+
+    async def fake_run(_ctx: Any, _source: str, only_accounts: Any = None) -> dict[str, Any]:
+        raise AssertionError("无账号时不应调用 _run")
+
+    monkeypatch.setattr("plugins.juai_checkin._run", fake_run)
+    await _scheduled_tick(ctx)
+    assert any("未配置签到账号" in line for line in ctx.logs)
+
+
+async def test_scheduled_tick_stale_date_does_not_skip(monkeypatch: pytest.MonkeyPatch) -> None:
+    """昨天的完成记录不能挡住今天的重试。"""
+    ctx = _FakeCtx({"accounts": [{"email": "a@x.com", "password": "p1"}]})
+    ctx.kv.set(DONE_TODAY_KEY, {"date": "2000-01-01", "emails": ["a@x.com"]})
+    captured: dict[str, Any] = {}
+
+    async def fake_run(_ctx: Any, _source: str, only_accounts: Any = None) -> dict[str, Any]:
+        captured["only_accounts"] = only_accounts
+        return {"ok": True, "message": "ok"}
+
+    monkeypatch.setattr("plugins.juai_checkin._run", fake_run)
+    await _scheduled_tick(ctx)
+    assert [a["email"] for a in captured["only_accounts"]] == ["a@x.com"]
