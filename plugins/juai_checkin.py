@@ -29,10 +29,17 @@ import httpx
 __plugin__ = {
     "name": "JUAI 自动签到",
     "id": "juai_checkin",
-    "version": "1.4.2",
+    "version": "1.5.0",
     "author": "Yy",
-    "description": "每日自动签到 juai 平台（多账号）：浏览器过 recaptcha 登录并缓存 30 天 session，签到仍走 REST。",
+    "description": "JUAI 自动签到（多账号）：每天分档重试，今日已成功自动跳过；登录 3 次重试，session 缓存 30 天。",
     "changelog": (
+        "v1.5.0 更新：\n"
+        "- 定时从「每天单点触发」改为「每天分档重试」：新增 checkin_interval_hours 滑块（默认 6 小时 → "
+        "每天在 00/06/12/18 各触发一次），错过一次不再等明天\n"
+        "- 今日已成功账号自动跳过：kv 记录当日已成功邮箱，tick 只跑未成功者；全部完成时不再登录/接口/通知\n"
+        "- 单账号内浏览器登录仍保留 3 次重试，行为未变\n"
+        "- 「立即签到」按钮仍处理全部账号（不受跳过标记影响）\n"
+        "- 移除 checkin_hour 配置项（旧字段停止读取，改由 checkin_interval_hours 控制重试密度）\n"
         "v1.4.2 更新：\n"
         "- 浏览器登录加重试（最多 3 次、间隔 10 秒）：实测平台登录偶发超时，"
         "重试后续签到走缓存 session 稳定运行\n"
@@ -116,13 +123,14 @@ __plugin__ = {
                 },
             },
         },
-        "checkin_hour": {
+        "checkin_interval_hours": {
             "type": "slider",
-            "default": 9,
-            "label": "签到小时",
-            "min": 0,
-            "max": 23,
+            "default": 6,
+            "label": "重试间隔（小时）",
+            "min": 1,
+            "max": 12,
             "step": 1,
+            "help": "每天从 0 点起每 N 小时重试一次；已成功账号自动跳过，全部成功则不再触发。默认 6 小时 → 每天 4 次",
             "section": "定时",
             "cols": 6,
             "order": 20,
@@ -130,10 +138,11 @@ __plugin__ = {
         "checkin_minute": {
             "type": "slider",
             "default": 7,
-            "label": "签到分钟",
+            "label": "触发分钟",
             "min": 0,
             "max": 59,
             "step": 1,
+            "help": "每次触发时的分钟偏移（对所有重试档生效）",
             "section": "定时",
             "cols": 6,
             "order": 21,
@@ -170,6 +179,8 @@ LOGIN_URL = f"{BASE_URL}/login"
 HISTORY_KEY = "checkin_history"
 HISTORY_LIMIT = 30
 SESSION_KEY = "account_sessions"
+# 今日已成功账号集合，结构 {"date": "YYYY-MM-DD", "emails": ["a@x.com", ...]}；跨日自动失效
+DONE_TODAY_KEY = "checkin_done_today"
 REQUEST_TIMEOUT = 30.0
 BROWSER_TIMEOUT = 240
 LOGIN_WAIT_SECONDS = 45.0
@@ -216,6 +227,26 @@ def _configured_accounts(config: dict[str, Any]) -> list[dict[str, str]]:
     if legacy_email and legacy_password and legacy_email.casefold() not in seen:
         accounts.append({"email": legacy_email, "password": legacy_password})
     return accounts
+
+
+def _today_key() -> str:
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def _load_done_emails(ctx: Any, today: str) -> set[str]:
+    """读今日已成功邮箱集合；日期不匹配（跨天）自动当作空集。"""
+    raw = ctx.kv.get(DONE_TODAY_KEY, {}) or {}
+    if not isinstance(raw, dict) or raw.get("date") != today:
+        return set()
+    emails = raw.get("emails") or []
+    if not isinstance(emails, list):
+        return set()
+    return {str(e).casefold() for e in emails if isinstance(e, str) and e}
+
+
+def _save_done_emails(ctx: Any, today: str, emails: set[str]) -> None:
+    normalized = {e.casefold() for e in emails if e}
+    ctx.kv.set(DONE_TODAY_KEY, {"date": today, "emails": sorted(normalized)})
 
 
 def _safe_json(resp: httpx.Response) -> dict[str, Any]:
@@ -644,8 +675,17 @@ async def _checkin_one(
     return item
 
 
-async def _run(ctx: Any, source: str) -> dict[str, Any]:
-    """完整签到流程：逐账号登录（缓存优先）→ REST 签到、记录历史、汇总通知。"""
+async def _run(
+    ctx: Any,
+    source: str,
+    only_accounts: list[dict[str, str]] | None = None,
+) -> dict[str, Any]:
+    """完整签到流程：逐账号登录（缓存优先）→ REST 签到、记录历史、汇总通知。
+
+    only_accounts=None 时从配置读全量账号（手动签到默认行为）；
+    传入列表时仅处理列表内的账号（定时 tick 使用，已过滤掉今日已成功者）。
+    任意账号本次成功（含“今日已签到”）都会刷新 kv 里的今日完成标记。
+    """
     global _run_lock
     if _run_lock is None:
         _run_lock = asyncio.Lock()
@@ -653,7 +693,12 @@ async def _run(ctx: Any, source: str) -> dict[str, Any]:
         return {"ok": False, "message": "已有签到任务正在运行，请稍后再试"}
 
     async with _run_lock:
-        accounts = _configured_accounts(dict(ctx.config or {}))
+        today = _today_key()
+        done_emails = _load_done_emails(ctx, today)
+        if only_accounts is None:
+            accounts = _configured_accounts(dict(ctx.config or {}))
+        else:
+            accounts = list(only_accounts)
         if not accounts:
             result: dict[str, Any] = {"ok": False, "message": "请先添加至少一个 juai 签到账号"}
         else:
@@ -680,7 +725,11 @@ async def _run(ctx: Any, source: str) -> dict[str, Any]:
                     item = {"ok": False, "already": False, "message": f"登录失败：{exc}"}
                     ctx.log.error("[签到][%s] 登录失败：%r", masked, exc)
                 account_results.append(item)
+                if item["ok"]:
+                    done_emails.add(email.casefold())
                 ctx.log.info("[签到][%s] 结果：%s", masked, item["message"])
+
+            _save_done_emails(ctx, today, done_emails)
 
             success_count = sum(1 for item in account_results if item["ok"])
             failed_count = len(account_results) - success_count
@@ -727,6 +776,22 @@ async def _run(ctx: Any, source: str) -> dict[str, Any]:
         return result
 
 
+async def _scheduled_tick(ctx: Any) -> None:
+    """定时入口：先过滤掉今日已成功账号，全部完成时直接跳过，不启动登录/接口/通知。"""
+    today = _today_key()
+    all_accounts = _configured_accounts(dict(ctx.config or {}))
+    if not all_accounts:
+        ctx.log.info("定时任务已触发：未配置签到账号，跳过")
+        return
+    done_emails = _load_done_emails(ctx, today)
+    pending = [a for a in all_accounts if a["email"].casefold() not in done_emails]
+    if not pending:
+        ctx.log.info("定时任务已触发：今日 %s 个账号均已签到，本次跳过", len(all_accounts))
+        return
+    ctx.log.info("定时任务已触发：待签到 %s/%s 个账号", len(pending), len(all_accounts))
+    await _run(ctx, "定时", only_accounts=pending)
+
+
 async def setup(ctx: Any) -> None:
     global _run_lock
     _run_lock = asyncio.Lock()
@@ -743,15 +808,31 @@ async def setup(ctx: Any) -> None:
         return {"ok": True, "message": "签到已在后台开始，请查看运行日志"}
 
     if ctx.config.get("auto_checkin", True):
-        hour = _bounded_int(ctx.config.get("checkin_hour"), 9, 0, 23)
+        interval = _bounded_int(ctx.config.get("checkin_interval_hours"), 6, 1, 12)
         minute = _bounded_int(ctx.config.get("checkin_minute"), 7, 0, 59)
+        firing_hours = list(range(0, 24, interval))
 
-        async def _scheduled_checkin() -> None:
-            ctx.log.info("定时任务已触发")
-            await _run(ctx, "定时")
+        def _make_tick() -> Any:
+            async def _tick() -> None:
+                await _scheduled_tick(ctx)
 
-        ctx.schedule(_scheduled_checkin, "cron", hour=hour, minute=minute, id="JUAI 每日签到")
-        ctx.log.info("已注册每日签到任务：%02d:%02d", hour, minute)
+            return _tick
+
+        for hour in firing_hours:
+            ctx.schedule(
+                _make_tick(),
+                "cron",
+                hour=hour,
+                minute=minute,
+                id=f"JUAI 签到 {hour:02d}:{minute:02d}",
+            )
+        hours_text = "/".join(f"{h:02d}" for h in firing_hours)
+        ctx.log.info(
+            "已注册分档重试签到：每天 %s 的第 %s 分（间隔 %s 小时），已成功账号自动跳过",
+            hours_text,
+            minute,
+            interval,
+        )
     else:
         ctx.log.info("自动签到未启用，仅保留手动签到")
 
