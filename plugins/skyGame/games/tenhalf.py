@@ -42,10 +42,12 @@
 # （结算只有点数没有张数，张数靠轮询观察 players[].cardCount 按 roundId 暂存配对）。
 # 停牌阈值优先用「当前庄家张数」对应分桶（样本≥3），其次聚合画像（样本≥8）——
 # 平局算输，目标需压过庄家均点；庄家爆率高则低点数即可停牌（赌庄家爆）。
-# 点数样本按「最近 N 局有序窗口」归档（v1.25.0）：每庄家存一条 recent 序列（上限可配
-# tenhalf_dealer_keep，默认 100），rounds/busts/counts/分桶全由它派生——口径单一，恒等
-# 「局数 = 爆数 + Σ点数 + 未详」天然成立。庄家风格会变，只保留近期样本避免长期全量失真；
-# 旧版全量计数（v1.23.20）下次写入自动展开为窗口代表。无牌面详情的局计「未详」。
+# 点数样本按「最近 N 局有序窗口」归档（v1.25.0，上限可配 tenhalf_dealer_keep）：每庄家一条
+# recent 总窗口 + 每种终局手牌张数各一条 recent_cards[c] 子窗口（v1.26.0，各留最近 N 局），
+# 聚合 rounds/busts/counts 由 recent 派生、各张数桶由自己的子窗口派生——两个视图各自内部
+# 一致（恒等「局数 = 爆数 + Σ点数 + 未详」在两个视图里都成立），桶的样本深度不再被总窗口
+# 稀释（1 张打到 200 局也不会挤掉 5 张的旧样本）。庄家风格会变，只留近期样本避免长期失真；
+# 旧版全量计数（v1.23.20）/单层窗口（v1.25.0）下次写入自动迁移。无牌面详情的局计「未详」。
 # v1.20.0 起画像阈值夹在 4～6.5（爆牌红线）：追庄家均点到 7+ 的爆牌代价
 # （>50% 爆率 × 倍数惩罚）大于压点收益，早停赌庄家自爆期望更优。
 #
@@ -96,7 +98,10 @@ _MIN_CARD_SAMPLES = 3
 # v1.25.0：进一步改为「最近 N 局有序窗口」——庄家风格会变，长期全量累积会让画像
 # 失真；每庄家存一条 recent 有序样本序列（上限 tenhalf_dealer_keep），rounds/busts/
 # counts/分桶全由 recent 派生（口径单一、恒等天然成立）；旧 counts 下次写入自动展开为窗口代表。
-_DEALER_KEEP_DEFAULT = 100  # 每庄家画像保留的最近样本数（窗口上限，可配 tenhalf_dealer_keep）
+# v1.26.0：张数桶改用自己的一条窗口 recent_cards[str(张数)]（同样上限 N 局）——旧格式桶
+# 是总窗口的子集，罕见张数（如 5 张）在总窗口里只剩几条、桶画像长期样本不足；拆开后
+# 每种张数各自留满 N 局，聚合视图仍源自 recent（保持真实频率权重）。
+_DEALER_KEEP_DEFAULT = 100  # 每庄家（及各张数桶）保留的最近样本数（窗口上限，可配 tenhalf_dealer_keep）
 _BUST_KEY = "__bust__"  # 迁移用伪档：旧格式爆牌数单存 entry["busts"]（不在 counts 内），等比抽样时并入
 # 五小（5 张不爆）直接赢，倍数 ×5（2026-08-18 实测坐实）；EV 递推的收益项
 _FIVE_SMALL_MULT = 5.0
@@ -597,7 +602,7 @@ def _dealer_matches(dealer_p: dict | None, whitelist: list[str]) -> bool:
 
 
 def _dealer_keep(cfg: dict) -> int:
-    """每庄家画像保留的最近样本数（窗口上限）：读 tenhalf_dealer_keep，clamp [20, 500]。"""
+    """窗口上限（局数）：读 tenhalf_dealer_keep，clamp [20, 500]。总窗口与每个张数子窗口共用。"""
     try:
         n = int(cfg.get("tenhalf_dealer_keep", _DEALER_KEEP_DEFAULT) or _DEALER_KEEP_DEFAULT)
     except (TypeError, ValueError):
@@ -605,14 +610,46 @@ def _dealer_keep(cfg: dict) -> int:
     return min(500, max(20, n))
 
 
+def _agg_of(samples: list) -> tuple[int, int, dict]:
+    """一组有序样本 → (局数, 爆数, 点数计数)：爆牌归爆数、无点数归未详。
+
+    样本编码 [bust, total, cards]（与 _record_dealer 写入一致），聚合视图与张数桶视图共用。
+    """
+    counts: dict = {}
+    busts = 0
+    for s in samples or []:
+        bust, total = s[0], s[1]
+        if bust:
+            busts += 1
+        elif total is not None:
+            k = f"{total:g}"
+            counts[k] = int(counts.get(k, 0) or 0) + 1
+        else:
+            counts["unseen"] = int(counts.get("unseen", 0) or 0) + 1
+    return len(samples or []), busts, counts
+
+
+def _group_recent_by_cards(recent: list, keep: int) -> dict:
+    """把一条总窗口样本序列按张数拆成子窗口（v1.25.0 单层格式 → v1.26.0 拆桶迁移）。
+
+    组内保持时间顺序，拆完各自取末 keep 条；未观察到张数的样本无桶可归（只留在总窗口）。
+    """
+    buckets: dict[str, list] = {}
+    for s in recent or []:
+        c = s[2] if len(s) > 2 else None
+        if isinstance(c, int) and c > 0:
+            buckets.setdefault(str(c), []).append(s)
+    return {k: v[-keep:] if len(v) > keep else v for k, v in buckets.items()}
+
+
 def _expand_legacy_to_recent(entry: dict, keep: int) -> list:
     """旧全量聚合计数（counts / 更早的 totals）→ recent 有序样本序列的初始代表（v1.25.0 迁移）。
 
     旧数据不含顺序，按各档点数的占比等比抽样出 keep 条作「最近 keep 局」的代表（保持旧
     分布形状；不能取展开尾部——尾部由 counts 键序主导，会把画像拉扁成单一档）；张数分桶
-    不迁移（无顺序），随新局重建。旧格式的爆牌数存在 entry["busts"]（不在 counts 里），
-    迁移时并入同一抽样口径，否则窗口会丢掉全部爆牌样本、爆率归零。超点脏样本归爆牌、
-    无点数归未详，与 _recompute_entry 的样本编码 [bust, total, cards] 一致。
+    不迁移（无顺序，旧桶只是总体的子集），拆出的子窗口随新局重建（v1.26.0）。旧格式的爆牌数
+    存在 entry["busts"]（不在 counts 里），迁移时并入同一抽样口径，否则窗口会丢掉全部爆牌
+    样本、爆率归零。超点脏样本归爆牌、无点数归未详，与 _agg_of 的样本编码一致。
     """
     src = entry.get("counts")
     if not isinstance(src, dict):
@@ -654,55 +691,37 @@ def _expand_legacy_to_recent(entry: dict, keep: int) -> list:
     return recent
 
 
-def _recompute_entry(entry: dict, *, bucket: bool = True) -> None:
-    """由 recent 序列派生写回 rounds/busts/counts/cards（单一数据源→窗口视图，v1.25.0）。
+def _recompute_entry(entry: dict) -> None:
+    """由两条窗口序列派生写回聚合字段与各张数桶（每个视图只源自身序列，v1.26.0）。
 
-    所有消费方（_dealer_effective/展示/分桶阈值）仍读这些字段，其值恒为「最近 keep 局」
-    的聚合，口径全部源自同一条 recent，绝不与全量混用（避开 v1.23.20 修的口径失配坑）。
-    bucket=False 供张数桶使用：桶内样本同张数，不再向下分桶（防无限递归）。
+    聚合视图（rounds/busts/counts）源自总窗口 recent（最近 N 局，不分张数，保持真实频率
+    权重）；张数桶视图源自 recent_cards[张数]（该张数最近 N 局，不被总窗口稀释）。两个视图
+    内部的「局数 = 爆数 + Σ点数 + 未详」各自成立，但桶不再是总窗口的子集切片（Σ桶可大于总
+    窗口局数），消费方从不跨视图相减。未观察到张数的局只进聚合视图（无桶可归）。
     """
-    recent = entry.get("recent") or []
-    counts: dict = {}
-    busts = 0
-    card_recent: dict[str, list] = {}
-    for s in recent:
-        bust, total = s[0], s[1]
-        c = s[2] if len(s) > 2 else None
-        if bust:
-            busts += 1
-        elif total is not None:
-            k = f"{total:g}"
-            counts[k] = int(counts.get(k, 0) or 0) + 1
-        else:
-            counts["unseen"] = int(counts.get("unseen", 0) or 0) + 1
-        if bucket and isinstance(c, int) and c > 0:
-            card_recent.setdefault(str(c), []).append(s)
-    entry["rounds"] = len(recent)
+    rounds, busts, counts = _agg_of(entry.get("recent") or [])
+    entry["rounds"] = rounds
     entry["busts"] = busts
     entry["counts"] = counts
-    if not bucket:
-        return
     cards_map: dict = {}
-    for cstr, sub in card_recent.items():
-        bkt: dict = {"recent": sub}
-        _recompute_entry(bkt, bucket=False)
-        bkt.pop("recent", None)  # 桶只留派生计数，不落子序列（省空间）
-        cards_map[cstr] = bkt
+    for cstr, samples in (entry.get("recent_cards") or {}).items():
+        br, bb, bc = _agg_of(samples or [])
+        cards_map[cstr] = {"rounds": br, "busts": bb, "counts": bc}
     entry["cards"] = cards_map
 
 
 def _record_dealer(ctx: object, settlement: dict, cards: int | None = None, dealer_key: str = "") -> str:
-    """记录一条庄家结算，维护「最近 N 局」有序样本窗口，返回画像主键。
+    """记录一条庄家结算，维护「总窗口 + 每种张数子窗口」，返回画像主键。
 
     爆牌判定：文案含「爆」或点数 > 10.5（实测爆牌局的 handLabel 常不含「爆」字、
     直接显示超点点数，如「11点」），爆牌不入点数计数。囊不到牌面（无点数且非爆）
-    的局记为「未详」。每局 append 进 recent 序列（超 keep 滚掉最旧），rounds/busts/
-    counts/分桶全部由 recent 派生（单一口径，恒等「局数 = 爆数 + Σ点数 + 未详」天然
-    成立）；庄家风格会变，只留近期样本避免长期全量失真（v1.25.0）。
+    的局记为「未详」。每局 append 进总窗口 recent（超 keep 滚最旧），观察到张数时
+    还 append 进该张数的子窗口 recent_cards[张数]（各自独立裁剪，罕见张数不被高频
+    张数挤掉）；两个视图各自派生自己的字段（v1.26.0）。
 
-    传入 cards（本局庄家终局手牌张数）时随样本一并记录，分桶由 recent 派生。
-    传入 dealer_key（稳定 id）时以 id 为主键、displayName 仅作展示名（改名自动归并）；
-    未传则兑底用 displayName 做键（老数据兼容）。
+    传入 cards（本局庄家终局手牌张数）时同时计入两个视图；只传 dealer_key（稳定 id）
+    时以 id 为主键、displayName 仅作展示名（改名自动归并）；未传则兑底用 displayName
+    做键（老数据兼容）。
     """
     name = str(settlement.get("dealerDisplayName") or settlement.get("dealer") or "").strip()
     if not name:
@@ -719,10 +738,19 @@ def _record_dealer(ctx: object, settlement: dict, cards: int | None = None, deal
     if recent is None:
         recent = _expand_legacy_to_recent(entry, keep)  # 旧全量 counts/totals 一次性迁移为窗口代表
         entry.pop("totals", None)  # 迁移后弃用旧 totals 列表，避免两口径混存
+    buckets = entry.get("recent_cards")
+    if not isinstance(buckets, dict):
+        buckets = _group_recent_by_cards(recent, keep)  # v1.25.0 单层窗口 → 按张数拆窗（不含本局）
     sample = [1 if bust else 0, None if bust or total is None else total, cards]
     recent.append(sample)
     entry["recent"] = recent[-keep:] if len(recent) > keep else recent
-    _recompute_entry(entry)  # 由 recent 派生 rounds/busts/counts/cards（供全部消费方读取）
+    if isinstance(cards, int) and cards > 0:
+        sub = buckets.setdefault(str(cards), [])
+        sub.append(sample)
+        if len(sub) > keep:
+            buckets[str(cards)] = sub[-keep:]
+    entry["recent_cards"] = buckets
+    _recompute_entry(entry)  # 两个视图各自派生字段（供全部消费方读取）
     dealers[key] = entry
     ctx.kv.set(_DEALERS_KEY, json.dumps(dealers, ensure_ascii=False))
     return key
