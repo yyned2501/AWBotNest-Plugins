@@ -18,6 +18,7 @@ from plugins.skyGame.games.tenhalf import (
     _catch_up_settlement,
     _dealer_dist,
     _dealer_effective,
+    _dealer_keep,
     _dealer_matches,
     _dealer_profile_text,
     _dealer_whitelist,
@@ -131,6 +132,7 @@ class _FakeCtx:
         self.notifications: list[tuple[object, str]] = []
         self.tables: list[tuple[list[str], list[list[object]], dict[str, object]]] = []
         self.schedules: list[tuple[object, str, dict[str, object]]] = []
+        self.config: dict[str, object] = {}
 
     def schedule(self, fn: object, mode: str, **kwargs: object) -> None:
         self.schedules.append((fn, mode, dict(kwargs)))
@@ -282,7 +284,11 @@ def test_record_dealer_counts_over_target_as_bust() -> None:
     _record_dealer(ctx, {"dealerDisplayName": "涛", "dealerHandLabel": "爆牌"})
     _record_dealer(ctx, {"dealerDisplayName": "涛", "dealerHandLabel": "8.5点"})
     dealers = json.loads(str(ctx.kv.get("tenhalf:dealers")))
-    assert dealers["涛"] == {"name": "涛", "rounds": 3, "busts": 2, "counts": {"8.5": 1}}
+    entry = dealers["涛"]
+    assert entry["name"] == "涛"
+    assert entry["rounds"] == 3 and entry["busts"] == 2
+    assert entry["counts"] == {"8.5": 1}
+    assert len(entry["recent"]) == 3  # 每局一条有序样本 [爆?, 点数, 张数]
 
 
 def test_record_dealer_missing_label_counts_unseen() -> None:
@@ -297,36 +303,67 @@ def test_record_dealer_missing_label_counts_unseen() -> None:
     assert r == b + len(t) + int(entry["counts"]["unseen"])
 
 
-def test_record_dealer_cap_window_lost_regression() -> None:
-    """v1.23.20 回归：旧版样本窗口（最近 60 条）裁剪导致明细与总局数对不上
-    （线上实例 144 局 vs 明细 60）；全量计数后总局数 = 爆数 + Σ计数 恒等，无裁剪。"""
+def test_record_dealer_window_tracks_recent_style() -> None:
+    """v1.25.0 窗口化：只保留最近 keep 局，庄家风格变化时旧样本滚出、画像跟手。
+
+    （v1.23.20 曾把窗口改全量以免「局数 vs 明细对不上」；v1.25.0 回归窗口但让
+    rounds/busts/counts 全部由同一条 recent 派生，口径单一，恒等式仍成立。）"""
     ctx = _FakeCtx()
-    for _ in range(80):
-        _record_dealer(ctx, {"dealerDisplayName": "涛", "dealerHandLabel": "8点"})
-    for _ in range(40):
+    ctx.config = {"tenhalf_dealer_keep": 30}
+    for _ in range(40):  # 早期：频繁爆
         _record_dealer(ctx, {"dealerDisplayName": "涛", "dealerHandLabel": "11点"})
+    for _ in range(60):  # 近期：转稳
+        _record_dealer(ctx, {"dealerDisplayName": "涛", "dealerHandLabel": "8点"})
     entry = json.loads(str(ctx.kv.get("tenhalf:dealers")))["涛"]
-    assert entry["rounds"] == 120 and entry["busts"] == 40
-    assert entry["counts"]["8"] == 80  # 第 61 条以后不再被窗口裁掉
+    assert entry["rounds"] == 30 and len(entry["recent"]) == 30  # 窗口上限，超出滚最旧
+    assert entry["busts"] == 0  # 早期 40 局爆牌已滚出，画像反映近期风格
+    assert entry["counts"]["8"] == 30
     r, b, t = _dealer_effective(entry)
-    assert r == 120 and b == 40 and len(t) == 80
+    assert r == b + len(t) == 30  # 恒等：局数 = 爆数 + Σ点数
+    assert _profile_text_for(entry, None) == "30局·均 8.0 点"  # 展示也只反映窗口
 
 
-def test_record_dealer_migrates_legacy_totals_with_gap() -> None:
-    """老数据（totals 只留 60 条、rounds 144）写入时自动迁移：缺口补未详84，
-    之后明细与总局数恒等（线上「1张 144局 vs 明细 60」场景）。"""
+def test_record_dealer_migrates_legacy_totals_into_window() -> None:
+    """v1.25.0 迁移：旧 totals/rounds 聚合数据首次写入时展开为 recent 窗口代表
+    （缺口补未详，keep 足够大则无损保留旧分布），旧字段不再两口径混存。"""
     ctx = _FakeCtx()
+    ctx.config = {"tenhalf_dealer_keep": 500}  # 上限内 → 旧样本全保留
     legacy = {"name": "涛", "rounds": 144, "totals": [7.0] * 12 + [8.0] * 17 + [9.0] * 14 + [10.0] * 17}
     ctx.kv.set("tenhalf:dealers", json.dumps({"涛": legacy}, ensure_ascii=False))
     _record_dealer(ctx, {"dealerDisplayName": "涛", "dealerHandLabel": "8点"})
     entry = json.loads(str(ctx.kv.get("tenhalf:dealers")))["涛"]
-    assert entry["rounds"] == 145
-    assert "totals" not in entry  # 迁移后不再保留旧窗口列表
+    assert "totals" not in entry  # 旧窗口列表被迁移取代
+    assert entry["rounds"] == 145  # 迁移 144 + 当前 1，未触 cap
     assert entry["counts"]["7"] == 12 and entry["counts"]["8"] == 18 and entry["counts"]["9"] == 14
     assert entry["counts"]["10"] == 17 and entry["counts"]["unseen"] == 84
     r, b, t = _dealer_effective(entry)
-    assert r == b + len(t) + int(entry["counts"]["unseen"])
-    assert _profile_text_for(entry, None) == "145局·均 8.6 点"  # 全量样本均点（含迁移补齐）
+    assert r == b + len(t) + int(entry["counts"]["unseen"])  # 恒等成立
+    assert _profile_text_for(entry, None) == "145局·均 8.6 点"  # keep 内无损 → 展示与旧全量一致
+
+
+def test_record_dealer_legacy_migration_keeps_distribution_shape() -> None:
+    """旧全量分布远大于 keep → 等比抽样迁移（保住形状，不被 counts 键序拉成单一档）。"""
+    ctx = _FakeCtx()
+    ctx.config = {"tenhalf_dealer_keep": 20}
+    legacy = {"name": "涛", "rounds": 200, "counts": {"8": 150, "unseen": 50}}
+    ctx.kv.set("tenhalf:dealers", json.dumps({"涛": legacy}, ensure_ascii=False))
+    _record_dealer(ctx, {"dealerDisplayName": "涛", "dealerHandLabel": "9点"})
+    entry = json.loads(str(ctx.kv.get("tenhalf:dealers")))["涛"]
+    assert entry["rounds"] == 20 and len(entry["recent"]) == 20
+    assert entry["counts"]["9"] == 1
+    assert entry["counts"]["unseen"] == 5  # 50/200 占比 × keep 20
+    assert entry["counts"]["8"] == 14  # 15 条等比代表 + 当前局滚掉最旧一条
+    r, b, t = _dealer_effective(entry)
+    assert r == b + len(t) + entry["counts"]["unseen"]  # 恒等成立
+
+
+def test_dealer_keep_clamps_and_defaults() -> None:
+    """窗口上限读 tenhalf_dealer_keep，clamp [20, 500]、非法/缺省回退默认 100。"""
+    assert _dealer_keep({}) == 100
+    assert _dealer_keep({"tenhalf_dealer_keep": 50}) == 50
+    assert _dealer_keep({"tenhalf_dealer_keep": 5}) == 20  # 低于下限
+    assert _dealer_keep({"tenhalf_dealer_keep": 9999}) == 500  # 高于上限
+    assert _dealer_keep({"tenhalf_dealer_keep": "abc"}) == 100  # 非法回退
 
 
 def test_global_dealer_entry_merges_counts() -> None:
@@ -371,7 +408,7 @@ def test_record_dealer_buckets_by_card_count() -> None:
     entry = json.loads(str(ctx.kv.get("tenhalf:dealers")))["id:9"]
     assert entry["rounds"] == 3 and entry["busts"] == 1
     assert entry["cards"]["3"] == {"rounds": 2, "busts": 1, "counts": {"8": 1}}
-    assert entry["cards"]["4"] == {"rounds": 1, "counts": {"9": 1}}
+    assert entry["cards"]["4"] == {"rounds": 1, "busts": 0, "counts": {"9": 1}}  # 桶由 recent 派生，busts 恒在
 
 
 def test_threshold_prefers_card_bucket_then_aggregate() -> None:
@@ -1082,9 +1119,11 @@ async def test_settlement_notifies_once_and_records_stats() -> None:
     assert "麦克格雷涛" in str(flat[1]) and "1局" in str(flat[-3])  # 庄家行与累计行
     stats = json.loads(str(ctx.kv.get("tenhalf:stats")))
     assert stats["total"] == {"rounds": 1, "net": 198, "wins": 1, "losses": 0}
-    # 庄家画像入账：8.5 点一局
+    # 庄家画像入账：8.5 点一局（rounds/counts 由 recent 窗口派生）
     dealers = json.loads(str(ctx.kv.get("tenhalf:dealers")))
-    assert dealers["麦克格雷涛"] == {"name": "麦克格雷涛", "rounds": 1, "counts": {"8.5": 1}}
+    entry = dealers["麦克格雷涛"]
+    assert entry["name"] == "麦克格雷涛" and entry["rounds"] == 1 and entry["counts"] == {"8.5": 1}
+    assert entry["recent"] == [[0, 8.5, None]]
 
 
 @pytest.mark.asyncio
@@ -1128,7 +1167,9 @@ async def test_settlement_without_self_only_records_dealer() -> None:
 
     assert ctx.tables == [] and ctx.kv.get("tenhalf:stats") is None
     dealers = json.loads(str(ctx.kv.get("tenhalf:dealers")))
-    assert dealers["麦克格雷涛"] == {"name": "麦克格雷涛", "rounds": 1, "busts": 1, "counts": {}}
+    entry = dealers["麦克格雷涛"]
+    assert entry["name"] == "麦克格雷涛" and entry["rounds"] == 1 and entry["busts"] == 1
+    assert entry["counts"] == {} and entry["recent"] == [[1, None, None]]
 
 
 @pytest.mark.asyncio
