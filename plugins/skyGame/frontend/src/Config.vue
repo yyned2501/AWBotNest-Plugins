@@ -76,6 +76,7 @@ const DEFAULTS = {
   tenhalf_stand_threshold: 8,
   tenhalf_notify: true,
   tenhalf_dealer_whitelist: '',
+  tenhalf_dealer_keep: 100,
   // AI 评价（通用模块）
   ai_review_enabled: true,
   ai_review_games: ['tenhalf'],
@@ -584,6 +585,15 @@ async function renewNow() {
               张数是一等公民（4 张低点数追五小、高点数早停）｜ 画像不足→退停牌阈值。
               从不认输（fold 与停牌同样损失下注）
             </span>
+          </section>
+
+          <section class="card">
+            <div class="card-h">庄家画像</div>
+            <div class="fld">
+              <span class="lbl">保留局数（只算最近 N 局）</span>
+              <input v-model.number="cfg.tenhalf_dealer_keep" class="inp" type="number" min="20" max="500" step="10" />
+              <span class="help">每个庄家的爆率/点数分布/停牌 EV 只用最近 N 局样本，更早的自动滚出：庄家点数风格会变，长期累积会拖失真（推送里的「N局」即窗口内局数）。改小后下次结算即按新上限裁剪</span>
+            </div>
           </section>
 
           <div class="savebar">

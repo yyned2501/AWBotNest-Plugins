@@ -42,9 +42,10 @@
 # （结算只有点数没有张数，张数靠轮询观察 players[].cardCount 按 roundId 暂存配对）。
 # 停牌阈值优先用「当前庄家张数」对应分桶（样本≥3），其次聚合画像（样本≥8）——
 # 平局算输，目标需压过庄家均点；庄家爆率高则低点数即可停牌（赌庄家爆）。
-# 点数分布用全量计数归档（v1.23.20，每档点数一个计数，体积恒定）：修复旧版
-# 「最近 60 条样本窗口 vs 全量局数」导致明细与总局数对不上；无牌面详情的局计
-# 「未详」，展示恒等：局数 = 爆数 + Σ点数 + 未详。
+# 点数样本按「最近 N 局有序窗口」归档（v1.25.0）：每庄家存一条 recent 序列（上限可配
+# tenhalf_dealer_keep，默认 100），rounds/busts/counts/分桶全由它派生——口径单一，恒等
+# 「局数 = 爆数 + Σ点数 + 未详」天然成立。庄家风格会变，只保留近期样本避免长期全量失真；
+# 旧版全量计数（v1.23.20）下次写入自动展开为窗口代表。无牌面详情的局计「未详」。
 # v1.20.0 起画像阈值夹在 4～6.5（爆牌红线）：追庄家均点到 7+ 的爆牌代价
 # （>50% 爆率 × 倍数惩罚）大于压点收益，早停赌庄家自爆期望更优。
 #
@@ -92,6 +93,10 @@ _MIN_CARD_SAMPLES = 3
 # v1.23.20：点数样本由「最近 60 条滑动窗口」改为全量计数（counts）——旧窗口与
 # rounds 全量累计口径不一致（线上实例「144 局 vs 明细 60」）；旧 totals 数据在
 # 画像下次写入时自动迁移为 counts（见 _counts_of）
+# v1.25.0：进一步改为「最近 N 局有序窗口」——庄家风格会变，长期全量累积会让画像
+# 失真；每庄家存一条 recent 有序样本序列（上限 tenhalf_dealer_keep），rounds/busts/
+# counts/分桶全由 recent 派生（口径单一、恒等天然成立）；旧 counts 下次写入自动展开为窗口代表。
+_DEALER_KEEP_DEFAULT = 100  # 每庄家画像保留的最近样本数（窗口上限，可配 tenhalf_dealer_keep）
 # 五小（5 张不爆）直接赢，倍数 ×5（2026-08-18 实测坐实）；EV 递推的收益项
 _FIVE_SMALL_MULT = 5.0
 # 赢 1 单位下注的净收益 0.99（扣 1% 抽水，与线上「赢 +99」口径一致）
@@ -590,15 +595,101 @@ def _dealer_matches(dealer_p: dict | None, whitelist: list[str]) -> bool:
     return False
 
 
+def _dealer_keep(cfg: dict) -> int:
+    """每庄家画像保留的最近样本数（窗口上限）：读 tenhalf_dealer_keep，clamp [20, 500]。"""
+    try:
+        n = int(cfg.get("tenhalf_dealer_keep", _DEALER_KEEP_DEFAULT) or _DEALER_KEEP_DEFAULT)
+    except (TypeError, ValueError):
+        n = _DEALER_KEEP_DEFAULT
+    return min(500, max(20, n))
+
+
+def _expand_legacy_to_recent(entry: dict, keep: int) -> list:
+    """旧全量聚合计数（counts / 更早的 totals）→ recent 有序样本序列的初始代表（v1.25.0 迁移）。
+
+    旧数据不含顺序，按各档点数的占比等比抽样出 keep 条作「最近 keep 局」的代表（保持旧
+    分布形状；不能取展开尾部——尾部由 counts 键序主导，会把画像拉扁成单一档）；张数分桶
+    不迁移（无顺序），随新局重建。爆点脏样本归爆牌、无点数归未详，与 _recompute_entry 的
+    样本编码 [bust, total, cards] 一致。
+    """
+    src = entry.get("counts")
+    if not isinstance(src, dict):
+        src = _counts_of(entry)
+    items: list[tuple[str, int]] = []
+    for tstr, n in src.items():
+        try:
+            cnt = int(n)
+        except (TypeError, ValueError):
+            continue
+        if cnt > 0:
+            items.append((str(tstr), cnt))
+    total = sum(c for _, c in items)
+    if keep > 0 and total > keep:  # 最大余数法等比缩到 keep，保住旧分布形状
+        orig = dict(items)
+        quota = [[t, int(c * keep / total), (c * keep / total) % 1] for t, c in items]
+        for row in sorted(quota, key=lambda r: -r[2])[: keep - sum(r[1] for r in quota)]:
+            row[1] += 1
+        items = [(t, min(n, orig[t])) for t, n, _ in quota if n > 0]
+    recent: list = []
+    for tstr, cnt in items:
+        if tstr == "unseen":
+            recent.extend([[0, None, None]] * cnt)
+            continue
+        try:
+            tv = float(tstr)
+        except (TypeError, ValueError):
+            continue
+        recent.extend([[1, None, None]] * cnt if tv > _TARGET else [[0, tv, None]] * cnt)
+    return recent
+
+
+def _recompute_entry(entry: dict, *, bucket: bool = True) -> None:
+    """由 recent 序列派生写回 rounds/busts/counts/cards（单一数据源→窗口视图，v1.25.0）。
+
+    所有消费方（_dealer_effective/展示/分桶阈值）仍读这些字段，其值恒为「最近 keep 局」
+    的聚合，口径全部源自同一条 recent，绝不与全量混用（避开 v1.23.20 修的口径失配坑）。
+    bucket=False 供张数桶使用：桶内样本同张数，不再向下分桶（防无限递归）。
+    """
+    recent = entry.get("recent") or []
+    counts: dict = {}
+    busts = 0
+    card_recent: dict[str, list] = {}
+    for s in recent:
+        bust, total = s[0], s[1]
+        c = s[2] if len(s) > 2 else None
+        if bust:
+            busts += 1
+        elif total is not None:
+            k = f"{total:g}"
+            counts[k] = int(counts.get(k, 0) or 0) + 1
+        else:
+            counts["unseen"] = int(counts.get("unseen", 0) or 0) + 1
+        if bucket and isinstance(c, int) and c > 0:
+            card_recent.setdefault(str(c), []).append(s)
+    entry["rounds"] = len(recent)
+    entry["busts"] = busts
+    entry["counts"] = counts
+    if not bucket:
+        return
+    cards_map: dict = {}
+    for cstr, sub in card_recent.items():
+        bkt: dict = {"recent": sub}
+        _recompute_entry(bkt, bucket=False)
+        bkt.pop("recent", None)  # 桶只留派生计数，不落子序列（省空间）
+        cards_map[cstr] = bkt
+    entry["cards"] = cards_map
+
+
 def _record_dealer(ctx: object, settlement: dict, cards: int | None = None, dealer_key: str = "") -> str:
-    """累计一条庄家结算（局数/爆牌数/点数计数），返回画像主键。
+    """记录一条庄家结算，维护「最近 N 局」有序样本窗口，返回画像主键。
 
     爆牌判定：文案含「爆」或点数 > 10.5（实测爆牌局的 handLabel 常不含「爆」字、
-    直接显示超点点数，如「11点」），爆牌不入点数计数。结算囊不到牌面（无点数且
-    非爆）的局只计局数、计入 counts 的 unseen，保证「局数 = 爆数 + Σ点数 + 未详」
-    恒等（v1.23.20）。
+    直接显示超点点数，如「11点」），爆牌不入点数计数。囊不到牌面（无点数且非爆）
+    的局记为「未详」。每局 append 进 recent 序列（超 keep 滚掉最旧），rounds/busts/
+    counts/分桶全部由 recent 派生（单一口径，恒等「局数 = 爆数 + Σ点数 + 未详」天然
+    成立）；庄家风格会变，只留近期样本避免长期全量失真（v1.25.0）。
 
-    传入 cards（本局庄家终局手牌张数）时，同步计入按张数分桶的画像。
+    传入 cards（本局庄家终局手牌张数）时随样本一并记录，分桶由 recent 派生。
     传入 dealer_key（稳定 id）时以 id 为主键、displayName 仅作展示名（改名自动归并）；
     未传则兑底用 displayName 做键（老数据兼容）。
     """
@@ -610,39 +701,17 @@ def _record_dealer(ctx: object, settlement: dict, cards: int | None = None, deal
     total = _parse_total(label)
     bust = "爆" in str(label or "") or (total is not None and total > _TARGET)
     dealers = _load_json(ctx.kv, _DEALERS_KEY)
+    keep = _dealer_keep(ctx.config)
     entry = dealers.get(key) or {}
     entry["name"] = name
-    entry["rounds"] = int(entry.get("rounds", 0) or 0) + 1
-    if "counts" not in entry:  # 旧 totals 列表一次性迁移为全量计数（v1.23.20）
-        entry["counts"] = _counts_of(entry, exclude_current=1)  # rounds 已含当前局，gap 需扣除
-        entry.pop("totals", None)
-    counts: dict = entry["counts"]
-    if bust:
-        entry["busts"] = int(entry.get("busts", 0) or 0) + 1
-    elif total is not None:
-        pkey = f"{total:g}"
-        counts[pkey] = int(counts.get(pkey, 0) or 0) + 1
-    else:
-        counts["unseen"] = int(counts.get("unseen", 0) or 0) + 1
-    entry["counts"] = counts
-    if isinstance(cards, int) and cards > 0:
-        cards_map = dict(entry.get("cards") or {})
-        bucket = dict(cards_map.get(str(cards)) or {})
-        bucket["rounds"] = int(bucket.get("rounds", 0) or 0) + 1
-        if "counts" not in bucket:
-            bucket["counts"] = _counts_of(bucket, exclude_current=1)
-            bucket.pop("totals", None)
-        bcounts: dict = bucket["counts"]
-        if bust:
-            bucket["busts"] = int(bucket.get("busts", 0) or 0) + 1
-        elif total is not None:
-            pkey = f"{total:g}"
-            bcounts[pkey] = int(bcounts.get(pkey, 0) or 0) + 1
-        else:
-            bcounts["unseen"] = int(bcounts.get("unseen", 0) or 0) + 1
-        bucket["counts"] = bcounts
-        cards_map[str(cards)] = bucket
-        entry["cards"] = cards_map
+    recent = entry.get("recent")
+    if recent is None:
+        recent = _expand_legacy_to_recent(entry, keep)  # 旧全量 counts/totals 一次性迁移为窗口代表
+        entry.pop("totals", None)  # 迁移后弃用旧 totals 列表，避免两口径混存
+    sample = [1 if bust else 0, None if bust or total is None else total, cards]
+    recent.append(sample)
+    entry["recent"] = recent[-keep:] if len(recent) > keep else recent
+    _recompute_entry(entry)  # 由 recent 派生 rounds/busts/counts/cards（供全部消费方读取）
     dealers[key] = entry
     ctx.kv.set(_DEALERS_KEY, json.dumps(dealers, ensure_ascii=False))
     return key
