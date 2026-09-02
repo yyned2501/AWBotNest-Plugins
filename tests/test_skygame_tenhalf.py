@@ -422,7 +422,50 @@ def test_record_dealer_buckets_by_card_count() -> None:
     entry = json.loads(str(ctx.kv.get("tenhalf:dealers")))["id:9"]
     assert entry["rounds"] == 3 and entry["busts"] == 1
     assert entry["cards"]["3"] == {"rounds": 2, "busts": 1, "counts": {"8": 1}}
-    assert entry["cards"]["4"] == {"rounds": 1, "busts": 0, "counts": {"9": 1}}  # 桶由 recent 派生，busts 恒在
+    assert entry["cards"]["4"] == {"rounds": 1, "busts": 0, "counts": {"9": 1}}  # 桶由自己的窗口派生
+
+
+def test_record_dealer_bucket_window_not_diluted_by_total_window() -> None:
+    """v1.26.0：每种张数有自己的窗口，罕见张数不被高频张数从总窗口里挤掉。"""
+    ctx = _FakeCtx()
+    ctx.config = {"tenhalf_dealer_keep": 20}
+    for i in range(200):  # 每 20 局出一次 5 张，其余 1 张
+        _record_dealer(ctx, {"dealerDisplayName": "涛", "dealerHandLabel": "8点"}, cards=5 if i % 20 == 0 else 1)
+    entry = json.loads(str(ctx.kv.get("tenhalf:dealers")))["涛"]
+    assert entry["rounds"] == 20  # 总窗口仍只留最近 20 局（频率权重不变）
+    assert entry["cards"]["5"]["rounds"] == 10  # 10 次 5 张全部留着（旧格式只会剩下 1 条）
+    assert len(entry["recent_cards"]["5"]) == 10 and len(entry["recent_cards"]["1"]) == 20
+
+
+def test_record_dealer_each_bucket_capped_at_keep() -> None:
+    """各张数子窗口独立裁剪到上限，互不影响。"""
+    ctx = _FakeCtx()
+    ctx.config = {"tenhalf_dealer_keep": 20}
+    for label in ["8点"] * 60 + ["11点"] * 60:  # 3 张 60 局 + 4 张 60 局
+        _record_dealer(ctx, {"dealerDisplayName": "涛", "dealerHandLabel": label}, cards=3 if label == "8点" else 4)
+    entry = json.loads(str(ctx.kv.get("tenhalf:dealers")))["涛"]
+    assert entry["rounds"] == 20 and entry["busts"] == 20  # 总窗口已被后期的爆牌局占满
+    assert entry["cards"]["3"] == {"rounds": 20, "busts": 0, "counts": {"8": 20}}
+    assert entry["cards"]["4"] == {"rounds": 20, "busts": 20, "counts": {}}
+
+
+def test_record_dealer_migrates_flat_window_into_buckets() -> None:
+    """v1.25.0 单层窗口（无 recent_cards）首次写入：按张数拆窗，旧样本不丢、本局不重复计。"""
+    ctx = _FakeCtx()
+    flat = {
+        "name": "涛",
+        "recent": [[0, 8.0, 3], [1, None, 3], [0, 9.0, None]],
+        "rounds": 3,
+        "busts": 1,
+        "counts": {"8": 1, "9": 1},
+    }
+    ctx.kv.set("tenhalf:dealers", json.dumps({"涛": flat}, ensure_ascii=False))
+    _record_dealer(ctx, {"dealerDisplayName": "涛", "dealerHandLabel": "7点"}, cards=3)
+    entry = json.loads(str(ctx.kv.get("tenhalf:dealers")))["涛"]
+    assert entry["recent_cards"]["3"] == [[0, 8.0, 3], [1, None, 3], [0, 7.0, 3]]  # 拆窗 + 本局一条
+    assert entry["rounds"] == 4 and entry["busts"] == 1
+    assert entry["cards"]["3"]["rounds"] == 3 and entry["cards"]["3"]["busts"] == 1
+    assert entry["counts"] == {"8": 1, "9": 1, "7": 1}
 
 
 def test_threshold_prefers_card_bucket_then_aggregate() -> None:

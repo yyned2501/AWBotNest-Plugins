@@ -590,9 +590,9 @@ async function renewNow() {
           <section class="card">
             <div class="card-h">庄家画像</div>
             <div class="fld">
-              <span class="lbl">保留局数（只算最近 N 局）</span>
+              <span class="lbl">保留局数（每档各算最近 N 局）</span>
               <input v-model.number="cfg.tenhalf_dealer_keep" class="inp" type="number" min="20" max="500" step="10" />
-              <span class="help">每个庄家的爆率/点数分布/停牌 EV 只用最近 N 局样本，更早的自动滚出：庄家点数风格会变，长期累积会拖失真（推送里的「N局」即窗口内局数）。改小后下次结算即按新上限裁剪</span>
+              <span class="help">每个庄家留最近 N 局做总体画像，同时每种终局手牌张数（1张/2张/…）也各留最近 N 局做分桶，互不挤占：罕见张数（如 5 张）不再被高频张数挤掉、样本长期不够用。爆率/点数分布/停牌 EV 都只用这些近期样本（庄家点数风格会变，长期累积会拖失真；推送里的「N局」即窗口内局数）。改小后下次结算即按新上限裁剪</span>
             </div>
           </section>
 
