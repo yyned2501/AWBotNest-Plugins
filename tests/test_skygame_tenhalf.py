@@ -357,6 +357,20 @@ def test_record_dealer_legacy_migration_keeps_distribution_shape() -> None:
     assert r == b + len(t) + entry["counts"]["unseen"]  # 恒等成立
 
 
+def test_record_dealer_legacy_migration_carries_bust_rate() -> None:
+    """旧格式爆牌数单存在 busts（不在 counts 里）→ 迁移必须并入窗口，否则爆率归零、EV 失真。"""
+    ctx = _FakeCtx()
+    ctx.config = {"tenhalf_dealer_keep": 20}
+    legacy = {"name": "涛", "rounds": 200, "busts": 100, "counts": {"8": 100}}
+    ctx.kv.set("tenhalf:dealers", json.dumps({"涛": legacy}, ensure_ascii=False))
+    _record_dealer(ctx, {"dealerDisplayName": "涛", "dealerHandLabel": "8点"})
+    entry = json.loads(str(ctx.kv.get("tenhalf:dealers")))["涛"]
+    assert entry["rounds"] == 20
+    assert entry["busts"] == 10  # 100/200 占比 → 窗口内保留一半爆牌样本
+    assert entry["counts"]["8"] == 10
+    assert entry["busts"] + sum(entry["counts"].values()) == entry["rounds"]
+
+
 def test_dealer_keep_clamps_and_defaults() -> None:
     """窗口上限读 tenhalf_dealer_keep，clamp [20, 500]、非法/缺省回退默认 100。"""
     assert _dealer_keep({}) == 100

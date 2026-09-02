@@ -97,6 +97,7 @@ _MIN_CARD_SAMPLES = 3
 # 失真；每庄家存一条 recent 有序样本序列（上限 tenhalf_dealer_keep），rounds/busts/
 # counts/分桶全由 recent 派生（口径单一、恒等天然成立）；旧 counts 下次写入自动展开为窗口代表。
 _DEALER_KEEP_DEFAULT = 100  # 每庄家画像保留的最近样本数（窗口上限，可配 tenhalf_dealer_keep）
+_BUST_KEY = "__bust__"  # 迁移用伪档：旧格式爆牌数单存 entry["busts"]（不在 counts 内），等比抽样时并入
 # 五小（5 张不爆）直接赢，倍数 ×5（2026-08-18 实测坐实）；EV 递推的收益项
 _FIVE_SMALL_MULT = 5.0
 # 赢 1 单位下注的净收益 0.99（扣 1% 抽水，与线上「赢 +99」口径一致）
@@ -609,8 +610,9 @@ def _expand_legacy_to_recent(entry: dict, keep: int) -> list:
 
     旧数据不含顺序，按各档点数的占比等比抽样出 keep 条作「最近 keep 局」的代表（保持旧
     分布形状；不能取展开尾部——尾部由 counts 键序主导，会把画像拉扁成单一档）；张数分桶
-    不迁移（无顺序），随新局重建。爆点脏样本归爆牌、无点数归未详，与 _recompute_entry 的
-    样本编码 [bust, total, cards] 一致。
+    不迁移（无顺序），随新局重建。旧格式的爆牌数存在 entry["busts"]（不在 counts 里），
+    迁移时并入同一抽样口径，否则窗口会丢掉全部爆牌样本、爆率归零。超点脏样本归爆牌、
+    无点数归未详，与 _recompute_entry 的样本编码 [bust, total, cards] 一致。
     """
     src = entry.get("counts")
     if not isinstance(src, dict):
@@ -623,6 +625,12 @@ def _expand_legacy_to_recent(entry: dict, keep: int) -> list:
             continue
         if cnt > 0:
             items.append((str(tstr), cnt))
+    try:
+        bust_n = int(entry.get("busts", 0) or 0)
+    except (TypeError, ValueError):
+        bust_n = 0
+    if bust_n > 0:
+        items.append((_BUST_KEY, bust_n))
     total = sum(c for _, c in items)
     if keep > 0 and total > keep:  # 最大余数法等比缩到 keep，保住旧分布形状
         orig = dict(items)
@@ -632,6 +640,9 @@ def _expand_legacy_to_recent(entry: dict, keep: int) -> list:
         items = [(t, min(n, orig[t])) for t, n, _ in quota if n > 0]
     recent: list = []
     for tstr, cnt in items:
+        if tstr == _BUST_KEY:
+            recent.extend([[1, None, None]] * cnt)
+            continue
         if tstr == "unseen":
             recent.extend([[0, None, None]] * cnt)
             continue
