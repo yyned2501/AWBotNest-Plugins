@@ -75,6 +75,7 @@ const DEFAULTS = {
   tenhalf_bet_amount: 100,
   tenhalf_stand_threshold: 8,
   tenhalf_notify: true,
+  tenhalf_dealer_whitelist: '',
   // AI 评价（通用模块）
   ai_review_enabled: true,
   ai_review_games: ['tenhalf'],
@@ -571,6 +572,11 @@ async function renewNow() {
                 <input v-model.number="cfg.tenhalf_stand_threshold" class="inp" type="number" min="4" max="10" step="0.5" />
                 <span class="help">仅画像样本不足时的回退基准；样本足够时走 EV 决策（停牌 EV 对要牌 EV 递推择优）</span>
               </div>
+            </div>
+            <div class="fld">
+              <span class="lbl">指定庄家（留空=不限）</span>
+              <textarea v-model="cfg.tenhalf_dealer_whitelist" class="inp" rows="2" spellcheck="false" placeholder="一行一个，如：麦克格雷涛"></textarea>
+              <span class="help">只在这些庄家开局时报名；填显示名或 id:xxx。配置后即使游戏掉落配额已满也照常加入（不受掉落守卫暂停）</span>
             </div>
             <span class="help">
               决策优先序：庄家爆牌→停牌 ｜ 我方/庄家五小→立即停牌 ｜ 庄家画像样本足够→EV 决策：

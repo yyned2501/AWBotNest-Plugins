@@ -559,6 +559,37 @@ def _dealer_key_of(dealer_p: dict | None) -> str:
     return ""
 
 
+def _dealer_whitelist(cfg: dict) -> list[str]:
+    """「指定庄家」名单（逗号/换行分隔，displayName 或 id:xxx）；空=不限（所有庄家都打）。
+
+    非空时进入「专打指定庄家」模式：signup 只在这些庄家开局时报名，且豁免掉落
+    配额暂停（用户明确要打这些庄家，掉落奖励与否无所谓，不受掉落守卫拦截）。
+    """
+    raw = str(cfg.get("tenhalf_dealer_whitelist", "") or "")
+    return [p.strip() for p in re.split(r"[,\n，]+", raw) if p.strip()]
+
+
+def _dealer_matches(dealer_p: dict | None, whitelist: list[str]) -> bool:
+    """当前庄家是否命中名单：displayName / 稳定 id（id:xxx）/ 纯 accountId·userId，大小写不敏感。
+
+    名单留空视为不限制（返回 True 由调用方短路，这里 whitelist 空直接 False 交由调用方判断）。
+    """
+    if not dealer_p or not whitelist:
+        return False
+    norm = {w.lower() for w in whitelist}
+    name = str(dealer_p.get("displayName") or "").strip()
+    if name and name.lower() in norm:
+        return True
+    key = _dealer_key_of(dealer_p)  # id:{accountId|userId}
+    if key and key.lower() in norm:
+        return True
+    for field in ("accountId", "userId"):
+        v = dealer_p.get(field)
+        if v not in (None, "") and str(v).strip().lower() in norm:
+            return True
+    return False
+
+
 def _record_dealer(ctx: object, settlement: dict, cards: int | None = None, dealer_key: str = "") -> str:
     """累计一条庄家结算（局数/爆牌数/点数计数），返回画像主键。
 
@@ -1009,9 +1040,11 @@ async def _once(ctx: object, cfg: dict, client: HdskyClient) -> None:
     await _handle_settlement(ctx, cfg, game)
     # lastResult 漏掉的结算用 history[] 回查（快速局 settled 窗口短于轮询间隔）
     await _catch_up_settlement(ctx, cfg, game)
-    if drop_guard.paused(ctx) and self_p is None:
-        # 配额满且未参与当前局：结算已消化完，停心跳（不再新报名）；已报名则
-        # 照常打完本局。注意此检查必须在结算消化之后——否则刚结束那局切到
+    # 「指定庄家」名单非空 → 专打模式：只在这些庄家开局时报名，且豁免掉落配额暂停
+    whitelist = _dealer_whitelist(cfg)
+    if drop_guard.paused(ctx) and self_p is None and not whitelist:
+        # 配额满且未参与当前局、又没配置专打庄家：结算已消化完，停心跳（不再新报名）；
+        # 已报名则照常打完本局。注意此检查必须在结算消化之后——否则刚结束那局切到
         # 新局后 self_p 为空，结算会被暂停检查吞掉永不入账（v1.23.3 修复）
         return
     if not game.get("active"):
@@ -1031,6 +1064,11 @@ async def _once(ctx: object, cfg: dict, client: HdskyClient) -> None:
     # 报名阶段：未报名且可加入 → 按配置下注
     if phase == "signup":
         if self_p is not None or "join" not in actions:
+            return
+        if whitelist and not _dealer_matches(dealer_p, whitelist):
+            ctx.log.debug(
+                "十点半 #%s 庄家 %s 不在指定名单，跳过报名", rid, (dealer_p or {}).get("displayName") or "未知"
+            )
             return
         # 配额满时不新报名的拦截在 _once 顶部（paused 且未参与直接返回）
         if ctx.kv.get(_JOIN_FAIL_KEY, "") == str(rid):

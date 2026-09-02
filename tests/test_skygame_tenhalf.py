@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import time
 
 import pytest
 
@@ -17,7 +18,9 @@ from plugins.skyGame.games.tenhalf import (
     _catch_up_settlement,
     _dealer_dist,
     _dealer_effective,
+    _dealer_matches,
     _dealer_profile_text,
+    _dealer_whitelist,
     _decide,
     _decide_ev,
     _decide_text,
@@ -48,6 +51,7 @@ def _game(
     last_result: dict[str, object] | None = None,
     self_total: float | None = None,
     self_cards: list[str] | None = None,
+    dealer: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """构造 GET /api/portal/tenhalf 响应。"""
     game: dict[str, object] = {
@@ -64,6 +68,8 @@ def _game(
         game["self"] = {"cards": self_cards or [], "total": self_total, "status": ""}
     if last_result is not None:
         game["lastResult"] = last_result
+    if dealer is not None:
+        game["dealer"] = dealer
     return {"game": game}
 
 
@@ -664,6 +670,84 @@ async def test_join_failure_not_retried_same_round() -> None:
 
     assert len(client.posts) == 1
     assert any(level == "warning" for _, level in ctx.notifications)
+
+
+# ── 指定庄家白名单（v1.24.0）──
+
+
+def test_dealer_whitelist_parses_separators() -> None:
+    """逗号/换行/中文逗号混用都能拆；空白项丢弃；留空=不限。"""
+    assert _dealer_whitelist({"tenhalf_dealer_whitelist": "甲, 乙\n丙，丁 "}) == ["甲", "乙", "丙", "丁"]
+    assert _dealer_whitelist({"tenhalf_dealer_whitelist": ""}) == []
+    assert _dealer_whitelist({}) == []
+
+
+def test_dealer_matches_by_name_and_id() -> None:
+    """命中 displayName / id:xxx / 纯 accountId，大小写不敏感；不匹配返回 False。"""
+    dealer = {"displayName": "麦克格雷涛", "accountId": 123}
+    assert _dealer_matches(dealer, ["麦克格雷涛"])
+    assert _dealer_matches(dealer, ["id:123"])
+    assert _dealer_matches(dealer, ["123"])
+    assert _dealer_matches({"displayName": "ABC"}, ["abc"])  # 大小写不敏感
+    assert not _dealer_matches(dealer, ["别人"])
+    assert not _dealer_matches(None, ["甲"])  # 无庄家信息
+    assert not _dealer_matches(dealer, [])  # 空名单
+
+
+def _pause_drop_guard(ctx: _FakeCtx) -> None:
+    """把掉落守卫置为暂停（配额满且 /info 新鲜）。"""
+    ctx.kv.set("dropguard:remaining", 0)
+    ctx.kv.set("dropguard:checked_ts", time.time())
+
+
+@pytest.mark.asyncio
+async def test_signup_skips_non_whitelist_dealer() -> None:
+    """白名单非空且庄家不匹配 → 不报名。"""
+    ctx = _FakeCtx()
+    client = _FakeClient(
+        _game(phase="signup", actions=["join"], dealer={"displayName": "乙", "accountId": 2}),
+        _OK,
+    )
+    await _once(ctx, {"tenhalf_dealer_whitelist": "甲"}, client)
+    assert client.posts == []
+
+
+@pytest.mark.asyncio
+async def test_signup_joins_whitelist_dealer() -> None:
+    """白名单匹配 → 照常报名。"""
+    ctx = _FakeCtx()
+    client = _FakeClient(
+        _game(phase="signup", actions=["join"], dealer={"displayName": "甲", "accountId": 1}),
+        _OK,
+    )
+    await _once(ctx, {"tenhalf_dealer_whitelist": "甲"}, client)
+    assert client.posts and client.posts[0][1]["action"] == "join"
+
+
+@pytest.mark.asyncio
+async def test_whitelist_bypasses_drop_guard_pause() -> None:
+    """专打模式豁免掉落暂停：配额满时白名单庄家仍报名，非白名单庄家跳过。"""
+    ctx = _FakeCtx()
+    _pause_drop_guard(ctx)
+    client = _FakeClient(_game(phase="signup", actions=["join"], dealer={"displayName": "甲"}), _OK)
+    await _once(ctx, {"tenhalf_dealer_whitelist": "甲"}, client)
+    assert client.posts and client.posts[0][1]["action"] == "join"
+
+    ctx = _FakeCtx()
+    _pause_drop_guard(ctx)
+    client = _FakeClient(_game(phase="signup", actions=["join"], dealer={"displayName": "乙"}), _OK)
+    await _once(ctx, {"tenhalf_dealer_whitelist": "甲"}, client)
+    assert client.posts == []
+
+
+@pytest.mark.asyncio
+async def test_no_whitelist_respects_drop_guard_pause() -> None:
+    """未配置白名单时维持现状：配额满则不新报名。"""
+    ctx = _FakeCtx()
+    _pause_drop_guard(ctx)
+    client = _FakeClient(_game(phase="signup", actions=["join"], dealer={"displayName": "甲"}), _OK)
+    await _once(ctx, {}, client)
+    assert client.posts == []
 
 
 # ── 玩家抓牌阶段 ──
