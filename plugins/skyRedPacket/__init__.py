@@ -8,26 +8,31 @@
 #
 # 策略：
 # 1. 检测到拼手气红包 → 等随机初始延迟 → 点击「抢红包」
-# 2. 如果回调提示"红包前 30 秒仅限最近 20 位发言人领取"，
-#    从回调文本解析等待秒数 n，计算 message.date + n 重试
+# 2. 如果被拒（回调提示"红包前 30 秒仅限最近 20 位发言人领取"，说明最近没发言），
+#    从回调文本解析等待秒数 n，按 message.date + n 等到可抢后，再追加一段随机
+#    大延迟才重试，避免总在可抢瞬间精准点击被行为检测识别
 # 3. 如果提示已抢过/已结束，直接跳过，不做去重
 # =============================================================================
 
 from __future__ import annotations
 
 import asyncio
+import random
 import re
 import time
 
 __plugin__ = {
     "name": "天空红包",
     "id": "skyRedPacket",
-    "version": "2.5.3",
+    "version": "2.6.0",
     "author": "Yy",
-    "description": "天空小秘（bot 8907007783）拼手气红包自动抢：先抢再重试策略，被拒后从回调解析等待时间自动重试。",
+    "description": "天空小秘（bot 8907007783）拼手气红包自动抢：先抢再重试，被拒（未发言）后加随机大延迟再重试。",
     "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/skyRedPacket.svg",
     "scope": "user",
     "changelog": (
+        "v2.6.0 更新内容：\n"
+        "- 新增「未发言重试延迟」：被拒（说明最近没发言）后，在可抢时间基础上追加一段随机大延迟再重试，"
+        "避免总在可抢瞬间精准点击被行为检测识别\n"
         "v2.5.3 更新内容：\n"
         "- 移除全部去重逻辑，见到新红包就抢，已抢过/已结束由回调提示处理\n"
         "v2.5.2 更新内容：\n"
@@ -84,6 +89,26 @@ __plugin__ = {
             "step": 1,
             "help": "计算出的重试时间前 N 秒提前点击，避免刚好错过。",
         },
+        "quiet_retry_min": {
+            "type": "slider",
+            "default": 10,
+            "label": "未发言延迟下限(秒)",
+            "section": "策略",
+            "min": 0,
+            "max": 120,
+            "step": 1,
+            "help": "被拒（最近没发言）后，在可抢时间基础上再随机延后这么久才重试，模拟真人稍后才注意到。设 0 关闭。",
+        },
+        "quiet_retry_max": {
+            "type": "slider",
+            "default": 40,
+            "label": "未发言延迟上限(秒)",
+            "section": "策略",
+            "min": 0,
+            "max": 180,
+            "step": 1,
+            "help": "未发言重试随机延迟的上限，实际等待在下限~上限间随机取值；上下限相同则固定。上限设 0 关闭功能。",
+        },
     },
 }
 
@@ -108,16 +133,45 @@ def _parse_groups(raw: str) -> list[int]:
 def _parse_wait_seconds(callback_text: str) -> int | None:
     """从回调文本解析需要等待的秒数。
 
-    例： "红包前 30 秒仅限最近 20 位发言人领取，请在 12 秒后重试" → 12
+    取文本中第一个「N 秒」，即红包「前 N 秒」可抢窗口，配合 message.date 算重试点。
+    例： "红包前 30 秒仅限最近 20 位发言人领取，请在 12 秒后重试" → 30
          "距红包可抢还有 5 秒" → 5
     """
     if not callback_text:
         return None
-    # 尝试匹配 "请在 X 秒后重试"、"X 秒后"、"还有 X 秒" 等模式
     m = re.search(r"(\d+)\s*秒", callback_text)
     if m:
         return int(m.group(1))
     return None
+
+
+def _quiet_extra_delay(lo: float, hi: float) -> float:
+    """未发言被拒时追加的随机额外延迟（秒）。
+
+    上限 <= 0 表示关闭大延迟，返回 0，保持旧的"可抢即点"行为（向后兼容）。
+    下限会被夹到 >=0；上下限写反自动纠正；相等则退化为固定值。
+    """
+    if hi <= 0:
+        return 0.0
+    lo = max(0.0, lo)
+    if hi < lo:
+        lo, hi = hi, lo
+    return random.uniform(lo, hi)
+
+
+def _compute_retry_wait(wait_seconds: int, msg_ts: float, retry_offset: float, quiet_extra: float) -> float:
+    """计算被拒后到下次点击的等待秒数。
+
+    可抢时间 = 红包发送时间 + wait_seconds，提前 retry_offset 秒点击避免刚好错过，
+    未发言时再叠加 quiet_extra 大延迟。拿不到发送时间时退化为从现在等 wait_seconds。
+    结果不低于 0.5 秒。
+    """
+    if msg_ts > 0:
+        wait = msg_ts + wait_seconds - retry_offset - time.time()
+    else:
+        wait = float(wait_seconds)
+    wait += quiet_extra
+    return max(wait, 0.5)
 
 
 def _find_snatch_button(message: object) -> tuple[int, int] | None:
@@ -184,9 +238,11 @@ async def setup(ctx: object) -> None:
         initial_delay = float(cfg.get("initial_delay", 2))
         random_delay_max = float(cfg.get("random_delay_max", 3))
         retry_offset = float(cfg.get("retry_offset", 1))
+        quiet_retry_min = float(cfg.get("quiet_retry_min", 10))
+        quiet_retry_max = float(cfg.get("quiet_retry_max", 40))
 
         # 首次尝试
-        delay = initial_delay + (random_delay_max * __import__("random").random())
+        delay = initial_delay + (random_delay_max * random.random())
         if delay > 0:
             ctx.log.info("初始延迟 %.1fs 后抢 chat=%s msg=%s", delay, chat_id, message.id)
             await asyncio.sleep(delay)
@@ -238,18 +294,14 @@ async def setup(ctx: object) -> None:
                 )
                 return
 
-            # 计算重试时间：红包发送时间 + n 秒 - 提前量
-            if msg_ts > 0:
-                retry_at = msg_ts + wait_seconds - retry_offset
-                now = time.time()
-                wait = retry_at - now
-                if wait < 0:
-                    wait = 0.5  # 至少等 0.5 秒
-            else:
-                wait = float(wait_seconds)
+            # 被拒即说明最近没发言（未进前 20 位发言人）：在可抢时间基础上再
+            # 追加一段随机大延迟，模拟真人稍后才注意到，避免总在可抢瞬间精准点击
+            quiet_extra = _quiet_extra_delay(quiet_retry_min, quiet_retry_max)
+            wait = _compute_retry_wait(wait_seconds, msg_ts, retry_offset, quiet_extra)
 
             ctx.log.info(
-                "被拒，等待 %.1fs 后重试（attempt %d/%d）chat=%s msg=%s",
+                "被拒(未发言)，可抢后再延后 %.1fs，共等待 %.1fs 后重试（attempt %d/%d）chat=%s msg=%s",
+                quiet_extra,
                 wait,
                 attempt + 1,
                 _MAX_RETRIES,
