@@ -154,26 +154,21 @@ async def test_apply_reply_toggles_pause_and_notifies_once() -> None:
 
 
 @pytest.mark.asyncio
-async def test_guard_tick_sends_info_with_throttle() -> None:
+async def test_guard_tick_sends_info_every_fire() -> None:
+    """cron 模式：每次触发都发 /info（频率由调度器保证，tick 内不再自算间隔节流）。"""
     ctx = _GuardCtx()
     ctx.config = {"drop_guard_enabled": True, "drop_guard_interval": 10}
 
-    await dg._guard_tick(ctx)  # 从未查过 → 立即发（纯数字 ID 转 int，不带 @）
+    await dg._guard_tick(ctx)  # 纯数字 ID 转 int，不带 @
     assert ctx.user.sent == [("8907007783", "/info")]
     assert ctx.kv.get(dg._KV_SENT_TS)
 
-    await dg._guard_tick(ctx)  # 刚发过（未到间隔）→ 不重复发
-    assert len(ctx.user.sent) == 1
-
-    # 间隔到了（checked_ts/sent_ts 均为 11 分钟前）→ 再发
-    _set_full(ctx, remaining=3, age=11 * 60)
-    ctx.kv.set(dg._KV_SENT_TS, time.time() - 11 * 60)
+    # cron 再次触发（即使刚发过）→ 再发，不再节流
     await dg._guard_tick(ctx)
     assert len(ctx.user.sent) == 2
 
     # 关闭开关 → 不发
     ctx.config["drop_guard_enabled"] = False
-    _set_full(ctx, remaining=3, age=11 * 60)
     await dg._guard_tick(ctx)
     assert len(ctx.user.sent) == 2
 
@@ -237,8 +232,34 @@ def test_start_registers_handler_and_zero_arg_tick() -> None:
     assert len(registered) == 1 and registered[0][1] == 7
     assert len(ctx.schedules) == 1
     fn, mode, kwargs = ctx.schedules[0]
-    assert mode == "interval" and kwargs.get("id") == "drop_guard_tick"
+    assert mode == "cron" and kwargs.get("id") == "drop_guard_tick"
+    assert kwargs.get("minute") == "*/10"  # drop_guard_interval 默认 10 → cron */10 整点对齐
     assert len(inspect.signature(fn).parameters) == 0
+
+
+def test_start_cron_minute_follows_interval() -> None:
+    """cron 表达式由 drop_guard_interval 生成，并 clamp 到 [5, 60]。"""
+
+    class _Filters:
+        private = _F()
+        text = _F()
+
+        @staticmethod
+        def user(ids: object) -> _F:
+            return _F()
+
+    def _minute_for(cfg_interval: object) -> object:
+        ctx = _GuardCtx()
+        ctx.config = {"drop_guard_interval": cfg_interval}
+        ctx.filters = _Filters  # type: ignore[attr-defined]
+        ctx.on_message = lambda f, group=0: lambda fn: fn  # type: ignore[attr-defined]
+        dg.start(ctx)
+        return ctx.schedules[0][2].get("minute")
+
+    assert _minute_for(30) == "*/30"
+    assert _minute_for(2) == "*/5"  # 低于下限 clamp 到 5
+    assert _minute_for(999) == "*/60"  # 高于上限 clamp 到 60
+    assert _minute_for(None) == "*/10"  # 缺省回退 10
 
 
 # ── 集成：十点半报名被掉落配额拦截 ──

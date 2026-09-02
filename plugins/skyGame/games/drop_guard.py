@@ -35,7 +35,7 @@ _KV_PAUSED = "dropguard:paused"
 
 _DEFAULT_BOT = 8907007783  # 天空小秘（与 skyDropAnswer 默认值一致；int 避免被当作用户名）
 _STALE_AFTER = 3600.0  # /info 结果超过 1 小时视为过期：时段本就按小时轮换，也防一次误判长期锁死
-_TICK_SECONDS = 60  # 低频检查；实际发 /info 的间隔由 drop_guard_interval 配置控制
+_DEFAULT_INTERVAL_MIN = 10  # 默认 /info 检查间隔（分钟）；cron 表达式 */N 由此生成，整点对齐
 
 
 def _parse_bot_ids(raw: str) -> list[int | str]:
@@ -127,14 +127,23 @@ def _guard_bot_ids(cfg: dict) -> list[int | str]:
     return _parse_bot_ids(str(cfg.get("drop_guard_bot", "") or ""))
 
 
+def _guard_interval_minutes(ctx: object) -> int:
+    """/info 检查间隔（分钟）：读 drop_guard_interval，clamp 到 [5, 60]，用于生成 cron */N。"""
+    try:
+        n = int(ctx.config.get("drop_guard_interval", _DEFAULT_INTERVAL_MIN) or _DEFAULT_INTERVAL_MIN)
+    except (TypeError, ValueError):
+        n = _DEFAULT_INTERVAL_MIN
+    return min(60, max(5, n))
+
+
 async def _guard_tick(ctx: object) -> None:
-    """低频 tick：间隔到了就私聊 bot 发一次 /info（回复由 handler 捕获解析）。"""
+    """cron 整点对齐触发：私聊 bot 发一次 /info（回复由 handler 捕获解析）。
+
+    发送频率完全交给 cron 调度器保证，这里不再自算「距上次满间隔」——旧的
+    60s tick + 节流模式会因 /info 回复时间戳漂移导致实际间隔不精确（约 11 分钟）、
+    每次发送时刻乱跳（v1.24.1 改 cron 整点对齐）。
+    """
     if not _guard_enabled(ctx):
-        return
-    interval = max(5, int(ctx.config.get("drop_guard_interval", 10) or 10)) * 60
-    now = time.time()
-    last = max(float(ctx.kv.get(_KV_CHECKED_TS, 0) or 0), float(ctx.kv.get(_KV_SENT_TS, 0) or 0))
-    if now - last < interval:
         return
     bot_ids = _guard_bot_ids(ctx.config)
     target = bot_ids[0]
@@ -142,7 +151,7 @@ async def _guard_tick(ctx: object) -> None:
         target = f"@{target}"
     try:
         await ctx.user.send(target, "/info")
-        ctx.kv.set(_KV_SENT_TS, now)
+        ctx.kv.set(_KV_SENT_TS, time.time())
         ctx.log.info("掉落守卫：已私聊 bot %s 发送 /info", target)
     except Exception as e:
         ctx.log.warning("掉落守卫 /info 发送失败: %r", e)
@@ -172,8 +181,9 @@ def start(ctx: object) -> None:
         except Exception as e:
             ctx.log.error("掉落守卫 tick 异常: %r", e)
 
-    ctx.schedule(_tick, "interval", seconds=_TICK_SECONDS, id="drop_guard_tick")
-    ctx.log.info("掉落守卫已启动（每 %ds 检查一次 /info 是否到期，监听 bot=%s）", _TICK_SECONDS, bot_ids)
+    minutes = _guard_interval_minutes(ctx)
+    ctx.schedule(_tick, "cron", minute=f"*/{minutes}", id="drop_guard_tick")
+    ctx.log.info("掉落守卫已启动（cron 每 %d 分整点对齐发 /info，监听 bot=%s）", minutes, bot_ids)
 
 
 def stop(ctx: object) -> None:
