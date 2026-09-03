@@ -13,7 +13,7 @@ AWBotNest-Plugins/
 │   ├── learning/         # 智能学习（v3.1.1）：学习聊天偏好，智能参与对话
 │   ├── scratch.py        # 天空刮奖（v1.6.2）：刮刮乐自动挂机（单文件插件）
 │   ├── skyDropAnswer/    # 天空答题（v2.1.5）：答题 + 定时触发一体化
-│   ├── skyGame/          # 天空游戏（v1.16.26）：炸金花/养马/Cookie 续期统一入口
+│   ├── skyGame/          # 天空游戏（v1.27.0）：炸金花/养马/Cookie 续期统一入口
 │   ├── juai_checkin.py   # JUAI 自动签到（v1.4.2）（单文件插件）
 │   └── _TEMPLATE.py      # 插件开发模板（非插件，不在 manifest 中）
 ├── manifest.json          # 插件市场清单（登记上述 7 个插件的 id/version/path）

@@ -76,6 +76,7 @@ const DEFAULTS = {
   tenhalf_stand_threshold: 8,
   tenhalf_notify: true,
   tenhalf_dealer_whitelist: '',
+  tenhalf_dealer_always: false,
   tenhalf_dealer_keep: 100,
   // AI 评价（通用模块）
   ai_review_enabled: true,
@@ -206,7 +207,8 @@ async function renewNow() {
             </label>
             <span class="help" style="margin-top:-4px">
               定期私聊天空小秘发 /info 查「当前时段剩余掉落」，剩余为 0 时暂停十点半报名/炸金花入桌/赛马报名
-              （养马喂食/遛马不受影响），时段刷新后自动恢复；状态切换会通知一次
+              （养马喂食/遛马不受影响），时段刷新后自动恢复；状态切换会通知一次。
+              十点半若配置了「指定庄家」，掉落满时不是完全停，而是只报名名单内庄家的局
             </span>
             <div class="fld">
               <span class="lbl">掉落检查间隔(分钟)</span>
@@ -575,15 +577,22 @@ async function renewNow() {
               </div>
             </div>
             <div class="fld">
-              <span class="lbl">指定庄家（留空=不限）</span>
+              <span class="lbl">指定庄家（掉落配额满时才生效）</span>
               <textarea v-model="cfg.tenhalf_dealer_whitelist" class="inp" rows="2" spellcheck="false" placeholder="一行一个，如：麦克格雷涛"></textarea>
-              <span class="help">只在这些庄家开局时报名；填显示名或 id:xxx。配置后即使游戏掉落配额已满也照常加入（不受掉落守卫暂停）</span>
+              <span class="help">掉落配额未满时所有庄家的局都报名（掉落才是主要收益）；满了领不到掉落，此时只打名单里的庄家（填显示名或 id:xxx）。留空=配额满就不再新报名</span>
             </div>
+            <label class="row switch">
+              <input v-model="cfg.tenhalf_dealer_always" type="checkbox" />
+              <span>指定庄家始终生效</span>
+            </label>
+            <span class="help" style="margin-top:-4px">勾选后不管掉落配额满不满都只报名名单庄家的局（旧「专打模式」）；不勾选=只在配额满时才按名单收窄</span>
             <span class="help">
-              决策优先序：庄家爆牌→停牌 ｜ 我方/庄家五小→立即停牌 ｜ 庄家画像样本足够→EV 决策：
+              决策优先序：庄家爆牌→停牌 ｜ 我方五小（5 张未爆）→停牌赢 ×5 ｜ 庄家画像样本足够→EV 决策：
               按画像点数分布+爆率算停牌 EV，对比 52 张先验递推的要牌 EV（含五小 ×5），择优要/停，
               张数是一等公民（4 张低点数追五小、高点数早停）｜ 画像不足→退停牌阈值。
-              从不认输（fold 与停牌同样损失下注）
+              庄家 5 张不等于五小已定（他还会补牌爆掉）：停牌 EV 按「5 张」桶条件分布算——庄家成了五小输 ×5，
+              庄家爆了赢 +0.99；认输只在首手（我方还没拿牌）可选且只输本金 ×1，
+              五小概率大、停牌 EV ≤ -1 时才认输止损，否则照常在拿牌/停牌间择优
             </span>
           </section>
 

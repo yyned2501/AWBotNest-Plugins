@@ -766,7 +766,7 @@ async def test_join_failure_not_retried_same_round() -> None:
     assert any(level == "warning" for _, level in ctx.notifications)
 
 
-# ── 指定庄家白名单（v1.24.0）──
+# ── 指定庄家名单（v1.24.0 引入，v1.27.0 改为「掉落配额满时才收窄」）──
 
 
 def test_dealer_whitelist_parses_separators() -> None:
@@ -795,23 +795,11 @@ def _pause_drop_guard(ctx: _FakeCtx) -> None:
 
 
 @pytest.mark.asyncio
-async def test_signup_skips_non_whitelist_dealer() -> None:
-    """白名单非空且庄家不匹配 → 不报名。"""
+async def test_signup_ignores_whitelist_while_quota_available() -> None:
+    """v1.27.0 核心：掉落配额未满时名单不参与判断，非名单庄家照样报名。"""
     ctx = _FakeCtx()
     client = _FakeClient(
         _game(phase="signup", actions=["join"], dealer={"displayName": "乙", "accountId": 2}),
-        _OK,
-    )
-    await _once(ctx, {"tenhalf_dealer_whitelist": "甲"}, client)
-    assert client.posts == []
-
-
-@pytest.mark.asyncio
-async def test_signup_joins_whitelist_dealer() -> None:
-    """白名单匹配 → 照常报名。"""
-    ctx = _FakeCtx()
-    client = _FakeClient(
-        _game(phase="signup", actions=["join"], dealer={"displayName": "甲", "accountId": 1}),
         _OK,
     )
     await _once(ctx, {"tenhalf_dealer_whitelist": "甲"}, client)
@@ -819,8 +807,8 @@ async def test_signup_joins_whitelist_dealer() -> None:
 
 
 @pytest.mark.asyncio
-async def test_whitelist_bypasses_drop_guard_pause() -> None:
-    """专打模式豁免掉落暂停：配额满时白名单庄家仍报名，非白名单庄家跳过。"""
+async def test_full_quota_narrows_signup_to_whitelist() -> None:
+    """配额满时才收窄：名单内庄家报名（掉落领不到也打），名单外庄家跳过。"""
     ctx = _FakeCtx()
     _pause_drop_guard(ctx)
     client = _FakeClient(_game(phase="signup", actions=["join"], dealer={"displayName": "甲"}), _OK)
@@ -835,8 +823,32 @@ async def test_whitelist_bypasses_drop_guard_pause() -> None:
 
 
 @pytest.mark.asyncio
+async def test_always_mode_filters_while_quota_available() -> None:
+    """勾选「指定庄家始终生效」恢复旧专打语义：配额未满时名单也生效。"""
+    ctx = _FakeCtx()
+    client = _FakeClient(_game(phase="signup", actions=["join"], dealer={"displayName": "乙"}), _OK)
+    await _once(ctx, {"tenhalf_dealer_whitelist": "甲", "tenhalf_dealer_always": True}, client)
+    assert client.posts == []
+
+    ctx = _FakeCtx()
+    client = _FakeClient(_game(phase="signup", actions=["join"], dealer={"displayName": "甲"}), _OK)
+    await _once(ctx, {"tenhalf_dealer_whitelist": "甲", "tenhalf_dealer_always": True}, client)
+    assert client.posts and client.posts[0][1]["action"] == "join"
+
+
+@pytest.mark.asyncio
+async def test_always_mode_without_whitelist_still_pauses_on_full_quota() -> None:
+    """勾选但名单为空：无庄家可收窄，配额满时照旧不新报名。"""
+    ctx = _FakeCtx()
+    _pause_drop_guard(ctx)
+    client = _FakeClient(_game(phase="signup", actions=["join"], dealer={"displayName": "甲"}), _OK)
+    await _once(ctx, {"tenhalf_dealer_always": True}, client)
+    assert client.posts == []
+
+
+@pytest.mark.asyncio
 async def test_no_whitelist_respects_drop_guard_pause() -> None:
-    """未配置白名单时维持现状：配额满则不新报名。"""
+    """未配置名单时维持现状：配额满则不新报名。"""
     ctx = _FakeCtx()
     _pause_drop_guard(ctx)
     client = _FakeClient(_game(phase="signup", actions=["join"], dealer={"displayName": "甲"}), _OK)
