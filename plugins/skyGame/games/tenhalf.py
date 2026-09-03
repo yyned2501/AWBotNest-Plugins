@@ -16,6 +16,10 @@
 # 每轮轮询决策链：
 #   lastResult 出现新局 → 结算入账：通知 + 累计/当日战绩 + 庄家画像（按 roundId 去重）
 #   signup 且可加入 → 按配置下注额报名（夹在门户最小下注与单桌人均上限之间）
+#   「指定庄家」名单只在掉落配额满时收窄报名（v1.27.0）：配额未满时来者不拒（掉落才是
+#   主要收益，多一局是一份）；满了之后领不到掉落，只打名单里值得用银元去打的庄家，
+#   名单为空则满了就不再新报名。勾选「指定庄家始终生效」（tenhalf_dealer_always）则
+#   回到 v1.24.0 专打语义：无论配额满不满都只打名单里的庄家。
 # 推送策略：每局只在报名成功与结算时各推一次，要牌/停牌过程不推送（只记日志）
 #   结算后若有本局决策轨迹，用平台 AI 在群聊总结「心路历程」（v1.23.15 起、v1.23.16 抽成
 #   games/ai_review.py 通用模块）：赢了炫决策、输了吐槽庄家运气好（带庄家简称）；
@@ -571,10 +575,12 @@ def _dealer_key_of(dealer_p: dict | None) -> str:
 
 
 def _dealer_whitelist(cfg: dict) -> list[str]:
-    """「指定庄家」名单（逗号/换行分隔，displayName 或 id:xxx）；空=不限（所有庄家都打）。
+    """「指定庄家」名单（逗号/换行分隔，displayName 或 id:xxx）；空=满了也不打。
 
-    非空时进入「专打指定庄家」模式：signup 只在这些庄家开局时报名，且豁免掉落
-    配额暂停（用户明确要打这些庄家，掉落奖励与否无所谓，不受掉落守卫拦截）。
+    v1.27.0 起名单默认只在掉落配额满时生效：未满时来者不拒（掉落是主要收益，多一局是一份），
+    满了领不到掉落、只花银元，才收窄到名单里的庄家。是否已满由 drop_guard.paused() 判定
+    （/info 无数据或过期时按未满处理，宁可多打不误停）。配置 tenhalf_dealer_always 勾选
+    「指定庄家始终生效」则名单不参与配额判断，任何时段都只打名单庄家（v1.24.0 专打语义）。
     """
     raw = str(cfg.get("tenhalf_dealer_whitelist", "") or "")
     return [p.strip() for p in re.split(r"[,\n，]+", raw) if p.strip()]
@@ -1148,10 +1154,14 @@ async def _once(ctx: object, cfg: dict, client: HdskyClient) -> None:
     await _handle_settlement(ctx, cfg, game)
     # lastResult 漏掉的结算用 history[] 回查（快速局 settled 窗口短于轮询间隔）
     await _catch_up_settlement(ctx, cfg, game)
-    # 「指定庄家」名单非空 → 专打模式：只在这些庄家开局时报名，且豁免掉落配额暂停
+    # 名单生效时机（v1.27.0）：默认只在掉落配额满时收窄（未满来者不拒，掉落才是主要收益）；
+    # 勾选「指定庄家始终生效」则任何时段都只打名单庄家（v1.24.0 专打语义）
     whitelist = _dealer_whitelist(cfg)
-    if drop_guard.paused(ctx) and self_p is None and not whitelist:
-        # 配额满且未参与当前局、又没配置专打庄家：结算已消化完，停心跳（不再新报名）；
+    quota_full = drop_guard.paused(ctx)
+    always = bool(cfg.get("tenhalf_dealer_always", False))
+    narrow_to = whitelist if (quota_full or always) else []
+    if quota_full and self_p is None and not narrow_to:
+        # 配额满、未参与当前局、又没有名单庄家可打：结算已消化完，停心跳（不再新报名）；
         # 已报名则照常打完本局。注意此检查必须在结算消化之后——否则刚结束那局切到
         # 新局后 self_p 为空，结算会被暂停检查吞掉永不入账（v1.23.3 修复）
         return
@@ -1173,9 +1183,11 @@ async def _once(ctx: object, cfg: dict, client: HdskyClient) -> None:
     if phase == "signup":
         if self_p is not None or "join" not in actions:
             return
-        if whitelist and not _dealer_matches(dealer_p, whitelist):
+        if narrow_to and not _dealer_matches(dealer_p, narrow_to):
             ctx.log.debug(
-                "十点半 #%s 庄家 %s 不在指定名单，跳过报名", rid, (dealer_p or {}).get("displayName") or "未知"
+                "十点半 #%s 掉落配额已满且庄家 %s 不在指定名单，跳过报名",
+                rid,
+                (dealer_p or {}).get("displayName") or "未知",
             )
             return
         # 配额满时不新报名的拦截在 _once 顶部（paused 且未参与直接返回）
