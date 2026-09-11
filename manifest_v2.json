@@ -1,0 +1,40 @@
+{
+  "plugins": {
+    "skyRedPacket": {
+      "name": "天空红包",
+      "version": "2.6.0",
+      "author": "Yy",
+      "description": "天空小秘（bot 8907007783）拼手气红包自动抢：先抢再重试，被拒（未发言）后追加随机大延迟再重试，更像真人。",
+      "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/skyRedPacket.svg",
+      "scope": "user",
+      "path": "plugins/skyRedPacket/"
+    },
+    "skyDropAnswer": {
+      "name": "天空答题",
+      "version": "2.1.5",
+      "author": "Yy",
+      "description": "天空答题奖励 + 开启时段内定时触发：模板管理/AI答题/自动触发掉落一体化（合并原 skyDropTrigger）。",
+      "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/skyDropAnswer.svg",
+      "scope": "user",
+      "path": "plugins/skyDropAnswer/"
+    },
+    "skyGame": {
+      "name": "天空游戏",
+      "version": "1.27.0",
+      "author": "Yy",
+      "description": "天空系列游戏统一入口：炸金花自动参与（Terminal EV 多人决策树 + 对手画像）、养马自动养护、十点半自动参与、门户 Cookie 自动续期、掉落配额守卫、幸运轮盘免费抽奖，Vue 左侧按游戏分组配置。",
+      "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/skyGame.svg",
+      "scope": "user",
+      "path": "plugins/skyGame/"
+    },
+    "juai_checkin": {
+      "name": "JUAI 自动签到",
+      "version": "1.5.0",
+      "author": "Yy",
+      "description": "JUAI 自动签到（多账号）：每天分档重试，今日已成功自动跳过；登录 3 次重试，session 缓存 30 天。",
+      "icon": "https://www.juaiapi.com/favicon.png",
+      "scope": "standalone",
+      "path": "plugins/juai_checkin.py"
+    }
+  }
+}
