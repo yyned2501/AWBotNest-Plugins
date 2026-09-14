@@ -7,7 +7,8 @@
       "description": "天空小秘（bot 8907007783）拼手气红包自动抢：先抢再重试，被拒（未发言）后追加随机大延迟再重试，更像真人。",
       "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/skyRedPacket.svg",
       "scope": "user",
-      "path": "plugins/skyRedPacket/"
+      "plugin_api_version": 2,
+      "path": "plugins_v2/skyRedPacket/"
     },
     "skyDropAnswer": {
       "name": "天空答题",
@@ -16,7 +17,8 @@
       "description": "天空答题奖励 + 开启时段内定时触发：模板管理/AI答题/自动触发掉落一体化（合并原 skyDropTrigger）。",
       "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/skyDropAnswer.svg",
       "scope": "user",
-      "path": "plugins/skyDropAnswer/"
+      "plugin_api_version": 2,
+      "path": "plugins_v2/skyDropAnswer/"
     },
     "skyGame": {
       "name": "天空游戏",
@@ -25,7 +27,8 @@
       "description": "天空系列游戏统一入口：炸金花自动参与（Terminal EV 多人决策树 + 对手画像）、养马自动养护、十点半自动参与、门户 Cookie 自动续期、掉落配额守卫、幸运轮盘免费抽奖，Vue 左侧按游戏分组配置。",
       "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/skyGame.svg",
       "scope": "user",
-      "path": "plugins/skyGame/"
+      "plugin_api_version": 2,
+      "path": "plugins_v2/skyGame/"
     },
     "juai_checkin": {
       "name": "JUAI 自动签到",
