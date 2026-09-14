@@ -5,8 +5,8 @@ from __future__ import annotations
 
 import pytest
 
-from plugins.skyGame.games.zhajinhua import gen_zjh_prob, zjh_prob
-from plugins.skyGame.games.zhajinhua.zhajinhua import (
+from plugins_v2.skyGame.games.zhajinhua import gen_zjh_prob, zjh_prob
+from plugins_v2.skyGame.games.zhajinhua.zhajinhua import (
     _FOLD_CONFIRM_MAX_RETRIES,
     _TERMINAL_RESEND_MAX,
     _acquire_hand_after_peek,
@@ -65,7 +65,7 @@ from plugins.skyGame.games.zhajinhua.zhajinhua import (
     _update_round_tracker,
     record_round_result,
 )
-from plugins.skyGame.games.zhajinhua.zjh_profile import (
+from plugins_v2.skyGame.games.zhajinhua.zjh_profile import (
     PRIOR_STRENGTH,
     ProfileStore,
     _freq_bucket,
@@ -1684,7 +1684,7 @@ def test_blind_peek_or_call_showdown_phase_continues_when_peek_unavailable(
     # 回归：强制摊牌阶段（actions 无 peek/call，只有 fold/raise/showdown），
     # 决策树判看牌最优但看牌不可用、盲跟 EV≥0 时，必须用 showdown 当「继续」动作应战，
     # 而不是落到 fold——正 EV 弃牌等于白扔底池权益。
-    from plugins.skyGame.games.zhajinhua import zjh_model
+    from plugins_v2.skyGame.games.zhajinhua import zjh_model
 
     crafted = _TerminalDecision(
         action="peek",
@@ -1712,7 +1712,7 @@ def test_blind_peek_or_call_showdown_phase_folds_when_call_ev_negative(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # 同阶段异常路径：盲跟 EV<0 时看牌又不可用 → 弃牌止损，不能硬 showdown 送钱。
-    from plugins.skyGame.games.zhajinhua import zjh_model
+    from plugins_v2.skyGame.games.zhajinhua import zjh_model
 
     crafted = _TerminalDecision(
         action="peek",
@@ -3705,8 +3705,8 @@ async def test_poll_loop_records_result_and_notifies_when_bot_joined(monkeypatch
 
     # 注：包目录与子模块同名（...games.zhajinhua.zhajinhua），`import ... as x` 会被编译为
     # from-import 语义而失败，改用 importlib 显式加载。
-    zhajinhua_mod = importlib.import_module("plugins.skyGame.games.zhajinhua.zhajinhua")
-    from plugins.skyGame.games.zhajinhua.zjh_profile import reset_store
+    zhajinhua_mod = importlib.import_module("plugins_v2.skyGame.games.zhajinhua.zhajinhua")
+    from plugins_v2.skyGame.games.zhajinhua.zjh_profile import reset_store
 
     round1 = {
         "game": {
@@ -3761,7 +3761,11 @@ async def test_poll_loop_records_result_and_notifies_when_bot_joined(monkeypatch
     ctx = _PollCtx(kv, cfg)
 
     reset_store()
-    monkeypatch.setattr(zhajinhua_mod, "HdskyClient", lambda log: _FakeHdsky([round1, round2]))
+    monkeypatch.setattr(
+        zhajinhua_mod,
+        "HdskyClient",
+        lambda log, **kwargs: _FakeHdsky([round1, round2]),
+    )
     monkeypatch.setattr(zhajinhua_mod.hdsky_auth, "renewer_for", lambda _ctx: None)
     sleep_count = {"n": 0}
 
@@ -4068,7 +4072,7 @@ def test_opponent_deep_ev_raise_pays_ante() -> None:
     抬升一注底注（实测线性递增 3000→6000→9000 非复利，v1.16.5 用户确认）。强牌
     raise 是价值下注 EV 更高；弱牌 raise 多付一注亏更多。
     """
-    from plugins.skyGame.games.zhajinhua import zjh_model
+    from plugins_v2.skyGame.games.zhajinhua import zjh_model
 
     deep_ev = zjh_model._opponent_deep_ev
     strong_raise = deep_ev(0.95, 3000, 3000, 0, (0.789,), 0, None, True, 3000, 0.0, True)

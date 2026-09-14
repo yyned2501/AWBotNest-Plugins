@@ -13,8 +13,8 @@ from typing import Any
 import httpx
 import pytest
 
-from plugins.skyGame.games.hdsky import read_portal_session
-from plugins.skyGame.games.hdsky_auth import (
+from plugins_v2.skyGame.games.hdsky import read_portal_session
+from plugins_v2.skyGame.games.hdsky_auth import (
     CookieRenewer,
     RenewError,
     build_pt_cookie_header,
@@ -48,12 +48,16 @@ class FakeLog:
 
 
 class FakeCtx:
-    """续期器测试桩：config / log / notify。"""
+    """续期器测试桩：config / log / notify / cookies。"""
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         self.config: dict[str, Any] = {"auth_notify": False, **(config or {})}
         self.log = FakeLog()
         self.notified: list[tuple[str, str]] = []
+        self.cookies = type("FakeCookies", (), {"available": False})()
+
+    def create_task(self, coro: Any, **kwargs: Any) -> asyncio.Task[Any]:
+        return asyncio.create_task(coro)
 
     async def notify(self, msg: str, level: str = "info", **kwargs: Any) -> None:
         self.notified.append((msg, level))
@@ -105,6 +109,7 @@ def test_portal_session_from_cloud_fresh() -> None:
     assert remain > 3600
 
 
+@pytest.mark.skipif(__import__("os").name == "nt", reason="Windows does not expose chmod mode bits like POSIX")
 def test_write_portal_cookie_roundtrip(tmp_path: Any) -> None:
     path = tmp_path / "cookie.txt"
     write_portal_cookie(str(path), "new-session-xyz", 43200)
@@ -172,11 +177,11 @@ async def test_renew_debounce_skips_second_attempt(monkeypatch: pytest.MonkeyPat
     assert calls["n"] == 2
 
 
-async def test_renew_missing_config_returns_false() -> None:
-    ctx = FakeCtx({"cc_uuid": "", "cc_password": ""})  # 未配置 → RenewError → False
+async def test_renew_without_platform_cookies_returns_false() -> None:
+    ctx = FakeCtx()
     renewer = CookieRenewer(ctx)
     assert await renewer.renew() is False
-    assert any("未配置" in msg for level_msg in ctx.log.records for msg in [level_msg[1]])
+    assert any("平台 Cookie 同步不可用" in msg for level_msg in ctx.log.records for msg in [level_msg[1]])
 
 
 # ── 门户网关瞬时故障重试（_portal_post）────────────────────────

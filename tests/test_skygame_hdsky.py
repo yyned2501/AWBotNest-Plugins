@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from plugins.skyGame.games.hdsky import HdskyClient, _DebugRecorder, _redact, is_csrf_error
+from plugins_v2.skyGame.games.hdsky import HdskyClient, _DebugRecorder, _redact, is_csrf_error
 
 
 class _FakeResp:
@@ -255,7 +255,7 @@ def test_debug_recorder_appends_redacted_jsonl(tmp_path: Path) -> None:
 
 def test_debug_recorder_rotates_when_over_max(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # 异常路径：超过大小上限先轮转为 .1 再写新记录
-    from plugins.skyGame.games import hdsky as hdsky_mod
+    from plugins_v2.skyGame.games import hdsky as hdsky_mod
 
     monkeypatch.setattr(hdsky_mod, "_DEBUG_MAX_BYTES", 10)
     f = tmp_path / "d.jsonl"

@@ -16,22 +16,15 @@ const DEFAULT_AI_REVIEW_PROMPT =
 
 const DEFAULTS = {
   // 全局设置
-  target_groups: '-1001326208894',
   bot: '',
-  hdsky_cookie_file: '/app/data/hdsky_cookie.txt',
   hdsky_base_url: 'https://hdsky.supertimi.de:8443',
   hdsky_debug: false,
   hdsky_debug_file: '/app/data/hdsky_debug.jsonl',
   // 掉落守卫
   drop_guard_enabled: true,
   drop_guard_interval: 10,
-  drop_guard_bot: '',
   // Cookie 自动续期
   auth_auto_renew: true,
-  cc_server: 'http://192.168.31.10:3000',
-  cc_uuid: '',
-  cc_password: '',
-  hdsky_uid: '105577',
   auth_check_interval: 1800,
   auth_notify: true,
   // 养马
@@ -173,26 +166,16 @@ async function renewNow() {
           <h3 class="det-title">全局设置</h3>
 
           <section class="card">
-            <div class="card-h">目标与机器人</div>
+            <div class="card-h">天空小秘机器人</div>
             <div class="fld">
-              <span class="lbl">目标群组（一行一个ID）</span>
-              <textarea v-model="cfg.target_groups" class="inp" rows="3" spellcheck="false"></textarea>
-              <span class="help">游戏消息发到的群，一行一个。</span>
-            </div>
-            <div class="fld">
-              <span class="lbl">天空小秘机器人</span>
+              <span class="lbl">机器人</span>
               <input v-model="cfg.bot" class="inp" placeholder="@用户名 或 数字ID，逗号分隔可填多个" />
-              <span class="help">留空=默认天空小秘。</span>
+              <span class="help">掉落配额守卫使用此配置私聊 /info；留空=默认天空小秘。</span>
             </div>
           </section>
 
           <section class="card">
             <div class="card-h">HDSky 门户（炸金花/养马共用）</div>
-            <div class="fld">
-              <span class="lbl">Cookie 文件路径</span>
-              <input v-model="cfg.hdsky_cookie_file" class="inp" spellcheck="false" />
-              <span class="help">容器内路径（宿主 appdata/awbotnest/data 目录），过期后由下方自动续期覆盖</span>
-            </div>
             <div class="fld">
               <span class="lbl">门户地址</span>
               <input v-model="cfg.hdsky_base_url" class="inp" spellcheck="false" />
@@ -215,11 +198,6 @@ async function renewNow() {
               <input v-model.number="cfg.drop_guard_interval" class="inp" type="number" min="5" max="60" step="5" />
               <span class="help">多久私聊 bot 发一次 /info；越短对配额满的反应越快</span>
             </div>
-            <div class="fld">
-              <span class="lbl">掉落查询机器人</span>
-              <input v-model="cfg.drop_guard_bot" class="inp" placeholder="@用户名 或 数字ID，留空=默认天空小秘" />
-              <span class="help">/info 发给它查剩余掉落；独立于「目标与机器人」里的全局 bot 配置</span>
-            </div>
           </section>
 
           <section class="card">
@@ -234,7 +212,7 @@ async function renewNow() {
             <div class="fld">
               <span class="lbl">调试记录文件路径</span>
               <input v-model="cfg.hdsky_debug_file" class="inp" spellcheck="false" />
-              <span class="help">容器内 JSONL 路径（宿主 appdata/awbotnest/data 目录），超 10MB 自动轮转为 .1</span>
+              <span class="help">插件数据目录中的 JSONL 文件，超 10MB 自动轮转为 .1</span>
             </div>
           </section>
 
@@ -245,26 +223,9 @@ async function renewNow() {
               <span>门户会话过期自动续期</span>
             </label>
             <span class="help" style="margin-top:-4px">
-              经 MoviePilot CookieCloud 拉浏览器 cookie 快照 → 读 HDSky 站内信验证码 → 自动登录写回 Cookie 文件
+              使用平台 CookieCloud 同步 HDSky 门户 Cookie；未同步时平台会在通知中心提醒管理员。
             </span>
             <div class="grid">
-              <div class="fld">
-                <span class="lbl">CookieCloud 地址</span>
-                <input v-model="cfg.cc_server" class="inp" spellcheck="false" />
-                <span class="help">MoviePilot 内置，http://&lt;主机&gt;:3000</span>
-              </div>
-              <div class="fld">
-                <span class="lbl">HDSky UID</span>
-                <input v-model="cfg.hdsky_uid" class="inp" spellcheck="false" />
-              </div>
-              <div class="fld">
-                <span class="lbl">CookieCloud UUID（Key）</span>
-                <input v-model="cfg.cc_uuid" class="inp" spellcheck="false" />
-              </div>
-              <div class="fld">
-                <span class="lbl">CookieCloud 加密密钥</span>
-                <input v-model="cfg.cc_password" class="inp" type="password" spellcheck="false" />
-              </div>
               <div class="fld">
                 <span class="lbl">会话体检间隔(秒)</span>
                 <input v-model.number="cfg.auth_check_interval" class="inp" type="number" min="600" max="7200" step="300" />

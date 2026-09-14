@@ -9,7 +9,7 @@ import time
 
 import pytest
 
-from plugins.skyGame.games.horse import _care_once, _format_feed_table, _format_walk_table, _is_cooldown, _remain_ms
+from plugins_v2.skyGame.games.horse import _care_once, _format_feed_table, _format_walk_table, _is_cooldown, _remain_ms
 
 
 def _now_ms() -> int:

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from plugins.skyGame.games.ai_review import (
+from plugins_v2.skyGame.games.ai_review import (
     DEFAULT_TEMPLATE,
     _action_sequence_text,
     _build_prompt,
@@ -136,7 +136,7 @@ def test_prompt_custom_template_placeholders() -> None:
 def test_config_schema_prompt_default_matches_template() -> None:
     """config_schema 的 ai_review_prompt 默认值即内置默认模板（前端「恢复默认模板」同款）；
     该值作为配置同样完成占位符替换。"""
-    from plugins.skyGame import __plugin__
+    from plugins_v2.skyGame import __plugin__
 
     default = __plugin__["config_schema"]["ai_review_prompt"]["default"]
     assert default == DEFAULT_TEMPLATE

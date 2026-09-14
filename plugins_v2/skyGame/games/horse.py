@@ -487,8 +487,9 @@ async def _care_loop(ctx: object) -> None:
     cfg = ctx.config
     interval = float(cfg.get("horse_poll_interval", 120) or 120)
 
-    async with HdskyClient(log=ctx.log) as client:
-        client.set_renewer(hdsky_auth.renewer_for(ctx))  # 401 时自动续期并重试
+    async with HdskyClient(log=ctx.log, cookie_provider=lambda: hdsky_auth.cookie_provider(ctx)) as client:
+        if cfg.get("auth_auto_renew", True):
+            client.set_renewer(hdsky_auth.renewer_for(ctx))  # 401 时自动续期并重试
         while True:
             try:
                 if not cfg.get("horse_enabled", False):

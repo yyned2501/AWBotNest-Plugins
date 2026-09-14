@@ -100,8 +100,9 @@ async def _lucky_tick(ctx: object) -> None:
     cfg = ctx.config
     if not should_draw(cfg, ctx.kv):
         return
-    async with HdskyClient(log=ctx.log) as client:
-        client.set_renewer(hdsky_auth.renewer_for(ctx))  # 401 时自动续期并重试
+    async with HdskyClient(log=ctx.log, cookie_provider=lambda: hdsky_auth.cookie_provider(ctx)) as client:
+        if cfg.get("auth_auto_renew", True):
+            client.set_renewer(hdsky_auth.renewer_for(ctx))  # 401 时自动续期并重试
         client.configure(
             str(cfg.get("hdsky_cookie_file", "") or ""),
             str(cfg.get("hdsky_base_url", "") or ""),

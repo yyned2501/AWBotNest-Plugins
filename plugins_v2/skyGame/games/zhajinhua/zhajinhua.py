@@ -490,8 +490,9 @@ async def _poll_loop(ctx: object) -> None:
     # 已回填的结算局 roundId（同一局 lastResult 每轮重复出现，只回填一次）
     last_fed_result_rid: Any = None
 
-    async with HdskyClient(log=ctx.log) as client:
-        client.set_renewer(hdsky_auth.renewer_for(ctx))  # 401 时自动续期并重试
+    async with HdskyClient(log=ctx.log, cookie_provider=lambda: hdsky_auth.cookie_provider(ctx)) as client:
+        if cfg.get("auth_auto_renew", True):
+            client.set_renewer(hdsky_auth.renewer_for(ctx))  # 401 时自动续期并重试
         while True:
             try:
                 if not cfg.get("zjh_enabled", True):
