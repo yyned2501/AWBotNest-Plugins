@@ -10,7 +10,7 @@ import inspect
 
 import pytest
 
-import plugins.skyGame.games.lucky as lucky
+import plugins_v2.skyGame.games.lucky as lucky
 from tests.test_skygame_tenhalf import _FakeClient, _FakeCtx
 
 # ── 时刻解析 ──

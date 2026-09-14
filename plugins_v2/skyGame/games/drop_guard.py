@@ -120,11 +120,8 @@ def _guard_enabled(ctx: object) -> bool:
 
 
 def _guard_bot_ids(cfg: dict) -> list[int | str]:
-    """掉落守卫专用 bot（读 drop_guard_bot）；留空回退默认天空小秘。
-
-    不复用全局 bot 配置——线上曾把那里配成 HDSky 验证 bot，发 /info 无掉落回复。
-    """
-    return _parse_bot_ids(str(cfg.get("drop_guard_bot", "") or ""))
+    """解析统一的天空小秘 bot 配置；留空回退默认天空小秘。"""
+    return _parse_bot_ids(str(cfg.get("bot", "") or ""))
 
 
 def _guard_interval_minutes(ctx: object) -> int:

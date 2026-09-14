@@ -30,24 +30,17 @@ from .games import hdsky_auth
 __plugin__ = {
     "name": "天空游戏",
     "id": "skyGame",
-    "version": "1.27.0",
+    "version": "1.28.0",
     "author": "Yy",
     "description": "天空系列游戏统一入口：炸金花/养马/十点半自动参与、幸运轮盘免费抽奖，左侧按游戏分组配置。",
     "scope": "user",
     "plugin_api_version": 2,
+    "cookie_domains": ["hdsky.supertimi.de"],
     "render_mode": "vue",
     "default_enabled": False,
     "requirements": ["httpx>=0.27"],
     "config_schema": {
         # ── 全局设置 ──
-        "target_groups": {
-            "type": "text",
-            "default": "-1001326208894",
-            "label": "目标群组（一行一个ID）",
-            "section": "全局设置",
-            "help": "游戏消息发到的群，一行一个。",
-            "order": 1,
-        },
         "bot": {
             "type": "string",
             "default": "",
@@ -55,14 +48,6 @@ __plugin__ = {
             "section": "全局设置",
             "help": "@用户名 或 数字ID，逗号分隔可填多个。留空=默认天空小秘。",
             "order": 2,
-        },
-        "hdsky_cookie_file": {
-            "type": "string",
-            "default": "/app/data/hdsky_cookie.txt",
-            "label": "HDSky Cookie 文件路径",
-            "section": "全局设置",
-            "help": "容器内路径，宿主 appdata/awbotnest/data 目录；12 小时过期需重新覆盖该文件",
-            "order": 3,
         },
         "hdsky_base_url": {
             "type": "string",
@@ -94,40 +79,8 @@ __plugin__ = {
             "default": True,
             "label": "门户会话过期自动续期",
             "section": "Cookie 自动续期",
-            "help": "经 MoviePilot CookieCloud 的浏览器 cookie 快照 → 读 HDSky 站内信验证码 → 自动登录写回 Cookie",
+            "help": "使用平台 CookieCloud 同步 HDSky 门户 Cookie；平台未同步时会在通知中心提醒管理员。",
             "order": 30,
-        },
-        "cc_server": {
-            "type": "string",
-            "default": "http://192.168.31.10:3000",
-            "label": "CookieCloud 地址",
-            "section": "Cookie 自动续期",
-            "help": "MoviePilot 内置 CookieCloud（http://<主机>:3000）",
-            "order": 31,
-        },
-        "cc_uuid": {
-            "type": "string",
-            "default": "",
-            "label": "CookieCloud UUID",
-            "section": "Cookie 自动续期",
-            "help": "浏览器 CookieCloud 插件的服务器地址对应 UUID（即 Key）",
-            "order": 32,
-        },
-        "cc_password": {
-            "type": "password",
-            "default": "",
-            "label": "CookieCloud 加密密钥",
-            "section": "Cookie 自动续期",
-            "help": "浏览器 CookieCloud 插件的加密密钥（即密码/Token）",
-            "order": 33,
-        },
-        "hdsky_uid": {
-            "type": "string",
-            "default": "105577",
-            "label": "HDSky UID",
-            "section": "Cookie 自动续期",
-            "help": "门户登录用的 HDSky 用户 UID",
-            "order": 34,
         },
         "auth_check_interval": {
             "type": "slider",
@@ -590,14 +543,6 @@ __plugin__ = {
             "help": "每多少分钟整点对齐发一次 /info（cron */N）；越短对配额满反应越快，改动需重载插件生效",
             "order": 51,
         },
-        "drop_guard_bot": {
-            "type": "string",
-            "default": "",
-            "label": "掉落查询机器人",
-            "section": "全局设置",
-            "help": "@用户名 或 数字ID。留空=默认天空小秘（8907007783）；独立于上方全局 bot 配置",
-            "order": 52,
-        },
         # ── 幸运轮盘 ──
         "lucky_enabled": {
             "type": "boolean",
@@ -617,6 +562,9 @@ __plugin__ = {
         },
     },
     "changelog": (
+        "v1.28.0 调整：\n"
+        "- Cookie 自动续期改用平台 CookieCloud，同步读取 HDSky 门户 Cookie，不再保存插件级 CookieCloud 凭据；\n"
+        "- 删除未接线的目标群组配置，掉落守卫统一复用全局天空小秘机器人配置；\n"
         "v1.27.0 调整：\n"
         "- 十点半「指定庄家」名单改为只在游戏掉落配额满时生效：配额未满时所有庄家的局都报名"
         "（掉落才是主要收益，多一局是一份），满了领不到掉落、只花银元，此时才收窄到名单里的庄家；\n"
@@ -1220,13 +1168,8 @@ async def setup(ctx: object) -> None:
     ctx.log.info("天空游戏插件已加载 (v%s)", __plugin__["version"])
     data_dir = Path(ctx.data_dir)
     config = ctx.config
-    updates = {}
-    if not config.get("hdsky_cookie_file") or config.get("hdsky_cookie_file") == "/app/data/hdsky_cookie.txt":
-        updates["hdsky_cookie_file"] = str(data_dir / "hdsky_cookie.txt")
     if not config.get("hdsky_debug_file") or config.get("hdsky_debug_file") == "/app/data/hdsky_debug.jsonl":
-        updates["hdsky_debug_file"] = str(data_dir / "hdsky_debug.jsonl")
-    if updates:
-        ctx.update_config(updates)
+        ctx.update_config({"hdsky_debug_file": str(data_dir / "hdsky_debug.jsonl")})
     games.start_all(ctx)
 
     @ctx.on_api("/renew", methods=["POST"])

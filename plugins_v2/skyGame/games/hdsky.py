@@ -23,6 +23,8 @@ from typing import Any
 
 import httpx
 
+CookieProvider = Callable[[], Awaitable[str]]
+
 # 全局配置缺省值（老配置升级后可能没有 hdsky_* 键，代码兜底）
 # 平台跑在容器内，cookie 放数据卷挂载目录（宿主 appdata/awbotnest/data → 容器 /app/data）
 DEFAULT_COOKIE_FILE = "/app/data/hdsky_cookie.txt"
@@ -142,10 +144,17 @@ class HdskyClient:
     _csrf: str | None = None
     _csrf_at: float = 0.0
 
-    def __init__(self, cookie_file: str = "", base_url: str = "", log: Any = None) -> None:
+    def __init__(
+        self,
+        cookie_file: str = "",
+        base_url: str = "",
+        log: Any = None,
+        cookie_provider: CookieProvider | None = None,
+    ) -> None:
         self._cookie_file = cookie_file or DEFAULT_COOKIE_FILE
         self._base = (base_url or DEFAULT_BASE_URL).rstrip("/")
         self._log = log
+        self._cookie_provider = cookie_provider
         self._renewer: Callable[[], Awaitable[bool]] | None = None
         self._debug: _DebugRecorder | None = None
         self._http = httpx.AsyncClient(verify=make_ssl_ctx())
@@ -213,9 +222,19 @@ class HdskyClient:
             "Origin": self._base,
             "Referer": f"{self._base}/portal",
         }
-        cookie = read_portal_session(self._cookie_file)
-        if cookie:
-            headers["Cookie"] = f"hdsky_portal_session={cookie}"
+        if self._cookie_provider is not None:
+            try:
+                cookie_header = await self._cookie_provider()
+            except Exception as exc:
+                cookie_header = ""
+                if self._log:
+                    self._log.warning("平台 Cookie 读取失败，回退本地 Cookie 文件: %r", exc)
+            if cookie_header:
+                headers["Cookie"] = cookie_header
+        if "Cookie" not in headers:
+            cookie = read_portal_session(self._cookie_file)
+            if cookie:
+                headers["Cookie"] = f"hdsky_portal_session={cookie}"
         content: bytes | None = None
         if method == "POST":
             headers["Content-Type"] = "application/json"

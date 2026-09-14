@@ -13,8 +13,8 @@ import time
 
 import pytest
 
-import plugins.skyGame.games.drop_guard as dg
-from plugins.skyGame.games.tenhalf import _once
+import plugins_v2.skyGame.games.drop_guard as dg
+from plugins_v2.skyGame.games.tenhalf import _once
 from tests.test_skygame_tenhalf import _OK, _FakeClient, _FakeCtx, _game, _last_result
 
 
@@ -174,13 +174,11 @@ async def test_guard_tick_sends_info_every_fire() -> None:
 
 
 @pytest.mark.asyncio
-async def test_guard_ignores_global_bot_config() -> None:
-    # 全局 bot 配置可能是别的 bot（如 HDSky 验证 bot），守卫只认 drop_guard_bot，
-    # 留空回退默认天空小秘（v1.22.1）
+async def test_guard_uses_global_bot_config() -> None:
     ctx = _GuardCtx()
-    ctx.config = {"drop_guard_enabled": True, "bot": "@HDSkyVerify_bot"}
+    ctx.config = {"drop_guard_enabled": True, "bot": "@SkyBot"}
     await dg._guard_tick(ctx)
-    assert ctx.user.sent == [("8907007783", "/info")]
+    assert ctx.user.sent == [("@SkyBot", "/info")]
 
 
 @pytest.mark.asyncio

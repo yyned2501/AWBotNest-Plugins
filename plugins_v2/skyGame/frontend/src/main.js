@@ -5,16 +5,10 @@ import Config from './Config.vue'
 
 const DEFAULTS = {
   // 全局设置
-  target_groups: '-1001326208894',
   bot: '',
-  hdsky_cookie_file: '/app/data/hdsky_cookie.txt',
   hdsky_base_url: 'https://hdsky.supertimi.de:8443',
   // Cookie 自动续期
   auth_auto_renew: true,
-  cc_server: 'http://192.168.31.10:3000',
-  cc_uuid: '',
-  cc_password: '',
-  hdsky_uid: '105577',
   auth_check_interval: 1800,
   auth_notify: true,
   // 养马

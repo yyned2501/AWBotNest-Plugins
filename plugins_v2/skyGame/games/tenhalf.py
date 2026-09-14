@@ -1281,8 +1281,9 @@ def start(ctx: object) -> None:
             return
         # 掉落配额满的暂停逻辑在 _once 内：未参与才停心跳，已报名的局照常打完
         try:
-            async with HdskyClient(log=ctx.log) as client:
-                client.set_renewer(hdsky_auth.renewer_for(ctx))  # 401 时自动续期并重试
+            async with HdskyClient(log=ctx.log, cookie_provider=lambda: hdsky_auth.cookie_provider(ctx)) as client:
+                if cfg.get("auth_auto_renew", True):
+                    client.set_renewer(hdsky_auth.renewer_for(ctx))  # 401 时自动续期并重试
                 client.configure(
                     str(cfg.get("hdsky_cookie_file", "") or ""),
                     str(cfg.get("hdsky_base_url", "") or ""),

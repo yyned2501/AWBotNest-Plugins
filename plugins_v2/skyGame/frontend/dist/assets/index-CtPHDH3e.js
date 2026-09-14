@@ -1,5 +1,5 @@
 import { importShared } from './__federation_fn_import-JrT3xvdd.js';
-import Config from './__federation_expose_Config-BmlZaxb6.js';
+import Config from './__federation_expose_Config-CQga1k9T.js';
 
 true&&(function polyfill() {
   const relList = document.createElement("link").relList;
@@ -45,16 +45,10 @@ const {createApp,h} = await importShared('vue');
 
 const DEFAULTS = {
   // 全局设置
-  target_groups: '-1001326208894',
   bot: '',
-  hdsky_cookie_file: '/app/data/hdsky_cookie.txt',
   hdsky_base_url: 'https://hdsky.supertimi.de:8443',
   // Cookie 自动续期
   auth_auto_renew: true,
-  cc_server: 'http://192.168.31.10:3000',
-  cc_uuid: '',
-  cc_password: '',
-  hdsky_uid: '105577',
   auth_check_interval: 1800,
   auth_notify: true,
   // 养马

@@ -13,7 +13,7 @@ import time
 
 import pytest
 
-from plugins.skyGame.games.tenhalf import (
+from plugins_v2.skyGame.games.tenhalf import (
     _bust_prob,
     _catch_up_settlement,
     _dealer_dist,
