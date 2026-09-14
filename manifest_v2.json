@@ -29,12 +29,18 @@
     },
     "juai_checkin": {
       "name": "JUAI 自动签到",
-      "version": "1.5.0",
+      "id": "juai_checkin",
+      "version": "2.0.2",
       "author": "Yy",
-      "description": "JUAI 自动签到（多账号）：每天分档重试，今日已成功自动跳过；登录 3 次重试，session 缓存 30 天。",
+      "description": "JUAI 自动签到（多账号）：AWBotNest V2 原生存储、托管任务与 cron 调度，保留原配置表单和 30 天 session 缓存。",
       "icon": "https://www.juaiapi.com/favicon.png",
       "scope": "standalone",
-      "path": "plugins/juai_checkin.py"
+      "requirements": [
+        "httpx>=0.27",
+        "beautifulsoup4>=4.12"
+      ],
+      "plugin_api_version": 2,
+      "path": "plugins_v2/juai_checkin/"
     }
   }
 }
