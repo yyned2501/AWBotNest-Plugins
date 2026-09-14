@@ -5,11 +5,16 @@ requires-python = ">=3.12"
 
 [tool.ruff]
 line-length = 120
-exclude = [".claude", "plugins/_TEMPLATE.py", "plugins/skyDropAnswer/templates"]
+exclude = [
+    ".claude",
+    "plugins/_TEMPLATE.py",
+    "plugins/skyDropAnswer/templates",
+    "plugins_v2/skyDropAnswer/templates",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "ANN"]
-ignore = ["ANN401"]
+ignore = ["ANN401", "N999"]
 
 [tool.ruff.format]
 quote-style = "double"
