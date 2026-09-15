@@ -30,7 +30,7 @@ from .games import hdsky_auth
 __plugin__ = {
     "name": "天空游戏",
     "id": "skyGame",
-    "version": "1.28.1",
+    "version": "1.28.2",
     "author": "Yy",
     "description": "天空系列游戏统一入口：炸金花/养马/十点半自动参与、幸运轮盘免费抽奖，左侧按游戏分组配置。",
     "scope": "user",
@@ -562,6 +562,9 @@ __plugin__ = {
         },
     },
     "changelog": (
+        "v1.28.2 修复：\n"
+        "- 适配当前 PlatformContext.on_message 的装饰器签名：掉落守卫不再传 group 关键字参数；\n"
+        "- 养马异常日志附带响应快照，便于排查 int() argument ... not 'coroutine' 的具体字段；\n"
         "v1.28.1 修复：\n"
         "- 适配平台运行时：掉落守卫不再依赖 ctx.filters，handler 内手动过滤私聊和目标机器人；\n"
         "- 炸金花画像持久化改用显式 UID 索引，兼容当前 PluginKV 不提供 keys() 的实现；\n"

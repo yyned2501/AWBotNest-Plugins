@@ -158,7 +158,7 @@ def start(ctx: object) -> None:
     """注册 /info 回复捕获 handler + 低频检查调度。"""
     bot_ids = _guard_bot_ids(ctx.config)
 
-    @ctx.on_message(None, group=7)
+    @ctx.on_message(None)
     async def _on_info_reply(client: object, message: object) -> None:
         if not _guard_enabled(ctx):
             return
