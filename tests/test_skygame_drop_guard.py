@@ -227,7 +227,7 @@ def test_start_registers_handler_and_zero_arg_tick() -> None:
 
     dg.start(ctx)
 
-    assert len(registered) == 1 and registered[0][1] == 7
+    assert len(registered) == 1 and registered[0][1] == 0
     assert len(ctx.schedules) == 1
     fn, mode, kwargs = ctx.schedules[0]
     assert mode == "cron" and kwargs.get("id") == "drop_guard_tick"

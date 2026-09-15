@@ -509,7 +509,7 @@ async def _care_loop(ctx: object) -> None:
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                ctx.log.error("养马轮询异常: %r", e)
+                ctx.log.error("养马轮询异常: %r (data=%r)", e, locals().get("data"))
                 client.reset_csrf()
                 if cfg.get("horse_notify", True):
                     await ctx.notify(f"🐴 养马轮询异常: {e}", level="warning")
