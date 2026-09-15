@@ -146,12 +146,40 @@ async def _guard_tick(ctx: object) -> None:
     target = bot_ids[0]
     if isinstance(target, str) and not target.startswith("@"):
         target = f"@{target}"
-    try:
-        await ctx.user.send(target, "/info")
-        ctx.kv.set(_KV_SENT_TS, time.time())
-        ctx.log.info("掉落守卫：已私聊 bot %s 发送 /info", target)
-    except Exception as e:
-        ctx.log.warning("掉落守卫 /info 发送失败: %r", e)
+    sent = False
+    last_err: Exception | None = None
+    senders: list[tuple[str, object]] = []
+    user_obj = getattr(ctx, "user", None)
+    user_client = getattr(user_obj, "raw", None) if user_obj is not None else None
+    if user_obj is not None:
+        senders.append(("user", user_obj))
+    if user_client is not None:
+        senders.append(("user.raw", user_client))
+    bot_obj = getattr(ctx, "bot", None)
+    bot_client = getattr(bot_obj, "raw", None) if bot_obj is not None else None
+    if bot_client is not None and bot_client is not user_client:
+        senders.append(("bot.raw", bot_client))
+    for label, client_obj in senders:
+        try:
+            send = getattr(client_obj, "send", None)
+            if callable(send):
+                await send(target, "/info")
+                sent = True
+                break
+            if hasattr(client_obj, "send_message"):
+                await client_obj.send_message(target, "/info")  # type: ignore[attr-returns-value]
+                sent = True
+                break
+        except Exception as exc:
+            last_err = exc
+    if not sent:
+        ctx.log.warning(
+            "掉落守卫 /info 发送失败: target=%s senders=%s last_err=%r",
+            target, [label for label, _ in senders], last_err,
+        )
+        return
+    ctx.kv.set(_KV_SENT_TS, time.time())
+    ctx.log.info("掉落守卫：已私聊 bot %s 发送 /info", target)
 
 
 def start(ctx: object) -> None:
@@ -159,22 +187,48 @@ def start(ctx: object) -> None:
     bot_ids = _guard_bot_ids(ctx.config)
 
     @ctx.on_message()
-    async def _on_info_reply(client: object, message: object) -> None:
+    async def _on_info_reply(*args: object, **kwargs: object) -> None:
+        # 平台 PluginRuntime 把装饰器返回的回调用 lambda: callback(*args, **kwargs) 调用。
+        # V2 平台底层是 Telethon：回调签名 = (event)，event.message / event.is_private。
+        # Pyrogram 适配期：也兼容 (client, message) 形式。统一提取真实消息对象。
+        event: object | None = None
+        if args and not kwargs and len(args) == 1:
+            event = args[0]
+        elif args and len(args) >= 2:
+            event = args[1]
+        else:
+            event = kwargs.get("event") or kwargs.get("message") or kwargs.get("update")
+        if event is None:
+            ctx.log.warning("掉落守卫收到非预期消息回调，args=%r kwargs=%r", args, kwargs)
+            return
+        message = getattr(event, "message", None) or event
         if not _guard_enabled(ctx):
             return
         chat = getattr(message, "chat", None)
-        if str(getattr(chat, "type", "")) not in ("private", "ChatType.PRIVATE"):
+        chat_type = str(getattr(chat, "type", "")) if chat is not None else ""
+        is_private = getattr(event, "is_private", None)
+        if is_private is False:
             return
-        sender = getattr(message, "from_user", None)
-        sender_id = getattr(sender, "id", None)
-        sender_username = str(getattr(sender, "username", "") or "").lstrip("@").casefold()
+        if chat_type and chat_type not in ("private", "ChatType.PRIVATE"):
+            return
+        if is_private is None and chat_type and "PRIVATE" not in chat_type.upper():
+            return
+        sender = (
+            getattr(message, "sender", None)
+            or getattr(event, "sender", None)
+            or getattr(message, "from_user", None)
+        )
+        sender_id = getattr(sender, "id", None) or getattr(sender, "user_id", None)
+        sender_username = str(
+            getattr(sender, "username", "") if sender is not None else ""
+        ).lstrip("@").casefold()
         if not any(
             (isinstance(bot_id, int) and sender_id == bot_id)
             or (isinstance(bot_id, str) and sender_username == bot_id.lstrip("@").casefold())
             for bot_id in bot_ids
         ):
             return
-        text = (message.text or "").strip()
+        text = (message.text or message.message or "").strip()
         if "银元奖励" in text:  # 掉落消息不是 /info 回复
             return
         if await apply_reply(ctx, text):

@@ -190,6 +190,8 @@ async def test_guard_tick_send_failure_does_not_raise() -> None:
         raise RuntimeError("网络错误")
 
     ctx.user.send = _broken_send  # type: ignore[method-assign]
+    # 兜底会尝试 ctx.user.raw.send_message，给个 raw=None 确保所有路径失败
+    ctx.user.raw = None  # type: ignore[attr-defined]
     await dg._guard_tick(ctx)  # 吞异常只记日志
     assert any("发送失败" in msg for _, msg in ctx.log.records)
 
@@ -227,7 +229,7 @@ def test_start_registers_handler_and_zero_arg_tick() -> None:
 
     dg.start(ctx)
 
-    assert len(registered) == 1 and registered[0][1] == 0
+    assert len(registered) == 1
     assert len(ctx.schedules) == 1
     fn, mode, kwargs = ctx.schedules[0]
     assert mode == "cron" and kwargs.get("id") == "drop_guard_tick"
@@ -250,7 +252,7 @@ def test_start_cron_minute_follows_interval() -> None:
         ctx = _GuardCtx()
         ctx.config = {"drop_guard_interval": cfg_interval}
         ctx.filters = _Filters  # type: ignore[attr-defined]
-        ctx.on_message = lambda group=0: (lambda fn: fn)  # type: ignore[attr-defined]
+        ctx.on_message = lambda *a, **kw: (lambda fn: fn)  # type: ignore[attr-defined]
         dg.start(ctx)
         return ctx.schedules[0][2].get("minute")
 

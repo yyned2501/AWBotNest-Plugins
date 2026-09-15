@@ -30,7 +30,7 @@ from .games import hdsky_auth
 __plugin__ = {
     "name": "天空游戏",
     "id": "skyGame",
-    "version": "1.28.3",
+    "version": "1.28.4",
     "author": "Yy",
     "description": "天空系列游戏统一入口：炸金花/养马/十点半自动参与、幸运轮盘免费抽奖，左侧按游戏分组配置。",
     "scope": "user",
@@ -562,6 +562,13 @@ __plugin__ = {
         },
     },
     "changelog": (
+        "v1.28.4 修复：\n"
+        "- 适配 V2 平台 Telethon 运行时：掉馅守卫 handler 改为 *args/**kwargs，"
+        "兼容单参数 event 与 (client, message) 双参数调用；\n"
+        "- 养马 KV 读取改用同步兼容 _kv_get_sync，避免 ctx.kv 异步代理"
+        "返回 coroutine 被 int() 调用；\n"
+        "- 掉馅守卫 /info 发送顺序改为 user.send → user.raw.send_message →"
+        " bot.raw.send_message，兼容 Telethon 底层；\n"
         "v1.28.3 修复：\n"
         "- 适配当前 PlatformContext.on_message 装饰器签名：掉馅守卫改为裸装饰器；\n"
         "v1.28.2 修复：\n"
