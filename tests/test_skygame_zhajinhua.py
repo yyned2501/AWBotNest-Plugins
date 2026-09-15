@@ -2212,8 +2212,9 @@ def test_profile_store_persist_roundtrip() -> None:
     store = ProfileStore(kv)
     store.record_action("account:9", "raise", op_seen=True, seen_count=0, blind_count=0, display_name="Damon")
     store.flush()
-    assert len(kv.keys()) == 1
+    assert len(kv.keys()) == 2
     assert kv.get("zjh:profile:account:9")["display_name"] == "Damon"
+    assert kv.get("zjh:profile:index") == ["account:9"]
 
     store2 = ProfileStore(kv)
     store2.load_all()
