@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import inspect
 import json
 import re
 
@@ -266,7 +267,10 @@ def _feed_cooldown_handle(ctx: object, r: dict, key: str, now_ms: int) -> None:
     if result.get("ok", r.get("ok", False)):
         ctx.kv.set(key, now_ms + _FEED_SUCCESS_BACKOFF_MS)
         return
-    ctx.kv.delete(key)
+    try:
+        ctx.kv.delete(key)
+    except Exception:
+        pass
 
 
 def _configured_feed_type(cfg: dict) -> str:
@@ -275,7 +279,13 @@ def _configured_feed_type(cfg: dict) -> str:
 
 
 def _in_cooldown(ctx: object, key: str, now_ms: int) -> bool:
-    return now_ms < int(ctx.kv.get(key, 0) or 0)
+    raw = _kv_get_sync(ctx, key, 0)
+    if isinstance(raw, (bytes, bytearray)):
+        raw = raw.decode("utf-8", "replace")
+    try:
+        return now_ms < int(raw or 0)
+    except (TypeError, ValueError):
+        return False
 
 
 def _regular_feed_ready(st: dict, stats: dict, profile: dict, now_ms: int, ctx: object) -> bool:
@@ -308,7 +318,12 @@ async def _do_feed(
 
 async def _care_once(ctx: object, cfg: dict, client: HdskyClient) -> None:
     """单次养护决策：最多执行一个动作。"""
-    data = await client.get("/api/portal/horse")
+    try:
+        data = await client.get("/api/portal/horse")
+    except Exception as exc:
+        import traceback
+        ctx.log.error("养马状态请求异常: %r\n%s", exc, traceback.format_exc())
+        raise
     if "_error" in data:
         ctx.log.warning("养马状态请求失败: %s", data["_error"] or "未知网络错误")
         client.reset_csrf()
@@ -317,13 +332,16 @@ async def _care_once(ctx: object, cfg: dict, client: HdskyClient) -> None:
     profile = horse.get("profile")
     if not profile:
         # 账号还没有马：只提示一次，领养需用户到门户手动选名
-        if not ctx.kv.get("horse:no_horse_notified"):
+        if not _kv_get_sync(ctx, "horse:no_horse_notified"):
             ctx.kv.set("horse:no_horse_notified", 1)
             ctx.log.info("账号尚无马匹，需手动领养")
             if cfg.get("horse_notify", True):
                 await ctx.notify("🐴 账号还没有马，请到门户页面手动领养")
         return
-    ctx.kv.delete("horse:no_horse_notified")
+    try:
+        ctx.kv.delete("horse:no_horse_notified")
+    except Exception:
+        pass
 
     st = profile.get("state", {}) or {}
     stats = horse.get("stats", {}) or {}
@@ -336,13 +354,16 @@ async def _care_once(ctx: object, cfg: dict, client: HdskyClient) -> None:
         if cfg.get("horse_auto_revive", False) and balance >= int(profile.get("reviveCost", 0) or 0):
             r = await _horse_action(client, "revive")
             await _notify_result(ctx, cfg, r, "复活失败")
-        elif not ctx.kv.get("horse:death_notified"):
+        elif not _kv_get_sync(ctx, "horse:death_notified"):
             ctx.kv.set("horse:death_notified", 1)
             ctx.log.warning("马匹已死亡（未开启自动复活）")
             if cfg.get("horse_notify", True):
                 await ctx.notify("🐴 马匹已死亡，请处理（可开启自动复活）", level="error")
         return
-    ctx.kv.delete("horse:death_notified")
+    try:
+        ctx.kv.delete("horse:death_notified")
+    except Exception:
+        pass
 
     # 玩家养马赛（competitions.match）：host 开房后 active，actions 含 join 即可加入。
     # 契约来自门户前端 portal-horse.js（实测 2026-08-08）：可加入才给 join 动作，
@@ -482,8 +503,27 @@ async def _care_once(ctx: object, cfg: dict, client: HdskyClient) -> None:
         return
 
 
+def _kv_get_sync(ctx: object, key: str, default: object = 0) -> object:
+    """读取 ctx.kv，兼容同步/异步实现以及返回 coroutine 的情况。
+
+    本仓库 V2 运行时 PluginContext 暴露的 ctx.kv 在某些环境是同步的
+    `_KVStore(sqlite)`，在另一些环境是返回 coroutine 的 async 代理；这里统一
+    用 inspect 判定返回值，若是 coroutine 则视为未设置（同步路径无法 await）。
+    """
+    try:
+        value = ctx.kv.get(key, default)
+    except Exception:
+        return default
+    if value is None:
+        return default
+    if inspect.iscoroutine(value):
+        return default
+    return value
+
+
 async def _care_loop(ctx: object) -> None:
     """养护主循环：轮询状态 + 每轮最多一个动作。"""
+    import traceback
     cfg = ctx.config
     interval = float(cfg.get("horse_poll_interval", 120) or 120)
 
@@ -497,19 +537,32 @@ async def _care_loop(ctx: object) -> None:
                     continue
 
                 # 每轮读最新配置（cookie 路径/门户地址可能被改）
-                client.configure(
-                    str(cfg.get("hdsky_cookie_file", "") or ""),
-                    str(cfg.get("hdsky_base_url", "") or ""),
-                    debug_enabled=bool(cfg.get("hdsky_debug", False)),
-                    debug_file=str(cfg.get("hdsky_debug_file", "") or ""),
-                )
+                try:
+                    client.configure(
+                        str(cfg.get("hdsky_cookie_file", "") or ""),
+                        str(cfg.get("hdsky_base_url", "") or ""),
+                        debug_enabled=bool(cfg.get("hdsky_debug", False)),
+                        debug_file=str(cfg.get("hdsky_debug_file", "") or ""),
+                    )
+                except Exception as cfg_exc:
+                    ctx.log.error(
+                        "养马 client.configure 异常: %r\n%s",
+                        cfg_exc, traceback.format_exc(),
+                    )
+                    client.reset_csrf()
+                    await asyncio.sleep(interval)
+                    continue
+
                 await _care_once(ctx, cfg, client)
                 await asyncio.sleep(interval)
 
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                ctx.log.error("养马轮询异常: %r (data=%r)", e, locals().get("data"))
+                ctx.log.error(
+                    "养马轮询异常: %r\n%s",
+                    e, traceback.format_exc(),
+                )
                 client.reset_csrf()
                 if cfg.get("horse_notify", True):
                     await ctx.notify(f"🐴 养马轮询异常: {e}", level="warning")
