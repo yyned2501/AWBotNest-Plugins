@@ -216,7 +216,7 @@ def test_start_registers_handler_and_zero_arg_tick() -> None:
 
     ctx.filters = _Filters  # type: ignore[attr-defined]
 
-    def _on_message(f: object, group: int = 0) -> object:
+    def _on_message(group: int = 0) -> object:
         def deco(fn: object) -> object:
             registered.append((fn, group))
             return fn
@@ -250,7 +250,7 @@ def test_start_cron_minute_follows_interval() -> None:
         ctx = _GuardCtx()
         ctx.config = {"drop_guard_interval": cfg_interval}
         ctx.filters = _Filters  # type: ignore[attr-defined]
-        ctx.on_message = lambda f, group=0: lambda fn: fn  # type: ignore[attr-defined]
+        ctx.on_message = lambda group=0: (lambda fn: fn)  # type: ignore[attr-defined]
         dg.start(ctx)
         return ctx.schedules[0][2].get("minute")
 
