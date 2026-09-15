@@ -25,12 +25,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from . import games
-from .games import hdsky_auth
+from .games import hdsky_auth, kv_facade
 
 __plugin__ = {
     "name": "天空游戏",
     "id": "skyGame",
-    "version": "1.28.4",
+    "version": "1.28.5",
     "author": "Yy",
     "description": "天空系列游戏统一入口：炸金花/养马/十点半自动参与、幸运轮盘免费抽奖，左侧按游戏分组配置。",
     "scope": "user",
@@ -562,6 +562,10 @@ __plugin__ = {
         },
     },
     "changelog": (
+        "v1.28.5 修复：\n"
+        "- 新增同步 KV 外观层，修复 V2 异步 ctx.kv 导致的十点半战绩不累计、结算去重失效（重复推送）、\n"
+        "  庄家画像/决策轨迹/掉落暂停等持久化静默失效（各游戏模块同步读写在内存即时可见、异步落库）；\n"
+        "- 十点半结算不再推送表格（按用户要求），仍入账、记画像、写日志并交给 AI 评价；\n"
         "v1.28.4 修复：\n"
         "- 适配 V2 平台 Telethon 运行时：掉馅守卫 handler 改为 *args/**kwargs，"
         "兼容单参数 event 与 (client, message) 双参数调用；\n"
@@ -1181,6 +1185,8 @@ __plugin__ = {
 
 async def setup(ctx: object) -> None:
     ctx.log.info("天空游戏插件已加载 (v%s)", __plugin__["version"])
+    # V2 的 ctx.kv 是异步存储；用同步外观层预载并接管，令各游戏模块的同步读写照常生效
+    await kv_facade.install(ctx)
     data_dir = Path(ctx.data_dir)
     config = ctx.config
     if not config.get("hdsky_debug_file") or config.get("hdsky_debug_file") == "/app/data/hdsky_debug.jsonl":
@@ -1198,4 +1204,5 @@ async def setup(ctx: object) -> None:
 
 async def teardown(ctx: object) -> None:
     games.stop_all(ctx)
+    await kv_facade.flush(ctx)  # 卸载前把脏键落库，避免热卸载取消最后一次异步写
     ctx.log.info("天空游戏已卸载")

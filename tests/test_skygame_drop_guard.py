@@ -329,8 +329,7 @@ async def test_tenhalf_paused_settlement_of_finished_round_not_swallowed() -> No
 
     await _once(ctx, {}, client)
 
-    assert ctx.tables, "结算表格推送丢失"
     assert ctx.kv.get("tenhalf:last_round") == "4244"
     stats = json.loads(str(ctx.kv.get("tenhalf:stats")))
-    assert stats["total"]["net"] == -100
+    assert stats["total"]["net"] == -100  # 结算已入账（未推表格，v1.28.5）
     assert client.posts == []  # 暂停下仍不新报名
