@@ -30,7 +30,7 @@ from .games import hdsky_auth
 __plugin__ = {
     "name": "天空游戏",
     "id": "skyGame",
-    "version": "1.28.0",
+    "version": "1.28.1",
     "author": "Yy",
     "description": "天空系列游戏统一入口：炸金花/养马/十点半自动参与、幸运轮盘免费抽奖，左侧按游戏分组配置。",
     "scope": "user",
@@ -562,6 +562,9 @@ __plugin__ = {
         },
     },
     "changelog": (
+        "v1.28.1 修复：\n"
+        "- 适配平台运行时：掉落守卫不再依赖 ctx.filters，handler 内手动过滤私聊和目标机器人；\n"
+        "- 炸金花画像持久化改用显式 UID 索引，兼容当前 PluginKV 不提供 keys() 的实现；\n"
         "v1.28.0 调整：\n"
         "- Cookie 自动续期改用平台 CookieCloud，同步读取 HDSky 门户 Cookie，不再保存插件级 CookieCloud 凭据；\n"
         "- 删除未接线的目标群组配置，掉落守卫统一复用全局天空小秘机器人配置；\n"
