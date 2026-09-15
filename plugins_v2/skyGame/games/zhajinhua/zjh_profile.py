@@ -21,6 +21,7 @@ from .zjh_state import _player_key, _players
 
 # kv 键前缀
 _KV_PREFIX = "zjh:profile:"
+_KV_INDEX = "zjh:profile:index"
 
 # 画像字典键
 _RAISE_PCTS = "raise_pcts"  # 加注后最终真实手牌分位（结算回填，扁平，旧数据兼容）
@@ -566,12 +567,23 @@ class ProfileStore:
         """从 kv 批量加载所有画像到内存（进程启动/热重载时调用）。"""
         if self._kv is None:
             return
-        for key in self._kv.keys():
-            if key.startswith(_KV_PREFIX):
-                uid = key[len(_KV_PREFIX) :]
-                raw = self._kv.get(key)
-                if isinstance(raw, dict):
-                    self._cache[uid] = raw
+        index = self._kv.get(_KV_INDEX, [])
+        if not isinstance(index, list):
+            index = []
+        if not index:
+            keys = getattr(self._kv, "keys", None)
+            if callable(keys):
+                index = [
+                    key[len(_KV_PREFIX) :]
+                    for key in keys()
+                    if isinstance(key, str) and key.startswith(_KV_PREFIX)
+                ]
+        for uid in index:
+            if not isinstance(uid, str) or not uid:
+                continue
+            raw = self._kv.get(f"{_KV_PREFIX}{uid}")
+            if isinstance(raw, dict):
+                self._cache[uid] = raw
 
     def flush(self) -> None:
         """把脏画像写回 kv 并清空脏标记。"""
@@ -579,6 +591,12 @@ class ProfileStore:
             return
         for uid in list(self._dirty):
             self._kv.set(f"{_KV_PREFIX}{uid}", self._cache.get(uid, {}))
+        index = self._kv.get(_KV_INDEX, [])
+        if not isinstance(index, list):
+            index = []
+        known = {uid for uid in index if isinstance(uid, str)}
+        known.update(self._cache)
+        self._kv.set(_KV_INDEX, sorted(known))
         self._dirty.clear()
 
     def clear(self) -> None:

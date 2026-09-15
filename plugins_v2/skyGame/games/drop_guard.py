@@ -157,11 +157,22 @@ async def _guard_tick(ctx: object) -> None:
 def start(ctx: object) -> None:
     """注册 /info 回复捕获 handler + 低频检查调度。"""
     bot_ids = _guard_bot_ids(ctx.config)
-    info_filter = ctx.filters.private & ctx.filters.user(bot_ids) & ctx.filters.text
 
-    @ctx.on_message(info_filter, group=7)
+    @ctx.on_message(None, group=7)
     async def _on_info_reply(client: object, message: object) -> None:
         if not _guard_enabled(ctx):
+            return
+        chat = getattr(message, "chat", None)
+        if str(getattr(chat, "type", "")) not in ("private", "ChatType.PRIVATE"):
+            return
+        sender = getattr(message, "from_user", None)
+        sender_id = getattr(sender, "id", None)
+        sender_username = str(getattr(sender, "username", "") or "").lstrip("@").casefold()
+        if not any(
+            (isinstance(bot_id, int) and sender_id == bot_id)
+            or (isinstance(bot_id, str) and sender_username == bot_id.lstrip("@").casefold())
+            for bot_id in bot_ids
+        ):
             return
         text = (message.text or "").strip()
         if "银元奖励" in text:  # 掉落消息不是 /info 回复
