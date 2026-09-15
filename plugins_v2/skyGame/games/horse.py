@@ -226,7 +226,7 @@ async def _notify_result(
         await ctx.notify(f"🐴 {msg}", level="warning", category="养马")
 
 
-def _walk_fail_count(kv: object, key: str, today: str) -> int:
+def _walk_fail_count(ctx: object, kv: object, key: str, today: str) -> int:
     """读取遛马连续失败计数，跨天自动重置为 0。
 
     kv 存 JSON 字符串 ``{"count": N, "date": "YYYY-MM-DD"}``；兼容旧版纯数字
@@ -234,7 +234,7 @@ def _walk_fail_count(kv: object, key: str, today: str) -> int:
     清零，而计数到 3 就不再发 walk，形成永久死锁（线上 08-01 遗留 count=3，
     之后遛马永不执行、体力一直满）。
     """
-    raw = kv.get(key, None)
+    raw = _kv_get_sync(ctx, key, None)
     count, date = 0, ""
     if isinstance(raw, dict):
         count = int(raw.get("count", 0) or 0)
@@ -247,7 +247,10 @@ def _walk_fail_count(kv: object, key: str, today: str) -> int:
         except (ValueError, TypeError):
             count, date = 0, ""
     elif raw:
-        count = int(raw)
+        try:
+            count = int(raw)
+        except (TypeError, ValueError):
+            count = 0
     return 0 if date != today else count
 
 
@@ -455,7 +458,7 @@ async def _care_once(ctx: object, cfg: dict, client: HdskyClient) -> None:
     if cfg.get("horse_auto_walk", True) and st.get("canWalk") and walk_count < walk_max:
         walk_fail_key = "horse:walk_consecutive_failures"
         today = datetime.date.today().isoformat()
-        walk_fail_count = _walk_fail_count(ctx.kv, walk_fail_key, today)
+        walk_fail_count = _walk_fail_count(ctx, ctx.kv, walk_fail_key, today)
         if walk_fail_count >= 3:
             ctx.log.debug("遛马今日连续失败 %d 次，跳过本轮（次日自动恢复）", walk_fail_count)
             return
