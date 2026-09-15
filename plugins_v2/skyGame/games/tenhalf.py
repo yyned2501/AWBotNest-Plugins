@@ -990,44 +990,24 @@ async def _safe_notify_table(ctx: object, header: list, rows: list, **kwargs: ob
 
 
 async def _settle_round(ctx: object, cfg: dict, rid: object, settlement: dict) -> None:
-    """入账一局结算：记庄家画像；我方参局才入账战绩并推送（输赢统一 success）。"""
+    """入账一局结算：记庄家画像；我方参局则累计战绩。
+
+    v1.28.5：不再推送结算表格（此前重复推送根因是 V2 异步存储令去重失效，已由同步
+    KV 外观层修复；用户明确要求结算不推送）。结算仍入账、记画像、写运行日志；本局
+    有决策轨迹时交给 AI 评价生成心路历程（「AI 评价」分组独立开关）。
+    """
     dealer_cards, observed_key = _pop_dealer_obs(ctx, rid)
-    dealer_key = _record_dealer(ctx, settlement, cards=dealer_cards, dealer_key=observed_key or "")
-    dealer_name = str(settlement.get("dealerDisplayName") or settlement.get("dealer") or "").strip()
+    _record_dealer(ctx, settlement, cards=dealer_cards, dealer_key=observed_key or "")
     me = settlement.get("self") or {}
     if not me:
         return  # 本局未参与：只记庄家画像
     delta = int(me.get("delta", 0) or 0)
-    total, daily = _update_stats(ctx, delta)
+    _update_stats(ctx, delta)
     ctx.log.info("十点半 #%s 结算 %+d 银元（%s）", rid, delta, me.get("resultText") or "")
-    if not cfg.get("tenhalf_notify", True):
-        return
-    rows: list[list[object]] = []
-    if dealer_key:
-        shown = _dealer_display_name(_load_json(ctx.kv, _DEALERS_KEY), dealer_name, dealer_key)
-        profile = _dealer_profile_text(_load_json(ctx.kv, _DEALERS_KEY), dealer_name, dealer_cards, dealer_key)
-        rows.append(["庄家", f"{shown}（{profile}）" if profile else shown])
-    dealer_label = settlement.get("dealerHandLabel")
-    if dealer_label:
-        rows.append(["庄家牌面", str(dealer_label)])
-    if me.get("handLabel"):
-        rows.append(["我方牌面", str(me.get("handLabel"))])
-    steps = _pop_decision_log(ctx, rid)
+    steps = _pop_decision_log(ctx, rid)  # 消费暂存，避免堆积
     if steps:
-        rows.append(["📜 决策轨迹", _decide_text(*steps[0])])
-        for s in steps[1:]:  # 每条决策单独一行，不拼进同一格（表格折行效果差）
-            rows.append(["", _decide_text(*s)])
-    if me.get("resultText"):
-        rows.append(["结果", str(me.get("resultText"))])
-    rows.append(["盈亏", f"{'+' if delta >= 0 else ''}{delta:,} 银元"])
-    rows.append(["📊 累计", _stats_text(total)])
-    rows.append(["📅 今日", _stats_text(daily)])
-    caption = f"🎲 十点半 #{rid} 结算 {'+' if delta >= 0 else ''}{delta:,} 银元"
-    # 输赢都走 success：正常结算不算异常，不用 warning 刷屏
-    await _safe_notify_table(ctx, ["项目", "内容"], rows, caption=caption, level="success", category="十点半")
-    # AI 评价（v1.23.15 起，v1.23.16 移交 games/ai_review.py 通用模块）：本局有决策轨迹才总结，
-    # 赢/输/平各自口吻，不涉及 EV；开关/目标群/提示词在「AI 评价」配置分组统一控制
-    if steps:
+        # AI 评价：有决策轨迹才总结，赢/输/平各口吻，不含 EV；开关/目标群在「AI 评价」分组控制
+        dealer_name = str(settlement.get("dealerDisplayName") or settlement.get("dealer") or "").strip()
         await ai_review.review(
             ctx,
             cfg,
@@ -1082,11 +1062,9 @@ async def _catch_up_settlement(ctx: object, cfg: dict, game: dict) -> None:
         ctx.kv.set(_LAST_ROUND_KEY, str(joined))
         await _settle_round(ctx, cfg, joined, entry.get("settlement") or {})
         return
-    # history 也没有该条（窗口太短/响应缺字段）：标记已处理并降级推送
+    # history 也没有该条（窗口太短/响应缺字段）：标记已处理，仅记日志（结算不推送）
     ctx.kv.set(_LAST_ROUND_KEY, str(joined))
-    ctx.log.warning("十点半 #%s 已翻篇但 lastResult/history 均未见结算，推送兜底", joined)
-    if cfg.get("tenhalf_notify", True):
-        await _safe_notify(ctx, f"🎲 十点半 #{joined} 已结算（未抓到结算详情，盈亏未知）", category="十点半")
+    ctx.log.warning("十点半 #%s 已翻篇但 lastResult/history 均未见结算", joined)
 
 
 async def _try_join(ctx: object, cfg: dict, client: HdskyClient, game: dict, limits: dict) -> None:

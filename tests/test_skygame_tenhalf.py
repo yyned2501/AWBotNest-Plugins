@@ -697,7 +697,7 @@ async def test_ai_commentary_skips_without_ai_or_disabled() -> None:
     _record_decision(ctx, 777, 9.0, ["6♣", "3♣"], "stand", None, None, None)
     await _once(ctx, {}, _FakeClient(_game(active=False, last_result=_last_result(rid=777, delta=198)), _OK))
     assert not any("还好我稳住了！" in str(msg) for msg, _ in ctx.notifications)
-    assert any("十点半" in str(kw) for _, _, kw in ctx.tables)  # 结算表格正常推送
+    assert ctx.tables == []  # 结算不再推送表格（v1.28.5）
     ctx = _FakeCtx()
     ai = _FakeAI()
     ctx.ai = ai
@@ -717,7 +717,7 @@ async def test_ai_commentary_failure_does_not_block_settlement() -> None:
     ctx.ai = _FakeAI(fail=RuntimeError("ai down"))
     _record_decision(ctx, 777, 9.0, ["6♣", "3♣"], "stand", None, None, None)
     await _once(ctx, {}, _FakeClient(_game(active=False, last_result=_last_result(rid=777, delta=198)), _OK))
-    assert any("十点半" in str(kw) for _, _, kw in ctx.tables)  # 主流程不受影响
+    assert ctx.tables == []  # 结算不推表格，AI 失败也不影响主流程
     assert not any("还好我稳住了！" in str(msg) for msg, _ in ctx.notifications)
     assert any("AI 评价失败" in msg for _, msg in ctx.log.records)
 
@@ -941,15 +941,13 @@ async def test_notify_failure_does_not_break_poll() -> None:
             raise RuntimeError("无可用通知渠道")
 
     ctx = _BrokenCtx()
-    state = _game(active=False, last_result=_last_result(delta=198))
-    client = _FakeClient(state, _OK)
+    # 结算已不推表格，这里用报名成功的通知触发坏渠道，验证异常被吞不冒泡
+    client = _FakeClient(_game(phase="signup", actions=["join"]), _OK)
 
     await _once(ctx, {}, client)  # 不抛异常
 
     assert any("通知发送失败" in msg for _, msg in ctx.log.records)
-    # 战绩照常入账，只有通知丢失
-    stats = json.loads(str(ctx.kv.get("tenhalf:stats")))
-    assert stats["total"]["rounds"] == 1
+    assert any("加入十点半" in msg for _, msg in ctx.log.records)
 
 
 @pytest.mark.asyncio
@@ -1153,20 +1151,8 @@ async def test_settlement_push_includes_decision_trace() -> None:
     settled = _game(active=False, last_result=_last_result(rid=501, delta=99))
     await _once(ctx, {}, _FakeClient(settled, _OK))
 
-    assert len(ctx.tables) == 1
-    headers, rows, _ = ctx.tables[0]
-    labels = [str(row[0]) for row in rows]
-    assert "📜 决策轨迹" in labels
-    assert "庄家牌面" in labels
-    dealer_row = next(row for row in rows if row[0] == "庄家牌面")
-    assert str(dealer_row[1]) == "8.5点"  # 本局庄家终局点数（dealerHandLabel）
-    trace_rows = [row for row in rows if str(row[0]).startswith("📜 决策轨迹") or row[0] == ""]
-    # 首行带标题、后续行空 label，且不含 \n 拼接（每条单独成行）
-    assert len(trace_rows) >= 2
-    assert str(trace_rows[0][1]).startswith("要") and "拿牌ev(" in str(trace_rows[0][1])
-    assert str(trace_rows[1][1]).startswith("停牌") and "停牌ev(" in str(trace_rows[1][1])
-    assert "\n" not in str(trace_rows[0][1])
-    assert _pop_decision_log(ctx, 501) == []  # 推送后轨迹已取走
+    assert ctx.tables == []  # 结算不再推送表格（v1.28.5）
+    assert _pop_decision_log(ctx, 501) == []  # 决策轨迹在结算时已被取走消费
 
 
 # ── 结算入账 ──
@@ -1181,11 +1167,7 @@ async def test_settlement_notifies_once_and_records_stats() -> None:
     await _once(ctx, {}, client)
     await _once(ctx, {}, client)  # 第二次轮询同一条 lastResult 不重复入账
 
-    assert len(ctx.tables) == 1
-    headers, rows, kwargs = ctx.tables[0]
-    assert kwargs.get("category") == "十点半" and kwargs.get("level") == "success"
-    flat = [cell for row in rows for cell in row]
-    assert "麦克格雷涛" in str(flat[1]) and "1局" in str(flat[-3])  # 庄家行与累计行
+    assert ctx.tables == []  # 结算不再推送表格
     stats = json.loads(str(ctx.kv.get("tenhalf:stats")))
     assert stats["total"] == {"rounds": 1, "net": 198, "wins": 1, "losses": 0}
     # 庄家画像入账：8.5 点一局（rounds/counts 由 recent 窗口派生）
@@ -1196,31 +1178,29 @@ async def test_settlement_notifies_once_and_records_stats() -> None:
 
 
 @pytest.mark.asyncio
-async def test_settlement_loss_notifies_success_level() -> None:
-    """输局也按 success 推送：正常结算不算异常，不用 warning（v1.17.2）。"""
+async def test_settlement_loss_records_without_push() -> None:
+    """输局结算不推表格，但仍入账战绩（正常结算不算异常）。"""
     ctx = _FakeCtx()
     state = _game(active=False, last_result=_last_result(delta=-100))
     client = _FakeClient(state, _OK)
 
     await _once(ctx, {}, client)
 
-    assert len(ctx.tables) == 1
-    _, _, kwargs = ctx.tables[0]
-    assert kwargs.get("level") == "success"
+    assert ctx.tables == []
+    stats = json.loads(str(ctx.kv.get("tenhalf:stats")))
+    assert stats["total"]["rounds"] == 1 and stats["total"]["net"] == -100
 
 
 @pytest.mark.asyncio
-async def test_settlement_push_shows_dealer_hand_label() -> None:
-    """结算推送含本局庄家牌面（dealerHandLabel），与「我方牌面」对称展示（v1.23.12）。"""
+async def test_settlement_logs_without_pushing_dealer_label() -> None:
+    """结算不再推表格，但仍写运行日志（含盈亏），庄家牌面不再单独推送。"""
     ctx = _FakeCtx()
     last = _last_result(rid=888, delta=-50, dealer_label="11点")
     await _once(ctx, {}, _FakeClient(_game(active=False, last_result=last), _OK))
 
-    assert len(ctx.tables) == 1
-    labels = [str(row[0]) for row in ctx.tables[0][1]]
-    assert "庄家牌面" in labels and "我方牌面" in labels
-    dealer_row = next(row for row in ctx.tables[0][1] if row[0] == "庄家牌面")
-    assert str(dealer_row[1]) == "11点"
+    assert ctx.tables == []
+    assert any("#888" in msg and "结算" in msg for _, msg in ctx.log.records)
+    assert json.loads(str(ctx.kv.get("tenhalf:stats")))["total"]["rounds"] == 1
 
 
 @pytest.mark.asyncio
@@ -1280,7 +1260,7 @@ async def test_catch_up_settles_missed_round_from_history() -> None:
 
     await _once(ctx, {}, _FakeClient(new_round, _OK))
 
-    assert len(ctx.tables) == 1  # 结算推送没丢
+    assert ctx.tables == []  # 结算不再推送表格
     assert ctx.kv.get("tenhalf:last_round") == "1903"
     stats = json.loads(str(ctx.kv.get("tenhalf:stats")))
     assert stats["total"]["net"] == -100
@@ -1298,7 +1278,9 @@ async def test_catch_up_once_then_no_duplicate() -> None:
     await _once(ctx, {}, client)
     await _once(ctx, {}, client)
 
-    assert len(ctx.tables) == 1
+    assert ctx.tables == []
+    stats = json.loads(str(ctx.kv.get("tenhalf:stats")))
+    assert stats["total"]["rounds"] == 1  # 补扫去重：只入账一次
 
 
 @pytest.mark.asyncio
@@ -1341,7 +1323,7 @@ async def test_catch_up_fallback_when_history_empty() -> None:
     await _once(ctx, {}, _FakeClient(new_round, _OK))
 
     assert ctx.tables == []  # 无详情不组表
-    assert any("盈亏未知" in str(msg) for msg, _ in ctx.notifications)
+    assert not any("盈亏未知" in str(m) for m, _ in ctx.notifications)  # 结算兜底不再推送
     assert ctx.kv.get("tenhalf:last_round") == "1903"
     assert ctx.kv.get("tenhalf:stats") is None  # 盈亏未知不入账战绩
 
