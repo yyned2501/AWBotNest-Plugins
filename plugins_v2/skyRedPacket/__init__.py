@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import random
 import re
 import time
@@ -24,13 +25,18 @@ import time
 __plugin__ = {
     "name": "天空红包",
     "id": "skyRedPacket",
-    "version": "2.6.0",
+    "version": "2.6.1",
     "author": "Yy",
     "description": "天空小秘（bot 8907007783）拼手气红包自动抢：先抢再重试，被拒（未发言）后加随机大延迟再重试。",
     "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/skyRedPacket.svg",
     "scope": "user",
     "plugin_api_version": 2,
     "changelog": (
+        "v2.6.1 修复：\n"
+        "- 适配 V2 平台 Telethon 运行时：不再使用 ctx.filters 与 on_message(group=) （该运行时不提供，"
+        "导致 setup 抛异常插件启动失败），改为裸装饰器 + handler 内手动过滤群聊与天空小秘；\n"
+        "- 按钮点击兼容 Telethon 的 click(行, 列) 与 Pyrogram 的 click(x=行, y=列)，回调文案统一提取；\n"
+        "- ctx.notify 不再传 account（V2 handler 无 client 参数）。\n"
         "v2.6.0 更新内容：\n"
         "- 新增「未发言重试延迟」：被拒（说明最近没发言）后，在可抢时间基础上追加一段随机大延迟再重试，"
         "避免总在可抢瞬间精准点击被行为检测识别\n"
@@ -198,41 +204,135 @@ def _is_lucky_packet(message: object) -> bool:
     return False
 
 
-async def _try_snatch(client: object, message: object, row: int, col: int, timeout: int = 10) -> str | None:
-    """点击抢红包按钮，返回回调文本。失败返回 None。"""
+def _extract_message(args: tuple[object, ...], kwargs: dict[str, object]) -> tuple[object | None, object | None]:
+    """从平台回调参数中取出 (message, event)。
+
+    V2 平台底层是 Telethon：回调只收到单个 event（event.message 才是消息）。
+    Pyrogram 适配期为 (client, message) 双参数，第二参数即消息本身。
+    """
+    if args and not kwargs and len(args) == 1:
+        raw = args[0]
+    elif len(args) >= 2:
+        raw = args[1]
+    else:
+        raw = kwargs.get("event") or kwargs.get("message") or kwargs.get("update")
+    if raw is None:
+        return None, None
+    return (getattr(raw, "message", None) or raw), raw
+
+
+def _sender_id(message: object, event: object) -> int | None:
+    """取发送者 ID，兼容 Telethon（sender_id/from_id）与 Pyrogram（from_user.id）。"""
+    for obj in (message, event):
+        sid = getattr(obj, "sender_id", None)
+        if isinstance(sid, int):
+            return sid
+        sender = getattr(obj, "from_user", None) or getattr(obj, "sender", None)
+        fid = getattr(sender, "id", None)
+        if isinstance(fid, int):
+            return fid
+        peer = getattr(obj, "from_id", None)
+        pid = getattr(peer, "user_id", None)
+        if isinstance(pid, int):
+            return pid
+    return None
+
+
+def _is_group_chat(message: object, event: object) -> bool:
+    """是否群聊消息。平台运行时不同则字段不同，两个都取不到时按群聊放行。"""
+    is_group = getattr(event, "is_group", None)
+    if is_group is None:
+        is_group = getattr(message, "is_group", None)
+    if isinstance(is_group, bool):
+        return is_group
+    chat = getattr(message, "chat", None)
+    chat_type = str(getattr(chat, "type", "") or "").upper()
+    if not chat_type:
+        return True
+    return "GROUP" in chat_type or "CHANNEL" in chat_type
+
+
+def _result_text(result: object) -> str | None:
+    """从点击结果里取回调文案，拿不到文案视为点击无效。"""
+    if result is None:
+        return None
+    if isinstance(result, str):
+        return result.strip() or None
+    for attr in ("message", "text"):
+        value = getattr(result, attr, None)
+        if isinstance(value, str) and value.strip():
+            return value
+    return None
+
+
+async def _try_snatch(message: object, row: int, col: int, timeout: int = 10) -> str | None:
+    """点击抢红包按钮，返回回调文本。失败返回 None。
+
+    V2 平台底层是 Telethon（click(i=行, j=列)），Pyrogram 适配期是 click(x=行, y=列)，
+    按签名形参选择调用形式，避免位置参数被不同运行时解释成行列互换。
+    """
+    click = getattr(message, "click", None)
+    if not callable(click):
+        return None
     try:
-        result = await message.click(x=col, y=row, timeout=timeout)
-        return getattr(result, "message", None) or str(result)
+        params = set(inspect.signature(click).parameters)
+    except (TypeError, ValueError):  # 内置/C 实现拿不到签名，退回位置参数
+        params = set()
+    call_kwargs: dict[str, object] = {"timeout": timeout} if "timeout" in params else {}
+    if {"x", "y"} & params:
+        call_kwargs.update({"x": row, "y": col})
+        args: tuple[object, ...] = ()
+    else:
+        args = (row, col)
+    try:
+        result = await click(*args, **call_kwargs)
     except Exception:
         return None
+    return _result_text(result)
 
 
 async def setup(ctx: object) -> None:
     cfg = ctx.config
-    ctx.log.info("天空红包插件已启用")
 
     # ─── 抢红包 Handler ────────────────────────────────
-    @ctx.on_message(
-        ctx.filters.group & ctx.filters.user(BOT_ID),
-        group=-9,
-    )
-    async def snatch_red_packet(client: object, message: object) -> None:
-        """检测拼手气红包，先抢再重试，被拒后解析等待时间自动重试。"""
-        chat_id = message.chat.id
+    @ctx.on_message()
+    async def snatch_red_packet(*args: object, **kwargs: object) -> None:
+        """检测拼手气红包，先抢再重试，被拒后解析等待时间自动重试。
+
+        V2 平台（Telethon 底层）不提供 ctx.filters 与 group 关键字，
+        因此群/发送者过滤在 handler 内手动完成。
+        """
+        message, event = _extract_message(args, kwargs)
+        if message is None:
+            return
+        if not _is_group_chat(message, event):
+            return
+        sender_id = _sender_id(message, event)
+        if sender_id is None:
+            ctx.log.debug("未能识别消息发送者，按文案+按钮判定 msg=%s", getattr(message, "id", "?"))
+        elif sender_id != BOT_ID:
+            return
+
+        chat = getattr(message, "chat", None)
+        chat_id = getattr(chat, "id", None)
+        if chat_id is None:
+            return
         groups = _parse_groups(cfg.get("enabled_groups", ""))
         if groups and chat_id not in groups:
             return
+
+        msg_id = getattr(message, "id", None) or getattr(event, "id", None) or "?"
 
         if not _is_lucky_packet(message):
             return
 
         btn_pos = _find_snatch_button(message)
         if not btn_pos:
-            ctx.log.debug("拼手气红包消息无「抢红包」按钮，跳过 msg=%s", message.id)
+            ctx.log.debug("拼手气红包消息无「抢红包」按钮，跳过 msg=%s", msg_id)
             return
 
         row, col = btn_pos
-        msg_link = getattr(message, "link", "")
+        msg_link = getattr(message, "link", None) or ""
         msg_date = getattr(message, "date", None)
         msg_ts = msg_date.timestamp() if msg_date else 0
 
@@ -245,32 +345,30 @@ async def setup(ctx: object) -> None:
         # 首次尝试
         delay = initial_delay + (random_delay_max * random.random())
         if delay > 0:
-            ctx.log.info("初始延迟 %.1fs 后抢 chat=%s msg=%s", delay, chat_id, message.id)
+            ctx.log.info("初始延迟 %.1fs 后抢 chat=%s msg=%s", delay, chat_id, msg_id)
             await asyncio.sleep(delay)
 
-        result_text = await _try_snatch(client, message, row, col)
+        result_text = await _try_snatch(message, row, col)
         if result_text is None:
-            ctx.log.warning("首次点击抢红包失败 chat=%s msg=%s", chat_id, message.id)
+            ctx.log.warning("首次点击抢红包失败 chat=%s msg=%s", chat_id, msg_id)
             await ctx.notify(
                 f"🏠 群ID: {chat_id}\n\n⚠️ 抢红包失败（首次点击无效）\n\n🔗 消息链接\n   {msg_link}",
                 level="error",
                 category="失败",
-                account=client,
             )
             return
 
-        ctx.log.info("首次抢包结果 chat=%s msg=%s %s", chat_id, message.id, result_text)
+        ctx.log.info("首次抢包结果 chat=%s msg=%s %s", chat_id, msg_id, result_text)
 
         # 判断是否被拒（30 秒限制）
         for attempt in range(_MAX_RETRIES):
             # 红包已结束，不再重试
             if "已结束" in result_text or "已过期" in result_text or "已失效" in result_text:
-                ctx.log.info("红包已结束，放弃 chat=%s msg=%s", chat_id, message.id)
+                ctx.log.info("红包已结束，放弃 chat=%s msg=%s", chat_id, msg_id)
                 await ctx.notify(
                     f"🏠 群ID: {chat_id}\n\n📩 抢包结果\n   {result_text}\n\n🔗 消息链接\n   {msg_link}",
                     level="warning",
                     category="已结束",
-                    account=client,
                 )
                 return
 
@@ -280,18 +378,16 @@ async def setup(ctx: object) -> None:
                     f"🏠 群ID: {chat_id}\n\n📩 抢包结果\n   {result_text}\n\n🔗 消息链接\n   {msg_link}",
                     level="success",
                     category="已抢",
-                    account=client,
                 )
                 return
 
             wait_seconds = _parse_wait_seconds(result_text)
             if wait_seconds is None:
-                ctx.log.info("无法解析等待时间，放弃重试 chat=%s msg=%s", chat_id, message.id)
+                ctx.log.info("无法解析等待时间，放弃重试 chat=%s msg=%s", chat_id, msg_id)
                 await ctx.notify(
                     f"🏠 群ID: {chat_id}\n\n📩 抢包结果\n   {result_text}\n\n🔗 消息链接\n   {msg_link}",
                     level="success",
                     category="已抢",
-                    account=client,
                 )
                 return
 
@@ -307,25 +403,24 @@ async def setup(ctx: object) -> None:
                 attempt + 1,
                 _MAX_RETRIES,
                 chat_id,
-                message.id,
+                msg_id,
             )
             await asyncio.sleep(wait)
 
-            result_text = await _try_snatch(client, message, row, col)
+            result_text = await _try_snatch(message, row, col)
             if result_text is None:
-                ctx.log.warning("重试点击失败 chat=%s msg=%s", chat_id, message.id)
+                ctx.log.warning("重试点击失败 chat=%s msg=%s", chat_id, msg_id)
                 await ctx.notify(
                     f"🏠 群ID: {chat_id}\n\n⚠️ 抢红包失败（重试点击无效）\n\n🔗 消息链接\n   {msg_link}",
                     level="error",
                     category="失败",
-                    account=client,
                 )
                 return
 
             ctx.log.info(
                 "重试结果 chat=%s msg=%s attempt=%d %s",
                 chat_id,
-                message.id,
+                msg_id,
                 attempt + 1,
                 result_text,
             )
@@ -341,8 +436,9 @@ async def setup(ctx: object) -> None:
             f"🏠 群ID: {chat_id}\n\n📩 抢包结果\n   {result_text}\n\n🔗 消息链接\n   {msg_link}",
             level=level,
             category=category,
-            account=client,
         )
+
+    ctx.log.info("天空红包插件已启用 (v%s)，抢红包 handler 已注册", __plugin__["version"])
 
 
 async def teardown(ctx: object) -> None:
