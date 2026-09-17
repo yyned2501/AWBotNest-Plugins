@@ -1,5 +1,5 @@
 # =============================================================================
-# AWBotNest 插件：天空答题 (skyDropAnswer) v2.1.6
+# AWBotNest 插件：天空答题 (skyDropAnswer) v2.1.7
 #
 # 合并自原 skyDropTrigger + skyDropAnswer：
 #   - 答题：监听天空小秘（bot 8907007783）的银元掉落题目，模板/AI 解答并点击按钮领取
@@ -27,11 +27,17 @@ from . import trigger as trigger_mod
 __plugin__ = {
     "name": "天空答题",
     "id": "skyDropAnswer",
-    "version": "2.1.6",
+    "version": "2.1.7",
     "author": "Yy",
     "description": "天空答题奖励 + 每小时智能触发：模板管理/AI答题/自动触发掉落一体化。",
     "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/skyDropAnswer.svg",
     "changelog": (
+        "v2.1.7 修复：\n"
+        "- 适配 V2 Telethon 消息运行时：不再使用 ctx.filters 与 on_message(group=)（该运行时不提供，\n"
+        "  启用时报 'PluginContext' object has no attribute 'filters'），群/私聊/文案/回复归属过滤\n"
+        "  改在 handler 内手动完成，兼容单 event 与 (client, message) 两种回调形态；\n"
+        "- 按钮点击按签名自适应（Telethon click(i=行,j=列) / Pyrogram click(x=列,y=行)）；\n"
+        "- /info 与触发消息发送改走 user → user.raw → bot.raw 兜底链（同 skyGame 掉馅守卫）；\n"
         "v2.1.6 修复：\n"
         "- 适配 V2 异步 KV 存储：启用同步外观层（启动预载 + 内存即时读写 + 异步落库），\n"
         "  修复启用即崩溃（PluginKV 无 keys()）及触发计数/模板命中数持久化静默失效；\n"
@@ -325,9 +331,9 @@ async def setup(ctx: object) -> None:
     # 加载答题模板（去重 + 从 kv 恢复命中计数）
     templates = templates_mod.load_templates(ctx)
 
-    # 答题 handler（group=5，窄匹配：仅回复自己消息的掉落，含掉落计数）
+    # 答题 handler（窄匹配：群消息 + 掉落文案 + 仅回复自己消息，含掉落计数；过滤在 handler 内手动做）
     answer_mod.register_answer_handler(ctx, templates)
-    # /info 回复捕获 handler（group=6）：等待 /info 时记录 bot 回复
+    # /info 回复捕获 handler：等待 /info 时记录 bot 私聊回复
     trigger_mod.register_info_handler(ctx)
     # 模板管理 API（供 Vue 面板调用）
     templates_mod.register_api(ctx, templates)

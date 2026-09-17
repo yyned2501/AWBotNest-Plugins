@@ -21,8 +21,12 @@ from .models import (
     TZ,
     _ensure_day,
     _ensure_hour,
+    _extract_message,
+    _is_private_message,
     _parse_bot_ids,
     _parse_groups,
+    _sender_id,
+    _sender_username,
     refresh_stats,
 )
 
@@ -47,6 +51,39 @@ def _apply_info_reply(ctx: object, text: str) -> None:
     ctx.log.info("/info 校准：剩余 %d + 已掉 %d = 本时段配额 %d", remaining, drops, per_hour)
 
 
+def _candidate_senders(ctx: object) -> list[tuple[str, object]]:
+    """V2 运行时的 ctx.user 未必直接提供 send/send_message；按 skyGame 掉馅守卫的兜底链依次尝试。"""
+    senders: list[tuple[str, object]] = []
+    user_obj = getattr(ctx, "user", None)
+    if user_obj is not None:
+        senders.append(("user", user_obj))
+    user_raw = getattr(user_obj, "raw", None) if user_obj is not None else None
+    if user_raw is not None:
+        senders.append(("user.raw", user_raw))
+    bot_obj = getattr(ctx, "bot", None)
+    bot_raw = getattr(bot_obj, "raw", None) if bot_obj is not None else None
+    if bot_raw is not None and bot_raw is not user_raw:
+        senders.append(("bot.raw", bot_raw))
+    return senders
+
+
+async def _send_text(ctx: object, target: object, text: str) -> tuple[bool, Exception | None]:
+    """用第一个可用的账号客户端发消息，返回 (是否成功, 最后一个异常)。"""
+    last_err: Exception | None = None
+    for _label, client_obj in _candidate_senders(ctx):
+        send = getattr(client_obj, "send", None)
+        try:
+            if callable(send):
+                await send(target, text)
+                return True, None
+            if hasattr(client_obj, "send_message"):
+                await client_obj.send_message(target, text)
+                return True, None
+        except Exception as exc:
+            last_err = exc
+    return False, last_err
+
+
 async def _send_info(ctx: object) -> None:
     """私聊 bot 发 /info 校准，不在目标群发送。"""
     ctx.kv.set("trig:info_reply", "")
@@ -56,11 +93,11 @@ async def _send_info(ctx: object) -> None:
     target = bot_ids[0]
     if isinstance(target, str) and not target.startswith("@"):
         target = f"@{target}"
-    try:
-        await ctx.user.send(target, "/info")
+    sent, err = await _send_text(ctx, target, "/info")
+    if sent:
         ctx.log.info("已私聊 bot %s 发送 /info", target)
-    except Exception as e:
-        ctx.log.warning("私聊 /info 失败: %r（低频 tick 超时后自动继续）", e)
+    else:
+        ctx.log.warning("私聊 /info 失败: %r（低频 tick 超时后自动继续）", err)
 
 
 # 用于按标点拆句的正则（中英文常见标点）
@@ -139,11 +176,11 @@ async def _send_segments(ctx: object, groups: list[int], segments: list[str], ba
             break
         ok = False
         for gid in groups:
-            try:
-                await ctx.user.send(gid, seg)
+            sent, err = await _send_text(ctx, gid, seg)
+            if sent:
                 ok = True
-            except Exception as e:
-                ctx.log.warning("向群 %s 发送失败: %r", gid, e)
+            else:
+                ctx.log.warning("向群 %s 发送失败: %r", gid, err)
         if not ok:
             ctx.log.warning("段 %d/%d 全部群发送失败: %s", i + 1, len(segments), seg)
             continue
@@ -296,16 +333,26 @@ async def _trigger_tick(ctx: object) -> None:
 
 
 def register_info_handler(ctx: object) -> None:
-    """捕获私聊 bot 的 /info 回复，排除掉落消息。"""
-    bot_ids = _parse_bot_ids(str(ctx.config.get("bot", "") or ""))
-    info_filter = ctx.filters.private & ctx.filters.user(bot_ids) & ctx.filters.text
+    """捕获私聊 bot 的 /info 回复，排除掉落消息。
 
-    @ctx.on_message(info_filter, group=6)
-    async def _on_info_reply(client: object, message: object) -> None:
+    V2 平台（Telethon 底层）不提供 ctx.filters 与 group 关键字，回调也只收到
+    单个 event，因此私聊/发送者/文本过滤在 handler 内手动完成。
+    """
+    bot_ids = {str(b).lstrip("@") for b in _parse_bot_ids(str(ctx.config.get("bot", "") or ""))}
+
+    @ctx.on_message()
+    async def _on_info_reply(*args: object, **kwargs: object) -> None:
         if (ctx.kv.get("trig:phase") or "") != "await_info":
             return
-        text = (message.text or "").strip()
-        if re.search(_DROP_REGEX, text):
+        message, event = _extract_message(args, kwargs)
+        if message is None or not _is_private_message(message, event):
+            return
+        sender_id = str(_sender_id(message, event) or "")
+        sender_name = _sender_username(message, event)
+        if bot_ids and sender_id not in bot_ids and sender_name not in bot_ids:
+            return
+        text = (getattr(message, "text", None) or "").strip()
+        if not text or re.search(_DROP_REGEX, text):
             return
         ctx.kv.set("trig:info_reply", text)
         ctx.log.info("捕获 /info 回复: %s", text[:200])
