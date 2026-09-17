@@ -1,5 +1,5 @@
 # =============================================================================
-# AWBotNest 插件：天空答题 (skyDropAnswer) v2.1.5
+# AWBotNest 插件：天空答题 (skyDropAnswer) v2.1.6
 #
 # 合并自原 skyDropTrigger + skyDropAnswer：
 #   - 答题：监听天空小秘（bot 8907007783）的银元掉落题目，模板/AI 解答并点击按钮领取
@@ -19,6 +19,7 @@ import shutil
 from pathlib import Path
 
 from . import answer as answer_mod
+from . import kv_facade
 from . import models as models_mod
 from . import templates as templates_mod
 from . import trigger as trigger_mod
@@ -26,11 +27,15 @@ from . import trigger as trigger_mod
 __plugin__ = {
     "name": "天空答题",
     "id": "skyDropAnswer",
-    "version": "2.1.5",
+    "version": "2.1.6",
     "author": "Yy",
     "description": "天空答题奖励 + 每小时智能触发：模板管理/AI答题/自动触发掉落一体化。",
     "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/skyDropAnswer.svg",
     "changelog": (
+        "v2.1.6 修复：\n"
+        "- 适配 V2 异步 KV 存储：启用同步外观层（启动预载 + 内存即时读写 + 异步落库），\n"
+        "  修复启用即崩溃（PluginKV 无 keys()）及触发计数/模板命中数持久化静默失效；\n"
+        "- 卸载前兜底 flush 脏键，避免热卸载取消最后一次异步写；\n"
         "v2.1.5 更新：\n"
         "- 自动触发新增「启用文案类型」多选：可勾选只用模板/背诗/唱歌中的某几个或某一个\n"
         "- 本轮仍从已勾选且有内容的类型中随机选一种，轮内不切换；全不选则回退模板\n"
@@ -304,6 +309,8 @@ __plugin__ = {
 
 async def setup(ctx: object) -> None:
     ctx.log.info("天空答题插件已加载 (v%s)", __plugin__["version"])
+    # V2 的 ctx.kv 是异步存储；先换成同步外观，令后续同步读写（含 keys()）照常生效
+    await kv_facade.install(ctx)
 
     template_dir = Path(ctx.data_dir) / "templates"
     template_dir.mkdir(parents=True, exist_ok=True)
@@ -334,4 +341,5 @@ async def setup(ctx: object) -> None:
 
 async def teardown(ctx: object) -> None:
     trigger_mod.stop_trigger(ctx)
+    await kv_facade.flush(ctx)  # 卸载前把脏键落库，避免热卸载取消最后一次异步写
     ctx.log.info("天空答题已卸载")
