@@ -132,17 +132,89 @@ def refresh_stats(ctx: object) -> None:
     )
 
 
-def _reply_to_own_filter(_: object, __: object, m: object) -> bool:
+def _extract_message(args: tuple, kwargs: dict) -> tuple[object | None, object | None]:
+    """从平台回调参数中取出 (message, event)。
+
+    V2 平台底层是 Telethon：回调只收到单个 event（event.message 才是消息）；
+    Pyrogram 适配期为 (client, message) 双参数，第二参数即消息本身。
+    """
+    if args and not kwargs and len(args) == 1:
+        raw = args[0]
+    elif len(args) >= 2:
+        raw = args[1]
+    else:
+        raw = kwargs.get("event") or kwargs.get("message") or kwargs.get("update")
+    if raw is None:
+        return None, None
+    return (getattr(raw, "message", None) or raw), raw
+
+
+def _sender_id(message: object, event: object) -> int | None:
+    """取发送者 ID，兼容 Telethon（sender_id/from_id）与 Pyrogram（from_user.id）。"""
+    for obj in (message, event):
+        sid = getattr(obj, "sender_id", None)
+        if isinstance(sid, int):
+            return sid
+        sender = getattr(obj, "from_user", None) or getattr(obj, "sender", None)
+        fid = getattr(sender, "id", None)
+        if isinstance(fid, int):
+            return fid
+        peer = getattr(obj, "from_id", None)
+        pid = getattr(peer, "user_id", None)
+        if isinstance(pid, int):
+            return pid
+    return None
+
+
+def _sender_username(message: object, event: object) -> str:
+    """取发送者用户名（不带 @），取不到返回空串。"""
+    for obj in (message, event):
+        sender = getattr(obj, "from_user", None) or getattr(obj, "sender", None)
+        name = getattr(sender, "username", None)
+        if name:
+            return str(name).lstrip("@")
+    return ""
+
+
+def _is_group_message(message: object, event: object) -> bool:
+    """是否群/频道消息；运行时字段都取不到时按群聊放行（与 skyRedPacket 一致）。"""
+    for obj in (event, message):
+        if getattr(obj, "is_private", None) is True:
+            return False
+        for attr in ("is_group", "is_channel"):
+            if getattr(obj, attr, None) is True:
+                return True
+    chat = getattr(message, "chat", None)
+    chat_type = str(getattr(chat, "type", "") or "").upper()
+    if not chat_type:
+        return True
+    return "GROUP" in chat_type or "CHANNEL" in chat_type
+
+
+def _is_private_message(message: object, event: object) -> bool:
+    """是否私聊消息。"""
+    for obj in (event, message):
+        v = getattr(obj, "is_private", None)
+        if isinstance(v, bool):
+            return v
+    chat_type = str(getattr(getattr(message, "chat", None), "type", "") or "").upper()
+    return "PRIVATE" in chat_type or "USER" in chat_type
+
+
+def _replies_to_own(m: object) -> bool:
     """判断消息是否是「回复我自己发的消息」。
 
-    天空小秘掉题与 /info 回复都会 reply 到触发它的那条消息，
-    reply_to_message.from_user.is_self 即「回复的是我」。答题与触发两侧共用。
+    天空小秘掉题与 /info 回复都会 reply 到触发它的那条消息，被回复那条
+    「是我发的」即命中。兼容 Telethon（outgoing/is_self）与 Pyrogram（from_user.is_self）。
     """
-    return bool(
-        getattr(m, "reply_to_message", None)
-        and getattr(m.reply_to_message, "from_user", None)
-        and getattr(m.reply_to_message.from_user, "is_self", False)
-    )
+    rtm = getattr(m, "reply_to_message", None)
+    if rtm is None:
+        return False
+    for attr in ("from_user", "sender"):
+        u = getattr(rtm, attr, None)
+        if u is not None and getattr(u, "is_self", False):
+            return True
+    return bool(getattr(rtm, "outgoing", False) or getattr(rtm, "is_outgoing", False))
 
 
 def _parse_groups(raw: str) -> list[int]:
