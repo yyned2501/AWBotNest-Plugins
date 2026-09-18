@@ -25,13 +25,16 @@ import time
 __plugin__ = {
     "name": "天空红包",
     "id": "skyRedPacket",
-    "version": "2.6.1",
+    "version": "2.6.2",
     "author": "Yy",
     "description": "天空小秘（bot 8907007783）拼手气红包自动抢：先抢再重试，被拒（未发言）后加随机大延迟再重试。",
     "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/skyRedPacket.svg",
+    "tags": ["红包", "自动抢包", "天空小秘", "挂机收益"],
     "scope": "user",
     "plugin_api_version": 2,
     "changelog": (
+        "v2.6.2 更新：\n"
+        "- 补充插件功能标签，插件市场与「我的插件」卡片可见；插件行为无变化\n"
         "v2.6.1 修复：\n"
         "- 适配 V2 平台 Telethon 运行时：不再使用 ctx.filters 与 on_message(group=) （该运行时不提供，"
         "导致 setup 抛异常插件启动失败），改为裸装饰器 + handler 内手动过滤群聊与天空小秘；\n"

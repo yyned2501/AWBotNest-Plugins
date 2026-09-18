@@ -6,10 +6,12 @@ from .core import teardown as _core_teardown
 __plugin__ = {
     "name": "JUAI 自动签到",
     "id": "juai_checkin",
-    "version": "2.0.2",
+    "version": "2.0.3",
     "author": "Yy",
     "description": "JUAI 自动签到（多账号）：每天分档重试，今日已成功自动跳过；登录 3 次重试，session 缓存 30 天。",
     "changelog": (
+        "v2.0.3 更新：\n"
+        "- 补充插件功能标签，插件市场与「我的插件」卡片可见；插件行为无变化\n"
         "v2.0.2 更新：\n"
         "- 提高托管后台任务额度，避免签到收尾时并发保存 session、完成标记和历史记录触发上限\n"
         "v2.0.1 更新：\n"
@@ -21,6 +23,7 @@ __plugin__ = {
         "- 保留原有配置表单、浏览器登录、session 缓存和多账号签到行为"
     ),
     "icon": "https://www.juaiapi.com/favicon.png",
+    "tags": ["自动签到", "多账号", "定时任务", "浏览器登录"],
     "scope": "standalone",
     "default_enabled": False,
     "requirements": ["httpx>=0.27", "beautifulsoup4>=4.12"],
