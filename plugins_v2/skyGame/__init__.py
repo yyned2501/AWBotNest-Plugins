@@ -30,9 +30,10 @@ from .games import hdsky_auth, kv_facade
 __plugin__ = {
     "name": "天空游戏",
     "id": "skyGame",
-    "version": "1.28.6",
+    "version": "1.28.7",
     "author": "Yy",
     "description": "天空系列游戏统一入口：炸金花/养马/十点半自动参与、幸运轮盘免费抽奖，左侧按游戏分组配置。",
+    "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/skyGame.svg",
     "scope": "user",
     "plugin_api_version": 2,
     "cookie_domains": ["hdsky.supertimi.de"],
@@ -563,6 +564,8 @@ __plugin__ = {
         },
     },
     "changelog": (
+        "v1.28.7 更新：\n"
+        "- 插件内补上 icon 字段，「我的插件」卡片不再回退为平台默认 logo；插件行为无变化\n"
         "v1.28.6 更新：\n"
         "- 补充插件功能标签，插件市场与「我的插件」卡片可见；插件行为无变化\n"
         "v1.28.5 修复：\n"
