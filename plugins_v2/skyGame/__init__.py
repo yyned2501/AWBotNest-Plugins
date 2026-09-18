@@ -30,7 +30,7 @@ from .games import hdsky_auth, kv_facade
 __plugin__ = {
     "name": "天空游戏",
     "id": "skyGame",
-    "version": "1.28.5",
+    "version": "1.28.6",
     "author": "Yy",
     "description": "天空系列游戏统一入口：炸金花/养马/十点半自动参与、幸运轮盘免费抽奖，左侧按游戏分组配置。",
     "scope": "user",
@@ -39,6 +39,7 @@ __plugin__ = {
     "render_mode": "vue",
     "default_enabled": False,
     "requirements": ["httpx>=0.27"],
+    "tags": ["炸金花", "养马", "十点半", "Cookie 续期"],
     "config_schema": {
         # ── 全局设置 ──
         "bot": {
@@ -562,6 +563,8 @@ __plugin__ = {
         },
     },
     "changelog": (
+        "v1.28.6 更新：\n"
+        "- 补充插件功能标签，插件市场与「我的插件」卡片可见；插件行为无变化\n"
         "v1.28.5 修复：\n"
         "- 新增同步 KV 外观层，修复 V2 异步 ctx.kv 导致的十点半战绩不累计、结算去重失效（重复推送）、\n"
         "  庄家画像/决策轨迹/掉落暂停等持久化静默失效（各游戏模块同步读写在内存即时可见、异步落库）；\n"

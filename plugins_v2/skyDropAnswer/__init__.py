@@ -27,11 +27,14 @@ from . import trigger as trigger_mod
 __plugin__ = {
     "name": "天空答题",
     "id": "skyDropAnswer",
-    "version": "2.1.7",
+    "version": "2.1.8",
     "author": "Yy",
     "description": "天空答题奖励 + 每小时智能触发：模板管理/AI答题/自动触发掉落一体化。",
     "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/skyDropAnswer.svg",
+    "tags": ["答题", "AI 答题", "模板管理", "自动触发"],
     "changelog": (
+        "v2.1.8 更新：\n"
+        "- 补充插件功能标签，插件市场与「我的插件」卡片可见；插件行为无变化\n"
         "v2.1.7 修复：\n"
         "- 适配 V2 Telethon 消息运行时：不再使用 ctx.filters 与 on_message(group=)（该运行时不提供，\n"
         "  启用时报 'PluginContext' object has no attribute 'filters'），群/私聊/文案/回复归属过滤\n"

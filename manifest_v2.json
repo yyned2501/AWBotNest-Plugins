@@ -2,41 +2,48 @@
   "plugins": {
     "skyRedPacket": {
       "name": "天空红包",
-      "version": "2.6.1",
+      "version": "2.6.2",
       "author": "Yy",
       "description": "天空小秘（bot 8907007783）拼手气红包自动抢：先抢再重试，被拒（未发言）后追加随机大延迟再重试，更像真人。",
       "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/skyRedPacket.svg",
+      "tags": ["红包", "自动抢包", "天空小秘", "挂机收益"],
       "scope": "user",
       "plugin_api_version": 2,
       "path": "plugins_v2/skyRedPacket/"
     },
     "skyDropAnswer": {
       "name": "天空答题",
-      "version": "2.1.7",
+      "version": "2.1.8",
       "author": "Yy",
       "description": "天空答题奖励 + 开启时段内定时触发：模板管理/AI答题/自动触发掉落一体化（合并原 skyDropTrigger）。",
       "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/skyDropAnswer.svg",
+      "tags": ["答题", "AI 答题", "模板管理", "自动触发"],
       "scope": "user",
       "plugin_api_version": 2,
       "path": "plugins_v2/skyDropAnswer/"
     },
     "skyGame": {
       "name": "天空游戏",
-      "version": "1.28.5",
+      "version": "1.28.6",
       "author": "Yy",
       "description": "天空系列游戏统一入口：炸金花自动参与（Terminal EV 多人决策树 + 对手画像）、养马自动养护、十点半自动参与、门户 Cookie 自动续期、掉落配额守卫、幸运轮盘免费抽奖，Vue 左侧按游戏分组配置。",
       "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/skyGame.svg",
+      "tags": ["炸金花", "养马", "十点半", "Cookie 续期"],
       "scope": "user",
+      "requirements": [
+        "httpx>=0.27"
+      ],
       "plugin_api_version": 2,
       "path": "plugins_v2/skyGame/"
     },
     "juai_checkin": {
       "name": "JUAI 自动签到",
       "id": "juai_checkin",
-      "version": "2.0.2",
+      "version": "2.0.3",
       "author": "Yy",
       "description": "JUAI 自动签到（多账号）：AWBotNest V2 原生存储、托管任务与 cron 调度，保留原配置表单和 30 天 session 缓存。",
       "icon": "https://www.juaiapi.com/favicon.png",
+      "tags": ["自动签到", "多账号", "定时任务", "浏览器登录"],
       "scope": "standalone",
       "requirements": [
         "httpx>=0.27",
