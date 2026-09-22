@@ -27,12 +27,17 @@ from . import trigger as trigger_mod
 __plugin__ = {
     "name": "天空答题",
     "id": "skyDropAnswer",
-    "version": "2.1.10",
+    "version": "2.1.11",
     "author": "Yy",
     "description": "天空答题奖励 + 每小时智能触发：模板管理/AI答题/自动触发掉落一体化。",
     "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/skyDropAnswer.svg",
     "tags": ["答题", "AI 答题", "模板管理", "自动触发"],
     "changelog": (
+        "v2.1.11 修复：\n"
+        "- 收紧掉落归属：只答「回复我自己消息」的掉落，不再抢答别人触发的题。\n"
+        "  2.1.10 的兜底把「回复了任意消息」都算命中，于是接管全群掉落，\n"
+        "  其中按钮已过期的那些点击大量报 MessageIdInvalidError；\n"
+        "  现改为运行期登记「自己发过的群消息 id」做归属比对，比对不中一律不答\n"
         "v2.1.10 修复：\n"
         "- 修复 V2 Telethon 运行时自动答题完全不触发：回复归属判断只认 Pyrogram 的\n"
         "  reply_to_message / outgoing，而 Telethon 消息对象没有这两个属性，导致每条掉落\n"
