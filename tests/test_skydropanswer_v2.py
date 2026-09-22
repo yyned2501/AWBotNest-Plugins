@@ -194,13 +194,25 @@ class _Msg:
 
 
 class _Event:
-    def __init__(self, message: _Msg, *, is_group: bool = True, is_private: bool = False) -> None:
+    def __init__(
+        self,
+        message: Any,
+        *,
+        is_group: bool = True,
+        is_private: bool = False,
+        reply_to: Any = None,
+    ) -> None:
         self.message = message
         self.id = message.id
         self.is_group = is_group
         self.is_channel = False
         self.is_private = is_private
         self.client = object()
+        self._reply_to = reply_to
+
+    async def get_reply_message(self) -> Any:
+        """Kurigram Event 的同名方法：返回被回复的那条消息（用例注入）。"""
+        return self._reply_to
 
 
 class _RawClient:
@@ -313,8 +325,9 @@ async def test_reward_handler_pyrogram_two_arg_form() -> None:
 
 
 async def test_reward_handler_telethon_native_shape() -> None:
-    """真机 Telethon 形态：无 reply_to_message，回复信息在 reply_to_msg_id；
-    按钮在 rows[].buttons[]。修复前这条路径恒被过滤掉（掉落零日志、KV 无计数）。"""
+    """真机 Kurigram 形态：无 reply_to_message，按钮在 rows[].buttons[]，
+    归属靠 event.get_reply_message() 取回被回复消息的 out 标记。
+    修复前这条路径恒被过滤掉（掉落零日志、KV 无计数）。"""
     ctx = _HandlerCtx(config={"enable_reward_answer": True, "bot": str(BOT_ID), "use_ai_fallback": False})
     tpl = {
         "id": "t1",
@@ -328,12 +341,9 @@ async def test_reward_handler_telethon_native_shape() -> None:
     handler = ctx.handlers[0]
 
     clicks: list[tuple] = []
-    # 我自己在群里发的触发消息（out=True）先让 handler 登记其 id
-    await handler(_Event(_TlMsg("第1题1", clicks=clicks, msg_id=1234, out=True)))
-
-    msg = _TlMsg("小秘想给你 10 银元奖励。", clicks=clicks, reply_to_msg_id=1234, msg_id=1235)
+    msg = _TlMsg("小秘想给你 10 银元奖励。", clicks=clicks, msg_id=1235)
     assert not hasattr(msg, "reply_to_message")
-    await handler(_Event(msg))
+    await handler(_Event(msg, reply_to=types.SimpleNamespace(out=True)))
     assert clicks == [(0, 1)]  # 答案 23 在第 2 列，且必须能读到 Telethon 的 rows
     assert ctx.kv.get("trig:drop_count") == 1
     assert tpl["count"] == 1
@@ -355,21 +365,28 @@ async def test_reward_handler_only_answers_own_replies() -> None:
     handler = ctx.handlers[0]
     clicks: list[tuple] = []
 
-    # 我发的触发消息（msg_id=900）被登记
-    await handler(_Event(_TlMsg("第1题1", clicks=clicks, msg_id=900, out=True)))
-
-    # 回复我这条 → 答
-    await handler(_Event(_TlMsg("小秘想给你 10 银元奖励。", clicks=clicks, reply_to_msg_id=900, msg_id=901)))
+    # 回复我的消息 → 答
+    await handler(
+        _Event(
+            _TlMsg("小秘想给你 10 银元奖励。", clicks=clicks, msg_id=901),
+            reply_to=types.SimpleNamespace(out=True),
+        )
+    )
     assert clicks == [(0, 1)]
     assert ctx.kv.get("trig:drop_count") == 1
 
-    # 回复别人的消息（id 未登记）→ 不答
-    await handler(_Event(_TlMsg("小秘想给你 10 银元奖励。", clicks=clicks, reply_to_msg_id=999, msg_id=902)))
+    # 回复别人的消息（被回复那条 out=False）→ 不答
+    await handler(
+        _Event(
+            _TlMsg("小秘想给你 10 银元奖励。", clicks=clicks, msg_id=902),
+            reply_to=types.SimpleNamespace(out=False),
+        )
+    )
     assert clicks == [(0, 1)]
     assert ctx.kv.get("trig:drop_count") == 1
 
-    # 压根没有回复关系的掉落 → 不答
-    await handler(_Event(_TlMsg("小秘想给你 10 银元奖励。", clicks=clicks, msg_id=903)))
+    # 压根没有回复关系 → 不答
+    await handler(_Event(_TlMsg("小秘想给你 10 银元奖励。", clicks=clicks, msg_id=903), reply_to=None))
     assert clicks == [(0, 1)]
     assert ctx.kv.get("trig:drop_count") == 1
 

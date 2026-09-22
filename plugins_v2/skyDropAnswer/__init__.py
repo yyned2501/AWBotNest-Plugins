@@ -27,12 +27,18 @@ from . import trigger as trigger_mod
 __plugin__ = {
     "name": "天空答题",
     "id": "skyDropAnswer",
-    "version": "2.1.11",
+    "version": "2.1.12",
     "author": "Yy",
     "description": "天空答题奖励 + 每小时智能触发：模板管理/AI答题/自动触发掉落一体化。",
     "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/skyDropAnswer.svg",
     "tags": ["答题", "AI 答题", "模板管理", "自动触发"],
     "changelog": (
+        "v2.1.12 修复：\n"
+        "- 修复 2.1.11 一条题都答不上：该版靠「登记自己发过的群消息 id」判断归属，\n"
+        "  而平台的消息处理器默认只推 incoming，自己发的消息根本进不来，\n"
+        "  登记集合恒为空，于是全部掉落都被判成「不是回复我」；\n"
+        "- 改用 Kurigram Event 的 get_reply_message() 取回被回复消息、看它的 out 标记，\n"
+        "  既不依赖消息方向也不维护状态（写法参考平台上的 mydraw 插件）\n"
         "v2.1.11 修复：\n"
         "- 收紧掉落归属：只答「回复我自己消息」的掉落，不再抢答别人触发的题。\n"
         "  2.1.10 的兜底把「回复了任意消息」都算命中，于是接管全群掉落，\n"
