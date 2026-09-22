@@ -27,12 +27,20 @@ from . import trigger as trigger_mod
 __plugin__ = {
     "name": "天空答题",
     "id": "skyDropAnswer",
-    "version": "2.1.8",
+    "version": "2.1.10",
     "author": "Yy",
     "description": "天空答题奖励 + 每小时智能触发：模板管理/AI答题/自动触发掉落一体化。",
     "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/skyDropAnswer.svg",
     "tags": ["答题", "AI 答题", "模板管理", "自动触发"],
     "changelog": (
+        "v2.1.10 修复：\n"
+        "- 修复 V2 Telethon 运行时自动答题完全不触发：回复归属判断只认 Pyrogram 的\n"
+        "  reply_to_message / outgoing，而 Telethon 消息对象没有这两个属性，导致每条掉落\n"
+        "  消息都在过滤处静默返回（表现为插件加载正常、零日志、KV 无计数）；\n"
+        "  现兼容 reply_to / reply_to_msg_id 与被回复消息的 out 标记；\n"
+        "- 内联按钮读取兼容 Telethon 的 reply_markup.rows[].buttons[].text（此前只认\n"
+        "  Pyrogram 的 inline_keyboard，即使答对也找不到按钮而跳过）；\n"
+        "- 版本号跳过 2.1.9：该版本为实验性 JEV 仲裁分支，未并入本主线\n"
         "v2.1.8 更新：\n"
         "- 补充插件功能标签，插件市场与「我的插件」卡片可见；插件行为无变化\n"
         "v2.1.7 修复：\n"

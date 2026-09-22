@@ -201,20 +201,29 @@ def _is_private_message(message: object, event: object) -> bool:
     return "PRIVATE" in chat_type or "USER" in chat_type
 
 
-def _replies_to_own(m: object) -> bool:
+def _replies_to_own(m: object, event: object = None) -> bool:
     """判断消息是否是「回复我自己发的消息」。
 
     天空小秘掉题与 /info 回复都会 reply 到触发它的那条消息，被回复那条
-    「是我发的」即命中。兼容 Telethon（outgoing/is_self）与 Pyrogram（from_user.is_self）。
+    「是我发的」即命中。V2 底层是 Telethon，消息对象没有 Pyrogram 的
+    reply_to_message，只有 reply_to（MessageReplyHeader）/ reply_to_msg_id，
+    被回复消息的「自己发的」标记是 out 而非 outgoing——按这三种形态依次判断：
+      - Pyrogram：reply_to_message.from_user.is_self / outgoing
+      - Telethon：event.reply_to（被回复的 Message 对象）的 out
+      - Telethon 兜底：存在 reply_to_msg_id / reply_to 头即视为回复了某条消息
+        （外层已有群消息 + 掉落文案 + bot 发送者三重过滤，范围足够窄）
     """
     rtm = getattr(m, "reply_to_message", None)
-    if rtm is None:
-        return False
-    for attr in ("from_user", "sender"):
-        u = getattr(rtm, attr, None)
-        if u is not None and getattr(u, "is_self", False):
-            return True
-    return bool(getattr(rtm, "outgoing", False) or getattr(rtm, "is_outgoing", False))
+    if rtm is not None:
+        for attr in ("from_user", "sender"):
+            u = getattr(rtm, attr, None)
+            if u is not None and getattr(u, "is_self", False):
+                return True
+        return bool(getattr(rtm, "outgoing", False) or getattr(rtm, "is_outgoing", False))
+    reply_msg = getattr(event, "reply_to", None) if event is not None else None
+    if reply_msg is not None and getattr(reply_msg, "out", False):
+        return True
+    return bool(getattr(m, "reply_to_msg_id", None) or getattr(m, "reply_to", None))
 
 
 def _parse_groups(raw: str) -> list[int]:
