@@ -211,6 +211,51 @@ class _RawClient:
         self.sent.append((target, text))
 
 
+# ─── 真机 Telethon 形态假消息 ───────────────────────────────────────────────
+# 上面的 _Msg/_Markup 是 Pyrogram 形态（reply_to_message + inline_keyboard）。
+# Telethon 的 Message 根本没有 reply_to_message，只有 reply_to_msg_id；
+# 内联键盘也不是 inline_keyboard，而是 rows[].buttons[].text。这组假对象刻意
+# 只暴露 Telethon 的字段，用来钉住「真机形态下也能答题」这条回归。
+
+
+class _TlBtn:
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+
+class _TlRow:
+    def __init__(self, texts: list[str]) -> None:
+        self.buttons = [_TlBtn(t) for t in texts]
+
+
+class _TlMarkup:
+    def __init__(self, rows: list[list[str]]) -> None:
+        self.rows = [_TlRow(r) for r in rows]
+
+
+class _TlMsg:
+    """Telethon Message 形态：无 reply_to_message，回复信息在 reply_to_msg_id。"""
+
+    def __init__(
+        self,
+        text: str,
+        *,
+        clicks: list[tuple],
+        reply_to_msg_id: int | None = None,
+        msg_id: int = 777,
+    ) -> None:
+        self.id = msg_id
+        self.text = text
+        self.chat = _Chat()
+        self.sender_id = BOT_ID
+        self.reply_markup = _TlMarkup([["16", "23", "42"]])
+        self.reply_to_msg_id = reply_to_msg_id
+        self._clicks = clicks
+
+    async def click(self, i: int | None = None, j: int | None = None) -> None:  # Telethon 签名
+        self._clicks.append((i, j))
+
+
 # ─── 测试 ───────────────────────────────────────────────────────────────────
 
 
@@ -263,6 +308,47 @@ async def test_reward_handler_pyrogram_two_arg_form() -> None:
     msg = _Msg("小秘想给你 10 银元奖励。", clicks=clicks, reply_own="pyrogram")
     await ctx.handlers[0](object(), msg)  # (client, message) 双参数形态
     assert ctx.kv.get("trig:drop_count") == 1
+
+
+async def test_reward_handler_telethon_native_shape() -> None:
+    """真机 Telethon 形态：无 reply_to_message，回复信息在 reply_to_msg_id；
+    按钮在 rows[].buttons[]。修复前这条路径恒被过滤掉（掉落零日志、KV 无计数）。"""
+    ctx = _HandlerCtx(config={"enable_reward_answer": True, "bot": str(BOT_ID), "use_ai_fallback": False})
+    tpl = {
+        "id": "t1",
+        "type": "math",
+        "regex": r"小秘想给你 (\d+) 银元奖励",
+        "status": "verified",
+        "count": 0,
+        "extract": lambda text: "23",
+    }
+    answer_mod.register_answer_handler(ctx, [tpl])
+    handler = ctx.handlers[0]
+
+    clicks: list[tuple] = []
+    msg = _TlMsg("小秘想给你 10 银元奖励。", clicks=clicks, reply_to_msg_id=1234)
+    assert not hasattr(msg, "reply_to_message")
+    await handler(_Event(msg))
+    assert clicks == [(0, 1)]  # 答案 23 在第 2 列，且必须能读到 Telethon 的 rows
+    assert ctx.kv.get("trig:drop_count") == 1
+    assert tpl["count"] == 1
+
+    # 没有回复任何消息的掉落不处理
+    await handler(_Event(_TlMsg("小秘想给你 10 银元奖励。", clicks=clicks, msg_id=778)))
+    assert ctx.kv.get("trig:drop_count") == 1
+
+    # event.reply_to 是被回复的 Message，其 out=True 表示那条是自己发的
+    ev = _Event(_TlMsg("小秘想给你 10 银元奖励。", clicks=clicks, msg_id=779))
+    ev.reply_to = types.SimpleNamespace(out=True)
+    await handler(ev)
+    assert ctx.kv.get("trig:drop_count") == 2
+
+
+def test_button_text_rows_supports_both_runtimes() -> None:
+    """Pyrogram 的 inline_keyboard 与 Telethon 的 rows[].buttons[] 都要能读出来。"""
+    assert answer_mod._button_text_rows(_Msg("x", clicks=[])) == [["16", "23", "42"]]
+    assert answer_mod._button_text_rows(_TlMsg("x", clicks=[])) == [["16", "23", "42"]]
+    assert answer_mod._button_text_rows(object()) == []
 
 
 async def test_info_handler_captures_private_reply() -> None:

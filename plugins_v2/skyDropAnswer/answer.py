@@ -27,6 +27,24 @@ from .templates import _learn_template, _match_templates, _save_template_count, 
 _DEDUP_TTL = 3600.0
 
 
+def _button_text_rows(message: object) -> list[list[str]]:
+    """取内联键盘的按钮文本矩阵（行 → 列），按运行时差异兼容两种结构。
+
+    Pyrogram：reply_markup.inline_keyboard = [[Button, ...], ...]
+    Telethon：reply_markup.rows = [Row(buttons=[Button, ...]), ...]
+    """
+    markup = getattr(message, "reply_markup", None)
+    if markup is None:
+        return []
+    rows = getattr(markup, "inline_keyboard", None)
+    if rows:
+        return [[(getattr(b, "text", "") or "").strip() for b in row] for row in rows]
+    rows = getattr(markup, "rows", None)
+    if not rows:
+        return []
+    return [[(getattr(b, "text", "") or "").strip() for b in (getattr(row, "buttons", None) or [])] for row in rows]
+
+
 def _match_button(message: object, ans: str) -> tuple[int, int] | None:
     """在内联键盘里找与答案匹配的按钮，返回 (row, col) 或 None。
 
@@ -35,16 +53,13 @@ def _match_button(message: object, ans: str) -> tuple[int, int] | None:
       - 「答案是按钮上的值」（数学题，如答案 16 → 点文本为 16 的按钮）
       - 「答案是序号/选项号」（找不同、映射记忆，如答案 4 → 点文本为 4 的按钮）
     """
-    markup = getattr(message, "reply_markup", None)
-    keyboard = getattr(markup, "inline_keyboard", None) if markup else None
+    keyboard = _button_text_rows(message)
     if not keyboard:
         return None
     ans_s = str(ans).strip()
     if not ans_s:
         return None
-    buttons = [
-        (r, c, (getattr(btn, "text", "") or "").strip()) for r, row in enumerate(keyboard) for c, btn in enumerate(row)
-    ]
+    buttons = [(r, c, text) for r, row in enumerate(keyboard) for c, text in enumerate(row)]
     # 1) 文本精确相等
     for r, c, text in buttons:
         if text == ans_s:
@@ -210,7 +225,7 @@ def register_answer_handler(ctx: object, templates: list[dict]) -> None:
         text = (getattr(message, "text", None) or getattr(message, "caption", None) or "").strip()
         if not text or not re.search(_DROP_REGEX, text):
             return
-        if not _replies_to_own(message):
+        if not _replies_to_own(message, event):
             return
         # (client, message) 双参数形态下 args[0] 即 client；Telethon 单参数时取 event.client
         client = args[0] if len(args) >= 2 else getattr(event, "client", None)
