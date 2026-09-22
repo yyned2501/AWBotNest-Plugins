@@ -201,16 +201,16 @@ def _is_private_message(message: object, event: object) -> bool:
     return "PRIVATE" in chat_type or "USER" in chat_type
 
 
-def _replies_to_own(m: object, event: object = None, own_ids: object = None) -> bool:
+async def _replies_to_own(m: object, event: object = None) -> bool:
     """判断消息是否是「回复我自己发的消息」。
 
     天空小秘的掉落会 reply 到触发它的那条消息；只有被回复的那条「是我发的」
     才该处理，否则会抢答别人触发的题。按运行时差异分两条路：
-      - Pyrogram：被回复的 Message 对象就在 m.reply_to_message 上，
+      - Pyrogram：被回复的 Message 就在 m.reply_to_message 上，
         直接看 from_user.is_self / outgoing；
-      - Telethon：消息只带 reply_to_msg_id，拿不到被回复消息的对象，
-        因此由调用方在运行期登记「自己发过的群消息 id」（own_ids），这里做归属比对。
-        比对不中一律不处理——宁可漏答，也不抢别人的题。
+      - Kurigram（V2 底层）：消息只带 reply_to_msg_id，用
+        event.get_reply_message() 取回被回复消息、看它的 out 标记。
+        取不到、或不是自己发的一律不处理——宁可漏答，也不抢别人的题。
     """
     rtm = getattr(m, "reply_to_message", None)
     if rtm is not None:
@@ -219,16 +219,14 @@ def _replies_to_own(m: object, event: object = None, own_ids: object = None) -> 
             if u is not None and getattr(u, "is_self", False):
                 return True
         return bool(getattr(rtm, "outgoing", False) or getattr(rtm, "is_outgoing", False))
-    rid = getattr(m, "reply_to_msg_id", None)
-    if rid is None:
-        rt = getattr(m, "reply_to", None)
-        rid = getattr(rt, "reply_to_msg_id", None) if rt is not None else None
-    if rid is None or not own_ids:
+    get_reply = getattr(event, "get_reply_message", None)
+    if not callable(get_reply):
         return False
     try:
-        return rid in own_ids
-    except TypeError:  # own_ids 形态意外时不冒险处理
+        reply = await get_reply()
+    except Exception:
         return False
+    return bool(reply is not None and getattr(reply, "out", False))
 
 
 def _parse_groups(raw: str) -> list[int]:

@@ -26,18 +26,6 @@ from .templates import _learn_template, _match_templates, _save_template_count, 
 # 防抖：记录已处理的消息 ID（带时间戳，TTL 清理防无界增长）
 _DEDUP_TTL = 3600.0
 
-# 登记「自己发过的群消息」，用于 Telethon 下判断掉落回复的是不是我（同样带 TTL 清理）
-_OWN_MSG_TTL = 3600.0
-
-
-def _remember_own_msg(store: dict[int, float], msg_id: int, now: float) -> None:
-    """登记自己发的群消息 id；超 TTL 的旧记录顺手清掉，防无界增长。"""
-    if len(store) > 500:
-        stale = [k for k, ts in store.items() if now - ts > _OWN_MSG_TTL]
-        for k in stale:
-            store.pop(k, None)
-    store[msg_id] = now
-
 
 def _button_text_rows(message: object) -> list[list[str]]:
     """取内联键盘的按钮文本矩阵（行 → 列），按运行时差异兼容两种结构。
@@ -223,10 +211,11 @@ def register_answer_handler(ctx: object, templates: list[dict]) -> None:
     event，因此过滤在 handler 内手动完成。
     """
     processed_msg_ids: dict[int, float] = {}
-    own_msg_ids: dict[int, float] = {}
+    probe_warned = False
 
     @ctx.on_message()
     async def _reward_handler(*args: object, **kwargs: object) -> None:
+        nonlocal probe_warned
         if not ctx.config.get("enable_reward_answer", False):
             return
         message, event = _extract_message(args, kwargs)
@@ -235,17 +224,14 @@ def register_answer_handler(ctx: object, templates: list[dict]) -> None:
         # 原 reward_filter：group & text & regex(_DROP_REGEX) & 回复我自己
         if not _is_group_message(message, event):
             return
-        # 自己发的群消息先登记 id：Telethon 的掉落只带 reply_to_msg_id，
-        # 归属判断要靠「被回复的那条是不是我发的」（见 _replies_to_own）
-        if getattr(message, "out", False) or getattr(message, "outgoing", False):
-            own_id = getattr(message, "id", None)
-            if isinstance(own_id, int):
-                _remember_own_msg(own_msg_ids, own_id, time.time())
-            return
         text = (getattr(message, "text", None) or getattr(message, "caption", None) or "").strip()
         if not text or not re.search(_DROP_REGEX, text):
             return
-        if not _replies_to_own(message, event, own_msg_ids):
+        if not await _replies_to_own(message, event):
+            # 只在运行时压根不提供 get_reply_message 时留一次线索，避免归属判断静默失效
+            if not probe_warned and not callable(getattr(event, "get_reply_message", None)):
+                probe_warned = True
+                ctx.log.warning("掉落归属无法判断：运行时 event 缺 get_reply_message，请反馈这条日志")
             return
         # (client, message) 双参数形态下 args[0] 即 client；Telethon 单参数时取 event.client
         client = args[0] if len(args) >= 2 else getattr(event, "client", None)
