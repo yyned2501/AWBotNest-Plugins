@@ -243,6 +243,7 @@ class _TlMsg:
         clicks: list[tuple],
         reply_to_msg_id: int | None = None,
         msg_id: int = 777,
+        out: bool = False,
     ) -> None:
         self.id = msg_id
         self.text = text
@@ -250,6 +251,7 @@ class _TlMsg:
         self.sender_id = BOT_ID
         self.reply_markup = _TlMarkup([["16", "23", "42"]])
         self.reply_to_msg_id = reply_to_msg_id
+        self.out = out
         self._clicks = clicks
 
     async def click(self, i: int | None = None, j: int | None = None) -> None:  # Telethon 签名
@@ -326,22 +328,50 @@ async def test_reward_handler_telethon_native_shape() -> None:
     handler = ctx.handlers[0]
 
     clicks: list[tuple] = []
-    msg = _TlMsg("小秘想给你 10 银元奖励。", clicks=clicks, reply_to_msg_id=1234)
+    # 我自己在群里发的触发消息（out=True）先让 handler 登记其 id
+    await handler(_Event(_TlMsg("第1题1", clicks=clicks, msg_id=1234, out=True)))
+
+    msg = _TlMsg("小秘想给你 10 银元奖励。", clicks=clicks, reply_to_msg_id=1234, msg_id=1235)
     assert not hasattr(msg, "reply_to_message")
     await handler(_Event(msg))
     assert clicks == [(0, 1)]  # 答案 23 在第 2 列，且必须能读到 Telethon 的 rows
     assert ctx.kv.get("trig:drop_count") == 1
     assert tpl["count"] == 1
 
-    # 没有回复任何消息的掉落不处理
-    await handler(_Event(_TlMsg("小秘想给你 10 银元奖励。", clicks=clicks, msg_id=778)))
+
+async def test_reward_handler_only_answers_own_replies() -> None:
+    """只答「回复我自己消息」的掉落。2.1.10 曾因兜底过宽抢答全群掉落，
+    导致大量按钮已过期的点击失败（MessageIdInvalidError）。"""
+    ctx = _HandlerCtx(config={"enable_reward_answer": True, "bot": str(BOT_ID), "use_ai_fallback": False})
+    tpl = {
+        "id": "t1",
+        "type": "math",
+        "regex": r"小秘想给你 (\d+) 银元奖励",
+        "status": "verified",
+        "count": 0,
+        "extract": lambda text: "23",
+    }
+    answer_mod.register_answer_handler(ctx, [tpl])
+    handler = ctx.handlers[0]
+    clicks: list[tuple] = []
+
+    # 我发的触发消息（msg_id=900）被登记
+    await handler(_Event(_TlMsg("第1题1", clicks=clicks, msg_id=900, out=True)))
+
+    # 回复我这条 → 答
+    await handler(_Event(_TlMsg("小秘想给你 10 银元奖励。", clicks=clicks, reply_to_msg_id=900, msg_id=901)))
+    assert clicks == [(0, 1)]
     assert ctx.kv.get("trig:drop_count") == 1
 
-    # event.reply_to 是被回复的 Message，其 out=True 表示那条是自己发的
-    ev = _Event(_TlMsg("小秘想给你 10 银元奖励。", clicks=clicks, msg_id=779))
-    ev.reply_to = types.SimpleNamespace(out=True)
-    await handler(ev)
-    assert ctx.kv.get("trig:drop_count") == 2
+    # 回复别人的消息（id 未登记）→ 不答
+    await handler(_Event(_TlMsg("小秘想给你 10 银元奖励。", clicks=clicks, reply_to_msg_id=999, msg_id=902)))
+    assert clicks == [(0, 1)]
+    assert ctx.kv.get("trig:drop_count") == 1
+
+    # 压根没有回复关系的掉落 → 不答
+    await handler(_Event(_TlMsg("小秘想给你 10 银元奖励。", clicks=clicks, msg_id=903)))
+    assert clicks == [(0, 1)]
+    assert ctx.kv.get("trig:drop_count") == 1
 
 
 def test_button_text_rows_supports_both_runtimes() -> None:
