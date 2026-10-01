@@ -36,3 +36,36 @@
 5. 新增/变更需在 changelog 或 PROGRESS.md 记录「同步了哪个上游版本」。
 
 > 注意：本地 `docs/juai-api.md`、`docs/skyGame-hdsky-api.md` 是**第三方平台 API 调研产出**，不属于上游 `AWBotNest/docs`，**不要跟上游做覆盖式同步**（只保留在本地 docs/）。
+
+## 能力唯一化 —— 写新函数前先搜（防重复实现铁律）
+
+同一个能力只允许有一个实现。AI 最容易犯的错不是写错，而是**忘了已经有人写过**：生成是上下文局部最优，写出第二份时没有任何东西会报错。本机项目群实测已出现同一功能 2–4 份不同签名的实现（`login` 两份分别返回 `tuple[bool,str,dict|None]` 与 `tuple[bool,str,str]`；`is_banned` 一份带缓存一份不带），改一处漏一处。
+
+**写任何新函数前，先搜（按能力词搜，不按变量名）：**
+
+```bash
+rg -n "(def|async def) .{0,24}(fetch|request|login|parse|merge|send|download|update|notify)" --type py
+rg -n "httpx\.|requests\.|aiohttp|sqlite3\.connect|create_engine" --type py   # 是否已有统一封装
+rg -n "def <你要写的函数名>" --glob '!tests/**'                                  # 同名函数是否已存在
+```
+
+**判定：**
+
+- **命中 → 复用**：需要变体就给原函数加参数 / 加分支，**不要复制改两行另开一份**
+- **未命中 → 新建**：建完在本文件「能力表」补一行
+- 要改原函数签名 → 先 `rg -n "<函数名>"` 找齐全部调用方，一次改完
+
+**硬性规则：**
+
+- 一个能力 = 一个模块里的一个函数；同名函数全项目只允许一份（测试桩 / 夹具除外，且须带 `_test` / `fake_` 前缀）
+- 第三方库只在封装层 import：HTTP / 时间 / 日志 / JSON 一律走封装，禁裸 `httpx.AsyncClient(`、`requests.`、`time.sleep`、`print`
+- **一个概念全项目用一个词**：`get` / `fetch` / `load` 只留一个；`user` 不要又写成 `member` / `account`。名字飘了搜索就命中不了，必然重造
+- 新增 / 改名 / 删除公共函数，同步更新下表
+
+**收尾自检（提交前）：** 本次新增了几个函数，就逐个问一遍「项目里已有同职责的实现吗」。有 → 合并，不留第二份。
+
+**能力表（本项目唯一入口）**
+
+| 能力 | 唯一入口 | 禁止写法 |
+|---|---|---|
+| 插件能力（HTTP / 存储 / 消息 / 日志） | `ctx.*`（见上文「ctx 能力速查」） | 插件内直连 httpx / sqlite3 / print |
