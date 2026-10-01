@@ -216,13 +216,14 @@ class HdskyClient:
         *,
         _retry: bool = False,
         _csrf_retry: bool = False,
+        _local_cookie: bool = False,
     ) -> dict[str, Any]:
         """通用请求：拼认证头、编解码 JSON；任何异常收敛为 {"_error": ...}。"""
         headers: dict[str, str] = {
             "Origin": self._base,
             "Referer": f"{self._base}/portal",
         }
-        if self._cookie_provider is not None:
+        if self._cookie_provider is not None and not _local_cookie:
             try:
                 cookie_header = await self._cookie_provider()
             except Exception as exc:
@@ -272,7 +273,7 @@ class HdskyClient:
         if self._renewer is None:
             return {"_error": "门户 Cookie 已过期（未配置自动续期）"}
         if self._log:
-            self._log.info("门户会话过期，尝试自动续期…")
+            self._log.debug("门户会话过期，尝试自动续期…")
         try:
             renewed = await self._renewer()
         except Exception as e:
@@ -280,7 +281,10 @@ class HdskyClient:
         if not renewed:
             return {"_error": "门户 Cookie 已过期且自动续期失败"}
         self.reset_csrf()  # cookie 已换新，CSRF 一并重取
-        return await self._request(method, path, body, _retry=True)
+        # 续期可能把新会话写进本地文件（平台快照给不到时）：本地有会话就优先用它重试，
+        # 否则平台那份「元数据没过期、服务端已翻篇」的旧头会一直挡住新会话
+        local_cookie = read_portal_session(self._cookie_file)
+        return await self._request(method, path, body, _retry=True, _local_cookie=bool(local_cookie))
 
     async def get(self, path: str) -> dict[str, Any]:
         """GET 接口，返回 JSON dict。"""

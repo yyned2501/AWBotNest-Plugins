@@ -30,13 +30,13 @@ from .games import hdsky_auth, kv_facade
 __plugin__ = {
     "name": "天空游戏",
     "id": "skyGame",
-    "version": "1.28.7",
+    "version": "1.28.8",
     "author": "Yy",
     "description": "天空系列游戏统一入口：炸金花/养马/十点半自动参与、幸运轮盘免费抽奖，左侧按游戏分组配置。",
     "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/skyGame.svg",
     "scope": "user",
     "plugin_api_version": 2,
-    "cookie_domains": ["hdsky.supertimi.de"],
+    "cookie_domains": ["hdsky.supertimi.de", "hdsky.me"],
     "render_mode": "vue",
     "default_enabled": False,
     "requirements": ["httpx>=0.27"],
@@ -81,8 +81,25 @@ __plugin__ = {
             "default": True,
             "label": "门户会话过期自动续期",
             "section": "Cookie 自动续期",
-            "help": "使用平台 CookieCloud 同步 HDSky 门户 Cookie；平台未同步时会在通知中心提醒管理员。",
+            "help": "优先复用平台 CookieCloud 同步的门户会话；快照已过期时改用平台同步的 hdsky.me PT 站 Cookie，"
+            "走「门户发验证码 → 站内信取码」自动登录并把新会话写入本地 cookie 文件。",
             "order": 30,
+        },
+        "hdsky_uid": {
+            "type": "string",
+            "default": "105577",
+            "label": "HDSky UID",
+            "section": "Cookie 自动续期",
+            "help": "自动登录门户时收验证码的用户 ID（必须按字符串发送）",
+            "order": 32,
+        },
+        "hdsky_cookie_file": {
+            "type": "string",
+            "default": "/app/data/hdsky_cookie.txt",
+            "label": "门户 Cookie 文件路径",
+            "section": "Cookie 自动续期",
+            "help": "自动登录拿到的新会话写在这里，平台 CookieCloud 给不到可用会话时由它兜底",
+            "order": 33,
         },
         "auth_check_interval": {
             "type": "slider",
@@ -564,6 +581,13 @@ __plugin__ = {
         },
     },
     "changelog": (
+        "v1.28.8 修复：\n"
+        "- Cookie 续期改为两级：平台 CookieCloud 快照里的门户会话按其 expirationDate 过期后，\n"
+        "  平台会过滤掉该 Cookie（即便服务端会话仍有效），插件此前只能报「未获取到平台 Cookie」；\n"
+        "  现回落为用平台同步的 hdsky.me PT 站 Cookie 走「门户发验证码 → 站内信取码 → verify」自动登录，\n"
+        "  新会话写入本地 cookie 文件兜底使用（补回 hdsky_uid / hdsky_cookie_file 配置与 hdsky.me Cookie 授权）；\n"
+        "- 续期不再调用 request_sync，避免每 30 分钟给管理员推一条「请同步 Cookie」提醒；\n"
+        "- 会话过期时每 5 秒一条的「门户会话过期，尝试自动续期…」日志降为 debug；\n"
         "v1.28.7 更新：\n"
         "- 插件内补上 icon 字段，「我的插件」卡片不再回退为平台默认 logo；插件行为无变化\n"
         "v1.28.6 更新：\n"

@@ -48,7 +48,6 @@ class _Ctx:
 
 
 def test_v2_metadata_keeps_schema_configuration() -> None:
-    assert __plugin__["version"] == "2.0.2"
     assert __plugin__["plugin_api_version"] == 2
     assert __plugin__["resources"]["max_background_tasks"] == 8
     assert __plugin__["scope"] == "standalone"

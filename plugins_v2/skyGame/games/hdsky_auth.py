@@ -1,9 +1,13 @@
 # -*- coding: utf-8 -*-
 # 天空游戏 · HDSky 门户 Cookie 自动续期
 #
-# 门户会话由平台 CookieCloud 同步。HdskyClient 通过 ctx.cookies 读取平台 Cookie，
-# 401 时请求平台刷新同步并重试；本模块不保存 CookieCloud 凭据、不读取 PT 站站内信，
-# 也不写入本地会话 Cookie 文件。
+# 续期分两级：
+#   1) 平台 CookieCloud 同步的门户会话（ctx.cookies）仍有效 → 直接复用；
+#   2) 平台给不出可用会话（浏览器久未打开门户，快照里的会话已按 expirationDate
+#      过期，平台会过滤掉过期 Cookie）→ 用平台同步的 hdsky.me PT 站 Cookie
+#      走「门户发验证码 → 站内信取码 → verify」自动登录，新会话写入本地
+#      cookie 文件，由 HdskyClient 兜底读取。
+# 插件不保存 CookieCloud 凭据，也不直连 CookieCloud 服务端。
 #
 # 注意：hdskyUid 必须按字符串发送（前端行为），数字会导致 start 与 verify
 # 的 challenge 键不一致，verify 报「验证码不正确」。
@@ -14,6 +18,7 @@ import asyncio
 import html as html_lib
 import os
 import re
+import ssl
 import time
 from typing import Any
 
@@ -21,14 +26,12 @@ import httpx
 
 from .hdsky import DEFAULT_BASE_URL, DEFAULT_COOKIE_FILE, make_ssl_ctx, read_portal_session
 
-# CookieCloud（MoviePilot 内置）缺省地址，LAN 内直连
-DEFAULT_COOKIECLOUD_SERVER = "http://192.168.31.10:3000"
 DEFAULT_HDSKY_UID = "105577"
 DEFAULT_CHECK_INTERVAL = 1800
 
 # hdsky.me PT 站（NexusPHP），收件箱 messages.php
 PT_BASE = "https://hdsky.me"
-PT_DOMAINS = ("hdsky.me", ".hdsky.me")
+PT_SITE_DOMAIN = "hdsky.me"
 
 PORTAL_COOKIE_NAME = "hdsky_portal_session"
 PORTAL_DOMAIN = "hdsky.supertimi.de"
@@ -41,8 +44,6 @@ _BROWSER_UA = (
 # 续期失败也会重试，但要防刷站内信：两次续期最小间隔、失败通知节流
 _MIN_RENEW_INTERVAL = 600.0
 _FAIL_NOTIFY_INTERVAL = 1800.0
-# 快照内门户会话剩余不足此值则走验证码流程
-_MIN_CACHED_REMAIN = 3600.0
 # 门户网关瞬时故障（502/503/504 HTML 错误页、连接抖动）：短退避重试，
 # 避免几秒的网关抖动让整轮续期失败、游戏 401 干等下一轮防抖/看门狗
 _TRANSIENT_STATUS = {502, 503, 504}
@@ -69,29 +70,6 @@ def extract_code(page_html: str) -> str | None:
 def latest_message_ids(page_html: str) -> list[str]:
     """收件箱列表页 → 消息 id 列表（按页面顺序，通常降序）。"""
     return _MSG_LINK_RE.findall(page_html)
-
-
-def build_pt_cookie_header(cookie_data: dict[str, Any]) -> str | None:
-    """从解密后的 CookieCloud cookie_data 拼 hdsky.me 请求 Cookie 头。"""
-    parts: list[str] = []
-    for dom in PT_DOMAINS:
-        for c in cookie_data.get(dom) or []:
-            name, value = c.get("name"), c.get("value")
-            if name and value:
-                parts.append(f"{name}={value}")
-    return "; ".join(parts) or None
-
-
-def portal_session_from_cloud(cookie_data: dict[str, Any]) -> tuple[str, float] | None:
-    """快照内若有剩余充足的门户会话则返回 (值, 剩余秒数)，否则 None。"""
-    now = time.time()
-    for c in cookie_data.get(PORTAL_DOMAIN) or []:
-        if c.get("name") != PORTAL_COOKIE_NAME or not c.get("value"):
-            continue
-        remain = float(c.get("expirationDate") or 0) - now
-        if remain > _MIN_CACHED_REMAIN:
-            return str(c["value"]), remain
-    return None
 
 
 def write_portal_cookie(path: str, value: str, max_age: float) -> None:
@@ -174,20 +152,76 @@ class CookieRenewer:
             await self._ctx.notify(f"🔑 {msg}", level=level)
 
     async def _do_renew(self) -> None:
-        """请求平台刷新 CookieCloud 快照，并验证门户会话。"""
+        """续期主流程：先复用平台同步的门户会话，拿不到则用 PT 站 Cookie 自动登录。"""
+        base = str(self._ctx.config.get("hdsky_base_url", "") or DEFAULT_BASE_URL).rstrip("/")
+        if await self._use_platform_session(base):
+            return
+        await self._login_portal(base)
+
+    async def _use_platform_session(self, base: str) -> bool:
+        """平台 CookieCloud 里的门户会话仍有效则复用；不可用返回 False（不抛错）。"""
+        cookie_header = await cookie_provider(self._ctx)
+        if not cookie_header:
+            return False
+        if not await session_alive("", base, cookie_header):
+            self._ctx.log.info("平台同步的门户会话已失效，改用 PT 站验证码自动登录")
+            return False
+        self._ctx.log.info("已使用平台 CookieCloud 同步的 HDSky 会话")
+        await self._notify("续期成功：已使用平台 CookieCloud 同步的门户会话")
+        return True
+
+    async def _login_portal(self, base: str) -> None:
+        """PT 站验证码自动登录门户，新会话写入本地 cookie 文件供客户端兜底读取。"""
         cookies = getattr(self._ctx, "cookies", None)
         if cookies is None or not getattr(cookies, "available", False):
             raise RenewError("平台 Cookie 同步不可用，请在系统设置中配置 CookieCloud")
-        if not await cookies.request_sync(PORTAL_DOMAIN):
-            raise RenewError(f"未获取到 {PORTAL_DOMAIN} 的平台 Cookie，请先在系统设置同步浏览器 Cookie")
-        cookie_header = str(await cookies.header(PORTAL_DOMAIN, path="/") or "")
-        if not cookie_header:
-            raise RenewError(f"平台 CookieCloud 未返回 {PORTAL_DOMAIN} 的可用 Cookie")
-        base = str(self._ctx.config.get("hdsky_base_url", "") or DEFAULT_BASE_URL)
-        if not await session_alive("", base, cookie_header):
-            raise RenewError("平台 Cookie 已同步，但 HDSky 门户会话仍不可用")
-        self._ctx.log.info("已使用平台 CookieCloud 同步的 HDSky 会话")
-        await self._notify("续期成功：已使用平台 CookieCloud 同步的门户会话")
+        pt_cookie = str(await cookies.header(PT_SITE_DOMAIN, path="/") or "")
+        if not pt_cookie:
+            raise RenewError(f"平台未同步 {PT_SITE_DOMAIN} 的 PT 站 Cookie，无法自动登录门户")
+        uid = str(self._ctx.config.get("hdsky_uid", "") or DEFAULT_HDSKY_UID).strip()
+        cookie_file = str(self._ctx.config.get("hdsky_cookie_file", "") or DEFAULT_COOKIE_FILE)
+
+        pt_headers = {"Cookie": pt_cookie, "User-Agent": _BROWSER_UA, "Referer": f"{PT_BASE}/messages.php"}
+        portal_headers = {"User-Agent": _BROWSER_UA, "Origin": base, "Referer": f"{base}/portal"}
+        # PT 站走平台出站代理（与浏览器同出口 IP 以过 Cloudflare）
+        ssl_ctx: ssl.SSLContext = make_ssl_ctx()
+        async with (
+            httpx.AsyncClient(verify=ssl_ctx, timeout=15) as portal_http,
+            httpx.AsyncClient(timeout=15) as pt_http,
+        ):
+            before = set(latest_message_ids((await self._pt_get(pt_http, f"{PT_BASE}/messages.php", pt_headers)).text))
+
+            resp = await self._portal_post(
+                portal_http, f"{base}/api/portal/auth/start", {"hdskyUid": uid}, portal_headers, "发送验证码"
+            )
+            data: dict[str, Any] = resp.json()
+            if not data.get("ok"):
+                raise RenewError(f"发送验证码失败: {data.get('error', '未知')}")
+            self._ctx.log.info("验证码已发送（用户 %s），等待站内信…", data.get("displayName", uid))
+
+            code = await self._wait_for_code(pt_http, pt_headers, before)
+
+            resp = await self._portal_post(
+                portal_http,
+                f"{base}/api/portal/auth/verify",
+                {"hdskyUid": uid, "code": code},
+                portal_headers,
+                "验证码确认",
+            )
+            data = resp.json()
+            if not data.get("ok"):
+                raise RenewError(f"验证码确认失败: {data.get('error', '未知')}")
+            set_cookie = resp.headers.get("set-cookie", "")
+            m = _SESSION_RE.search(set_cookie)
+            if not m:
+                raise RenewError("验证通过但响应未携带 Set-Cookie")
+            max_age = 43200.0
+            mm = _MAX_AGE_RE.search(set_cookie)
+            if mm:
+                max_age = float(mm.group(1))
+            write_portal_cookie(cookie_file, m.group(1), max_age)
+            self._ctx.log.info("门户 Cookie 续期成功（有效期 %.0f 小时）", max_age / 3600)
+            await self._notify(f"续期成功：已自动登录门户，新会话有效期 {max_age / 3600:.0f} 小时")
 
     async def _portal_post(
         self,
@@ -249,24 +283,6 @@ class CookieRenewer:
         raise RenewError("超时未读到验证码站内信")
 
 
-async def _fetch_cookiecloud(server: str, uuid: str, password: str) -> dict[str, Any]:
-    """POST /cookiecloud/get/{uuid}（服务端解密）→ cookie_data。LAN 直连不走代理。"""
-    async with httpx.AsyncClient(timeout=20, trust_env=False) as http:
-        resp = await http.post(f"{server}/cookiecloud/get/{uuid}", json={"password": password})
-    if resp.status_code != 200:
-        raise RenewError(f"CookieCloud 请求失败（HTTP {resp.status_code}），检查地址/UUID/密钥")
-    try:
-        data: dict[str, Any] = resp.json()
-    except Exception as e:
-        raise RenewError("CookieCloud 返回非 JSON") from e
-    if "detail" in data:
-        raise RenewError(f"CookieCloud 错误: {data['detail']}")
-    cd = data.get("cookie_data")
-    if not isinstance(cd, dict):
-        raise RenewError("CookieCloud 返回数据缺少 cookie_data")
-    return cd
-
-
 # ── 共享实例与看门狗 ─────────────────────────────────────────────
 
 async def cookie_provider(ctx: Any) -> str:
@@ -301,12 +317,12 @@ async def _watchdog(ctx: Any) -> None:
             if cfg.get("auth_auto_renew", True):
                 cookie_file = str(cfg.get("hdsky_cookie_file", "") or DEFAULT_COOKIE_FILE)
                 base = str(cfg.get("hdsky_base_url", "") or DEFAULT_BASE_URL)
-                cookies = getattr(ctx, "cookies", None)
-                cookie_header = ""
-                if cookies is not None and getattr(cookies, "available", False):
-                    cookie_header = str(await cookies.header(PORTAL_DOMAIN, path="/") or "")
-                if not await session_alive(cookie_file, base, cookie_header):
-                    ctx.log.info("体检发现门户会话失效，触发平台 CookieCloud 同步")
+                cookie_header = await cookie_provider(ctx)
+                alive = bool(cookie_header) and await session_alive("", base, cookie_header)
+                if not alive:  # 平台没给会话（或已失效）时再看本地续期落盘的会话
+                    alive = await session_alive(cookie_file, base)
+                if not alive:
+                    ctx.log.info("体检发现门户会话失效，触发续期")
                     await renewer.renew()
             await asyncio.sleep(interval)
         except asyncio.CancelledError:

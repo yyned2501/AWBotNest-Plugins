@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 # skyGame · hdsky_auth 单元测试
 #
-# 覆盖：验证码抽取、收件箱 id 解析、PT cookie 头拼装、快照会话复用判断、
-# Netscape cookie 写入/读回、续期器防抖与失败收敛（正向 + 异常路径）。
+# 覆盖：验证码抽取、收件箱 id 解析、Netscape cookie 写入/读回、两级续期
+# （平台会话复用 / PT 站验证码自动登录）、续期器防抖与失败收敛、
+# 门户网关瞬时故障重试。
 
 from __future__ import annotations
 
 import asyncio
-import time
 from typing import Any
 
 import httpx
@@ -17,10 +17,8 @@ from plugins_v2.skyGame.games.hdsky import read_portal_session
 from plugins_v2.skyGame.games.hdsky_auth import (
     CookieRenewer,
     RenewError,
-    build_pt_cookie_header,
     extract_code,
     latest_message_ids,
-    portal_session_from_cloud,
     write_portal_cookie,
 )
 
@@ -47,6 +45,20 @@ class FakeLog:
         self._add("error", msg % args if args else msg)
 
 
+class FakeCookies:
+    """ctx.cookies 桩：按域名返回固定 Cookie 头；request_sync 出现即失败。"""
+
+    def __init__(self, headers: dict[str, str] | None = None, available: bool = True) -> None:
+        self.available = available
+        self._headers = headers or {}
+
+    async def header(self, domain: str, *, path: str = "/", names: Any = None) -> str:
+        return self._headers.get(domain, "")
+
+    async def request_sync(self, domain: str) -> bool:
+        raise AssertionError("续期不应再触发 request_sync（会反复推送「请同步 Cookie」提醒）")
+
+
 class FakeCtx:
     """续期器测试桩：config / log / notify / cookies。"""
 
@@ -54,7 +66,7 @@ class FakeCtx:
         self.config: dict[str, Any] = {"auth_notify": False, **(config or {})}
         self.log = FakeLog()
         self.notified: list[tuple[str, str]] = []
-        self.cookies = type("FakeCookies", (), {"available": False})()
+        self.cookies = FakeCookies(available=False)
 
     def create_task(self, coro: Any, **kwargs: Any) -> asyncio.Task[Any]:
         return asyncio.create_task(coro)
@@ -83,32 +95,6 @@ def test_latest_message_ids_ordered() -> None:
     assert latest_message_ids(html) == ["200", "100"]
 
 
-def test_build_pt_cookie_header() -> None:
-    data = {
-        "hdsky.me": [
-            {"name": "c_secure_uid", "value": "aaa"},
-            {"name": "c_secure_pass", "value": "bbb"},
-        ],
-        ".hdsky.me": [{"name": "cf_clearance", "value": "ccc"}],
-        "other.com": [{"name": "x", "value": "y"}],
-    }
-    header = build_pt_cookie_header(data)
-    assert header == "c_secure_uid=aaa; c_secure_pass=bbb; cf_clearance=ccc"
-
-
-def test_portal_session_from_cloud_fresh() -> None:
-    data = {
-        "hdsky.supertimi.de": [
-            {"name": "hdsky_portal_session", "value": "sess-value", "expirationDate": time.time() + 7200},
-        ]
-    }
-    result = portal_session_from_cloud(data)
-    assert result is not None
-    value, remain = result
-    assert value == "sess-value"
-    assert remain > 3600
-
-
 @pytest.mark.skipif(__import__("os").name == "nt", reason="Windows does not expose chmod mode bits like POSIX")
 def test_write_portal_cookie_roundtrip(tmp_path: Any) -> None:
     path = tmp_path / "cookie.txt"
@@ -124,32 +110,17 @@ def test_extract_code_none_when_absent() -> None:
     assert extract_code("<td>没有码的普通站内信</td>") is None
 
 
-def test_build_pt_cookie_header_empty() -> None:
-    assert build_pt_cookie_header({"hdsky.me": []}) is None
-    assert build_pt_cookie_header({}) is None
-
-
-def test_portal_session_from_cloud_expired() -> None:
-    data = {
-        "hdsky.supertimi.de": [
-            {"name": "hdsky_portal_session", "value": "old", "expirationDate": time.time() + 60},  # 剩余不足 1h
-        ]
-    }
-    assert portal_session_from_cloud(data) is None
-    assert portal_session_from_cloud({}) is None
-
-
 # ── 续期器：防抖与失败收敛 ────────────────────────────────────
 
 
 async def test_renew_failure_returns_false_and_notifies(monkeypatch: pytest.MonkeyPatch) -> None:
-    ctx = FakeCtx({"auth_notify": True, "cc_uuid": "u", "cc_password": "p"})
+    ctx = FakeCtx({"auth_notify": True})
     renewer = CookieRenewer(ctx)
     calls = {"n": 0}
 
     async def boom(self: CookieRenewer) -> None:
         calls["n"] += 1
-        raise RenewError("CookieCloud 请求失败（HTTP 500）")
+        raise RenewError("PT 站请求失败（HTTP 403）")
 
     monkeypatch.setattr(CookieRenewer, "_do_renew", boom)
 
@@ -181,7 +152,103 @@ async def test_renew_without_platform_cookies_returns_false() -> None:
     ctx = FakeCtx()
     renewer = CookieRenewer(ctx)
     assert await renewer.renew() is False
-    assert any("平台 Cookie 同步不可用" in msg for level_msg in ctx.log.records for msg in [level_msg[1]])
+    assert any("平台 Cookie 同步不可用" in msg for _, msg in ctx.log.records)
+
+
+# ── 两级续期：平台会话优先，过期则自动登录门户 ─────────────────
+
+
+async def test_renew_reuses_platform_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    """平台 CookieCloud 给的门户会话探测有效 → 直接复用，不走验证码流程。"""
+    ctx = FakeCtx({"auth_notify": True})
+    ctx.cookies = FakeCookies({"hdsky.supertimi.de": "hdsky_portal_session=platform"})
+    renewer = CookieRenewer(ctx)
+    login_called = {"n": 0}
+
+    async def alive(cookie_file: str, base_url: str, cookie_header: str = "") -> bool:
+        assert cookie_header == "hdsky_portal_session=platform"
+        return True
+
+    async def no_login(self: CookieRenewer, base: str) -> None:
+        login_called["n"] += 1
+
+    monkeypatch.setattr("plugins_v2.skyGame.games.hdsky_auth.session_alive", alive)
+    monkeypatch.setattr(CookieRenewer, "_login_portal", no_login)
+
+    await renewer._do_renew()
+
+    assert login_called["n"] == 0
+    assert any("平台 CookieCloud" in msg for msg, _ in ctx.notified)
+
+
+async def test_renew_falls_back_to_portal_login(monkeypatch: pytest.MonkeyPatch) -> None:
+    """平台快照里的门户会话已失效（探测不通）→ 转 PT 站验证码自动登录。"""
+    ctx = FakeCtx()
+    ctx.cookies = FakeCookies({"hdsky.supertimi.de": "hdsky_portal_session=stale"})
+    renewer = CookieRenewer(ctx)
+    seen: dict[str, Any] = {}
+
+    async def alive(cookie_file: str, base_url: str, cookie_header: str = "") -> bool:
+        seen["header"] = cookie_header
+        return False
+
+    async def login(self: CookieRenewer, base: str) -> None:
+        seen["base"] = base
+
+    monkeypatch.setattr("plugins_v2.skyGame.games.hdsky_auth.session_alive", alive)
+    monkeypatch.setattr(CookieRenewer, "_login_portal", login)
+
+    await renewer._do_renew()
+
+    assert seen["header"] == "hdsky_portal_session=stale" and seen["base"]
+
+
+async def test_login_portal_without_pt_cookie_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """门户会话拿不到、PT 站 Cookie 也没同步 → 明确报缺 hdsky.me Cookie。"""
+    ctx = FakeCtx()
+    ctx.cookies = FakeCookies({})
+    renewer = CookieRenewer(ctx)
+
+    with pytest.raises(RenewError, match="hdsky.me"):
+        await renewer._login_portal("https://hdsky.supertimi.de")
+
+
+async def test_login_portal_writes_renewed_cookie(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """验证码流程走通：verify 的 Set-Cookie 落到配置的 cookie 文件，供客户端兜底读取。"""
+    cookie_file = tmp_path / "hdsky_cookie.txt"
+    ctx = FakeCtx({"auth_notify": True, "hdsky_cookie_file": str(cookie_file), "hdsky_uid": "105577"})
+    ctx.cookies = FakeCookies({"hdsky.me": "c_secure_uid=aaa; c_secure_pass=bbb"})
+    renewer = CookieRenewer(ctx)
+    posts: list[tuple[str, dict[str, Any]]] = []
+
+    class _Page:
+        text = '<a href="messages.php?action=viewmessage&id=7">旧信</a>'
+
+    async def fake_pt_get(self: CookieRenewer, http: Any, url: str, headers: dict[str, str]) -> _Page:
+        assert headers["Cookie"].startswith("c_secure_uid=")
+        return _Page()
+
+    async def fake_wait(self: CookieRenewer, http: Any, headers: dict[str, str], before: set[str]) -> str:
+        assert before == {"7"}
+        return "830964"
+
+    async def fake_post(
+        self: CookieRenewer, http: Any, url: str, payload: dict[str, Any], headers: dict[str, str], step: str
+    ) -> _FakePortalResp:
+        posts.append((url, payload))
+        return _FakePortalResp(200, {"ok": True}, {"set-cookie": "hdsky_portal_session=news; Max-Age=43200; Path=/"})
+
+    monkeypatch.setattr(CookieRenewer, "_pt_get", fake_pt_get)
+    monkeypatch.setattr(CookieRenewer, "_wait_for_code", fake_wait)
+    monkeypatch.setattr(CookieRenewer, "_portal_post", fake_post)
+
+    await renewer._login_portal("https://hdsky.supertimi.de:8443")
+
+    assert read_portal_session(str(cookie_file)) == "news"
+    assert [url.rsplit("/", 1)[-1] for url, _ in posts] == ["start", "verify"]
+    assert posts[0][1] == {"hdskyUid": "105577"}  # UID 必须按字符串发送
+    assert posts[1][1] == {"hdskyUid": "105577", "code": "830964"}
+    assert any("续期成功" in msg for msg, _ in ctx.notified)
 
 
 # ── 门户网关瞬时故障重试（_portal_post）────────────────────────
