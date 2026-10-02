@@ -75,9 +75,9 @@
     "scratch": {
       "name": "天空刮奖",
       "id": "scratch",
-      "version": "1.7.0",
+      "version": "1.7.1",
       "author": "Yy",
-      "description": "散财童子（@lucifer_hdsky_bot）刮刮乐自动挂机：群聊每 2 分钟刷掉落（配额满自动暂停）+ 私聊不限次连锁刮奖，随机逐格刮开、回本即停、连亏自动停止。",
+      "description": "散财童子（@lucifer_hdsky_bot）刮刮乐自动挂机：群聊每 2 分钟刷掉落（配额满自动暂停）、逐张收益记账 + 每日收益日报，随机逐格刮开、回本即停、连亏自动停止；私聊连锁默认关闭。",
       "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/scratch.svg",
       "tags": [
         "刮刮乐",

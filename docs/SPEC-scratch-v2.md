@@ -274,3 +274,34 @@ PYTHONPATH=/home/hermes/.hermes/profiles/coder/cache/scratch/tl144_pkg \
 - 真机现状（与版本无关，另案）：`data/plugin_events.jsonl` 三条 `scratch:setup — RuntimeError: 插件 scratch 没有可用的 user Telegram 客户端`（16:50 / 17:00 / 17:44）→ 对应 §12.3 的 `socks5://192.168.31.10:7890` 口径；§9.5 真机验收要求 user client 在线。
 
 
+
+
+## 12.6 收益统计（v1.7.1，真机驱动「跑几天判断赚亏」）
+
+**目标**：判断群聊通道是赚是亏，需要**可归因**的逐张流水 + **真值**的账号级对照。
+
+**存储契约**（都在 `ctx.data_dir`，跨重载持久）：
+
+- `scratch_ledger.jsonl`：逐张 append-only
+  - 卡片行：`{type:"card", ts, date, channel:"group"|"pm", card_id, cells, cost, payout, net, outcome:"breakeven"|"loss"}`
+  - 账号行：`{type:"account", ts, date, income, expense, net_income, balance, chat_drop?, game_drop?}`
+- `scratch_daily.json`：`{date: {group: bucket, pm: bucket, account: {...}, account_at}}`，
+  写盘用 **临时文件 + os.replace 原子替换**（防写一半把日汇总写坏）
+- `bucket = {cards, cells, cost, payout, net, breakeven, loss}`
+
+**时间口径**：
+
+- 日界 = **北京时间 UTC+8 固定偏移**（`timezone(timedelta(hours=8))`）。容器/宿主时区不可信
+  （平台日志是 UTC），不依赖 `tzdata`，不读容器本地时区。
+- 日报调度：`cron minute=<stats_report_minute>`（每小时的第 N 分触发）+ tick 内自判
+  `_cn_now().hour == stats_report_hour` 才真发 → 天然免疫容器时区。
+
+**配置**：`stats_enabled`(默认 true) / `stats_report_hour`(23) / `stats_report_minute`(55) / `stats_retention_days`(90)。
+`stats_enabled=false` → 一行都不落盘。保留期裁剪在日报时执行（流水 + 超期的日汇总）。
+
+**归因红线（不许越界）**：
+
+1. 卡级账**只记插件自己刮的卡**，按 `channel` 分桶，群聊与私聊**不混算**（私聊无掉落收益，是另一条腿）。
+2. 账号级「今日收入/支出/净收入」是**游戏自算的全账号**活动，含掉落奖励与人工操作。
+   日报必须标注来源并单独给出 `差值 = 账号净收入 − 卡级净额`，**不得**把差值当作某个通道的收益。
+3. 统计失败不影响刮奖：写盘异常只 `ctx.log.warning`，不向上抛。

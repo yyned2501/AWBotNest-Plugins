@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+import tempfile
 import time
 import types
 from collections.abc import Iterator
@@ -62,8 +63,11 @@ class _Log:
 class _V2Ctx:
     """V2 平台上下文最小面：没有 filters，on_message 只接受裸装饰器。"""
 
-    def __init__(self, config: dict[str, Any] | None = None, user: Any = None) -> None:
+    def __init__(
+        self, config: dict[str, Any] | None = None, user: Any = None, data_dir: str | None = None
+    ) -> None:
         self.config = dict(config or {})
+        self.data_dir = data_dir or tempfile.mkdtemp(prefix="scratch-stats-test-")
         self.log = _Log()
         self.user: Any = user
         self.bot: Any = None
@@ -662,12 +666,19 @@ def test_plugin_meta_matches_manifest_and_spec() -> None:
         "pm_unlimited",
         "drop_guard_enabled",
         "drop_check_interval",
+        "stats_enabled",
+        "stats_report_hour",
+        "stats_report_minute",
+        "stats_retention_days",
     }
     assert schema["player_names"]["default"] == ""
     assert schema["group_send_interval"]["default"] == 120
     assert schema["pm_unlimited"]["default"] is True
     assert schema["drop_guard_enabled"]["default"] is True
     assert (schema["drop_check_interval"]["default"], schema["drop_check_interval"]["min"]) == (10, 5)
+    assert schema["stats_enabled"]["default"] is True
+    assert schema["stats_retention_days"]["default"] == 90
+    assert (schema["stats_report_hour"]["default"], schema["stats_report_hour"]["max"]) == (23, 23)
     assert schema["target_group"]["default"] == "-1001326208894"
     assert schema["bot_id"]["default"] == 0
     delay = schema["click_delay"]
@@ -939,10 +950,15 @@ async def test_setup_registers_both_timers_only_with_bot_id() -> None:
     kinds = {kw.get("id"): kind for _fn, kind, kw in ctx.scheduled}
     assert kinds.get("scratch_group_send") == "interval"
     assert kinds.get("scratch_drop_check") == "cron"
+    assert kinds.get("scratch_report") == "cron"
 
     ctx2 = _V2Ctx(config=_cfg())
     await scratch_mod.setup(ctx2)
-    assert {kw.get("id") for _fn, _kind, kw in ctx2.scheduled} == {"scratch_group_send"}
+    assert {kw.get("id") for _fn, _kind, kw in ctx2.scheduled} == {"scratch_group_send", "scratch_report"}
+
+    ctx3 = _V2Ctx(config=_cfg(stats_enabled=False))
+    await scratch_mod.setup(ctx3)
+    assert {kw.get("id") for _fn, _kind, kw in ctx3.scheduled} == {"scratch_group_send"}
 
 
 async def test_group_tick_skipped_when_auto_stopped() -> None:
@@ -955,3 +971,155 @@ async def test_group_tick_skipped_when_auto_stopped() -> None:
     scratch_mod._auto_stopped = True
     await tick()
     assert client.sent == []
+
+
+# ─── v1.7.1 收益统计（SPEC §12.6）─────────────────────────────────────────
+
+
+def test_day_key_uses_beijing_timezone() -> None:
+    """日界按北京时间（UTC+8）：UTC 16:30 已是北京次日——容器时区不可信，不用它分日。"""
+    from datetime import datetime as _dt
+    from datetime import timezone as _tz
+
+    assert scratch_mod._day_key(_dt(2026, 10, 2, 15, 59, tzinfo=_tz.utc).timestamp()) == "2026-10-02"
+    assert scratch_mod._day_key(_dt(2026, 10, 2, 16, 30, tzinfo=_tz.utc).timestamp()) == "2026-10-03"
+
+
+def test_money_parser_handles_wan_commas_and_negative() -> None:
+    """/info 回执金额形态：8.39W / 5.36万 / 1,368 / 负数。"""
+    assert scratch_mod._money("当前银元: 8.39W", "当前银元") == 83900
+    assert scratch_mod._money("今日支出: 5.36万", "今日支出") == 53600
+    assert scratch_mod._money("今日净收入: 1,368", "今日净收入") == 1368
+    assert scratch_mod._money("今日净收入: -1,110", "今日净收入") == -1110
+    assert scratch_mod._money("没这个字段", "今日收入") is None
+
+
+async def test_group_card_lands_in_ledger_and_daily_rollup(tmp_path: Path) -> None:
+    """群聊通道每张卡落 JSONL 流水 + 当日聚合（成本/派奖/净额可归因）。"""
+    clicks: list[tuple] = []
+    msg = _TlMsg(clicks=clicks, payout="获得 200 银元，净收益 100 银元。")
+    client = _TlClient({900: msg})
+    ctx = _V2Ctx(config=_cfg(), user=client, data_dir=str(tmp_path))
+    await scratch_mod.setup(ctx)
+    await ctx.handlers[0](_Event(msg, client=client, chat=object()))
+
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "scratch_ledger.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    cards = [row for row in rows if row["type"] == "card"]
+    assert len(cards) == 1
+    assert cards[0]["channel"] == "group"
+    assert (cards[0]["cells"], cards[0]["cost"], cards[0]["payout"], cards[0]["net"]) == (1, 100, 200, 100)
+    assert cards[0]["outcome"] == "breakeven"
+
+    day = scratch_mod._day_key()
+    daily = json.loads((tmp_path / "scratch_daily.json").read_text(encoding="utf-8"))
+    assert daily[day]["group"]["cards"] == 1
+    assert daily[day]["group"]["net"] == 100
+    assert daily[day]["group"]["breakeven"] == 1
+
+
+async def test_pm_card_counted_in_pm_bucket(tmp_path: Path) -> None:
+    """私聊通道卡片单独归桶，不与群聊收益混算。"""
+    clicks: list[tuple] = []
+    msg = _TlMsg(chat_id=BOT_ID, clicks=clicks, payout="获得 200 银元，净收益 100 银元。")
+    client = _TlClient({900: msg})
+    ctx = _V2Ctx(config=_cfg(bot_id=BOT_ID, pm_unlimited=False), user=client, data_dir=str(tmp_path))
+    await scratch_mod.setup(ctx)
+    await ctx.handlers[0](_Event(msg, client=client, chat=object()))
+
+    day = scratch_mod._day_key()
+    daily = json.loads((tmp_path / "scratch_daily.json").read_text(encoding="utf-8"))
+    assert daily[day]["pm"]["cards"] == 1
+    assert daily[day]["pm"]["net"] == 100
+    assert daily[day]["group"]["cards"] == 0
+
+
+async def test_stats_disabled_writes_no_files(tmp_path: Path) -> None:
+    """stats_enabled=false → 完全不落盘（可一键关统计）。"""
+    clicks: list[tuple] = []
+    msg = _TlMsg(clicks=clicks, payout="获得 200 银元，净收益 100 银元。")
+    client = _TlClient({900: msg})
+    ctx = _V2Ctx(config=_cfg(stats_enabled=False), user=client, data_dir=str(tmp_path))
+    await scratch_mod.setup(ctx)
+    await ctx.handlers[0](_Event(msg, client=client, chat=object()))
+    assert not (tmp_path / "scratch_ledger.jsonl").exists()
+    assert not (tmp_path / "scratch_daily.json").exists()
+
+
+async def test_info_reply_records_account_snapshot(tmp_path: Path) -> None:
+    """/info 回执的账号级数字（游戏自算）进日报做对照。"""
+    info = _TlMsg(
+        text=(
+            "💰 账户\n当前银元: 8.39W\n今日收入: 5.49W\n今日支出: 5.36W\n今日净收入: 1,368\n"
+            "当前时段剩余掉落: 聊天 3 · 游戏 2"
+        ),
+        msg_id=901,
+        chat_id=BOT_ID,
+        markup=_TlMarkup([]),
+    )
+    client = _TlClient({901: info})
+    ctx = _V2Ctx(config=_cfg(bot_id=BOT_ID), user=client, data_dir=str(tmp_path))
+    await scratch_mod.setup(ctx)
+    await ctx.handlers[0](_Event(info, client=client, chat=object()))
+
+    day = scratch_mod._day_key()
+    daily = json.loads((tmp_path / "scratch_daily.json").read_text(encoding="utf-8"))
+    account = daily[day]["account"]
+    assert account["net_income"] == 1368
+    assert account["balance"] == 83900
+    assert account["game_drop"] == 2
+
+
+def test_report_text_covers_group_channel_and_account() -> None:
+    """日报文案：群聊张数/派奖/成本/净额 + 账号级对照 + 差值（掉落奖励等）。"""
+    day = "2026-10-02"
+    entry = {
+        "group": {"cards": 3, "cells": 5, "cost": 300, "payout": 420, "net": 120, "breakeven": 1, "loss": 2},
+        "pm": scratch_mod._stats_empty_bucket(),
+        "account": {"income": 54900, "expense": 53600, "net_income": 1368, "balance": 83900},
+    }
+    text = scratch_mod._report_text(day, entry, {day: entry})
+    assert "群聊通道" in text
+    assert "派奖 420 / 成本 300 → 净 +120 银元" in text
+    assert "今日净收入 1368" in text
+    assert "差值（掉落奖励等）= +1248 银元" in text
+
+
+async def test_report_tick_pushes_only_in_report_hour(tmp_path: Path) -> None:
+    """日报 cron 每小时一次、内部按北京小时自判：不是日报整点就不发。"""
+    hour = scratch_mod._cn_now().hour
+    ctx = _V2Ctx(config=_cfg(stats_report_hour=hour, stats_report_minute=0), data_dir=str(tmp_path))
+    await scratch_mod.setup(ctx)
+    tick = next(fn for fn, _kind, kw in ctx.scheduled if kw.get("id") == "scratch_report")
+    await tick()
+    assert any("收益日报" in text for text, _kw in ctx.notifications)
+
+    ctx2 = _V2Ctx(config=_cfg(stats_report_hour=(hour + 1) % 24, stats_report_minute=0), data_dir=str(tmp_path))
+    await scratch_mod.setup(ctx2)
+    tick2 = next(fn for fn, _kind, kw in ctx2.scheduled if kw.get("id") == "scratch_report")
+    await tick2()
+    assert ctx2.notifications == []
+
+
+def test_stats_prune_keeps_window(tmp_path: Path) -> None:
+    """流水裁剪只留保留窗内的行。"""
+    path = tmp_path / "scratch_ledger.jsonl"
+    today = scratch_mod._day_key()
+    path.write_text(
+        "\n".join([
+            json.dumps({"type": "card", "date": "2020-01-01", "net": 1}),
+            json.dumps({"type": "card", "date": today, "net": 2}),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+    ctx = _V2Ctx(config=_cfg(), data_dir=str(tmp_path))
+    scratch_mod._stats_prune(ctx, 90)
+    rows = [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert [row["net"] for row in rows] == [2]

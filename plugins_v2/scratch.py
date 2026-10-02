@@ -9,23 +9,34 @@
 # 同时认「目标群」与「与 Bot 的私聊」两个会话：
 #   · 群聊通道：定时器每 group_send_interval（默认 120 秒）发一次 /scratch 刷「游戏掉落」，
 #     本时段掉落满（/info 解析剩余 0）时暂停，整点刷新自动恢复；
-#   · 私聊通道：卡片刮完立刻开下一张、不限次数（pm_unlimited），是刮奖收益主通道。
+#   · 私聊通道：卡片刮完立刻开下一张、不限次数（pm_unlimited，默认关）。
+#
+# 收益统计（v1.7.1）：逐张记账（JSONL 持久流水）+ 每日推送收益日报（群聊张数/派奖/
+# 成本/净额 + 账号级今日收支对照），用于「跑几天判断群聊通道是赚是亏」。见 SPEC §12.6。
 # =============================================================================
 
 from __future__ import annotations
 
 import asyncio
 import inspect
+import json
+import os
 import random
 import re
 import time
+from datetime import datetime, timedelta, timezone
 
 __plugin__ = {
     "name": "天空刮奖",
     "id": "scratch",
-    "version": "1.7.0",
+    "version": "1.7.1",
     "author": "Yy",
-    "description": "散财童子刮刮乐自动挂机（V2）：群聊定时刷掉落 + 私聊不限次连锁；按钮+命令双试，卡面归属过滤 Bot。",
+    "description": (
+        "散财童子（@lucifer_hdsky_bot）刮刮乐自动挂机：群聊每"
+        " 2 分钟刷掉落（配额满自动暂停）、逐张收益记账 + 每日"
+        "收益日报，随机逐格刮开、回本即停、连亏自动停止；私聊"
+        "连锁默认关闭。"
+    ),
     "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/scratch.svg",
     "scope": "user",
     "plugin_api_version": 2,
@@ -114,6 +125,40 @@ __plugin__ = {
             "min": 5,
             "max": 60,
         },
+        "stats_enabled": {
+            "type": "boolean",
+            "default": True,
+            "label": "收益统计",
+            "section": "统计",
+            "help": "逐张记录群聊通道的派奖/成本/净额，并每日推送收益日报（判断赚亏用）。",
+        },
+        "stats_report_hour": {
+            "type": "number",
+            "default": 23,
+            "label": "日报时间(时)",
+            "section": "统计",
+            "help": "每天几点推送收益日报，0-23，按北京时间（UTC+8）。",
+            "min": 0,
+            "max": 23,
+        },
+        "stats_report_minute": {
+            "type": "number",
+            "default": 55,
+            "label": "日报时间(分)",
+            "section": "统计",
+            "help": "日报的分钟位，0-59。",
+            "min": 0,
+            "max": 59,
+        },
+        "stats_retention_days": {
+            "type": "number",
+            "default": 90,
+            "label": "流水保留天数",
+            "section": "统计",
+            "help": "逐张流水保留天数，超期自动裁剪（日汇总趋势保留）。",
+            "min": 7,
+            "max": 365,
+        },
     },
 }
 
@@ -136,6 +181,12 @@ _drop_game_remaining: int | None = None  # 最近一次 /info 解析出的本时
 _drop_checked_ts: float = 0.0  # 最近一次成功解析 /info 回复的时间
 
 _DROP_STALE_AFTER: float = 3600.0  # /info 结果超过 1 小时视为过期（时段本就按小时轮换）
+
+# ── 收益统计（SPEC §12.6）────────────────────────────────────────────────
+# 容器跑 UTC，但游戏日界按北京时间 → 用固定偏移，不依赖容器 tz / tzdata。
+_TZ_CN = timezone(timedelta(hours=8))
+_LEDGER_FILE = "scratch_ledger.jsonl"  # 逐张流水，append-only，跨重载持久
+_DAILY_FILE = "scratch_daily.json"  # 按日聚合缓存（含账号级快照）
 _INFO_IGNORE_TEXT = "银元奖励"  # 掉落消息不是 /info 回复（照抄 skyGame/games/drop_guard.py）
 _DROP_LINE_RE = re.compile(r"当前时段剩余掉落[:：]\s*聊天\s*(\d+)\s*·\s*游戏\s*(\d+)")
 _DROP_LINE_LEGACY_RE = re.compile(r"当前时段剩余掉落[:：]\s*(\d+)")
@@ -392,6 +443,203 @@ def _drop_exhausted(now: float | None = None) -> bool:
     if ts - _drop_checked_ts > _DROP_STALE_AFTER:
         return False
     return _drop_game_remaining <= 0
+
+
+def _cn_now() -> datetime:
+    """北京时间（容器时区是 UTC，游戏日界/时段都按 UTC+8，无夏令时）。"""
+    return datetime.now(_TZ_CN)
+
+
+def _day_key(ts: float | None = None) -> str:
+    """归属日期（北京时间 YYYY-MM-DD）。跨零点算新的一天。"""
+    moment = datetime.fromtimestamp(ts, _TZ_CN) if ts is not None else _cn_now()
+    return moment.strftime("%Y-%m-%d")
+
+
+def _stats_path(ctx: object, name: str) -> str:
+    """统计文件路径：优先 ctx.data_dir，拿不到退 /tmp（不让统计把插件搞崩）。"""
+    base = str(getattr(ctx, "data_dir", "") or "") or "/tmp"
+    try:
+        os.makedirs(base, exist_ok=True)
+    except OSError:
+        base = "/tmp"
+    return os.path.join(base, name)
+
+
+def _stats_enabled(cfg: dict) -> bool:
+    return bool(cfg.get("stats_enabled", True))
+
+
+def _stats_empty_bucket() -> dict:
+    return {"cards": 0, "cells": 0, "cost": 0, "payout": 0, "net": 0, "breakeven": 0, "loss": 0}
+
+
+def _stats_load(ctx: object) -> dict:
+    """读日聚合缓存：{date: {group: bucket, pm: bucket, account: {...}, account_at: ts}}。"""
+    try:
+        with open(_stats_path(ctx, _DAILY_FILE), encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _stats_save(ctx: object, data: dict) -> None:
+    path = _stats_path(ctx, _DAILY_FILE)
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, ensure_ascii=False, sort_keys=True)
+        os.replace(tmp, path)  # 原子替换，防写一半把日汇总写坏
+    except OSError as exc:
+        ctx.log.warning("收益统计写盘失败: %s", exc)
+
+
+def _stats_append(ctx: object, row: dict) -> None:
+    try:
+        with open(_stats_path(ctx, _LEDGER_FILE), "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except OSError as exc:
+        ctx.log.warning("收益流水写盘失败: %s", exc)
+
+
+def _record_card(ctx: object, cfg: dict, result: dict, channel: str) -> None:
+    """逐张记账：写流水 + 更新当日聚合 + 打一行可 grep 的汇总日志。"""
+    if not _stats_enabled(cfg) or not isinstance(result, dict):
+        return
+    now = time.time()
+    day = _day_key(now)
+    outcome = "breakeven" if result.get("net", 0) >= 0 else "loss"
+    _stats_append(ctx, {
+        "type": "card", "ts": round(now, 3), "date": day, "channel": channel,
+        "card_id": result.get("card_id"), "cells": result.get("cells", 0),
+        "cost": result.get("cost", 0), "payout": result.get("payout", 0),
+        "net": result.get("net", 0), "outcome": outcome,
+    })
+    data = _stats_load(ctx)
+    entry = data.setdefault(day, {})
+    entry.setdefault("group", _stats_empty_bucket())
+    entry.setdefault("pm", _stats_empty_bucket())
+    bucket = entry.setdefault(channel, _stats_empty_bucket())
+    bucket["cards"] += 1
+    bucket["cells"] += int(result.get("cells", 0) or 0)
+    bucket["cost"] += int(result.get("cost", 0) or 0)
+    bucket["payout"] += int(result.get("payout", 0) or 0)
+    bucket["net"] += int(result.get("net", 0) or 0)
+    bucket[outcome] += 1
+    _stats_save(ctx, data)
+    ctx.log.info(
+        "📊 记账 卡#%s %s %d格 派奖%d 成本%d 净%+d｜当日%s %d张 累计净%+d",
+        result.get("card_id"), "群聊" if channel == "group" else "私聊",
+        int(result.get("cells", 0) or 0), int(result.get("payout", 0) or 0),
+        int(result.get("cost", 0) or 0), int(result.get("net", 0) or 0),
+        "群聊" if channel == "group" else "私聊", bucket["cards"], bucket["net"],
+    )
+
+
+_MONEY_TAIL = r"(-?[\d,]+(?:\.\d+)?)\s*([Ww万]?)"
+
+
+def _money(text: str, label: str) -> int | None:
+    """解析「当前银元: 8.39W」「今日净收入: 1,368」为整数银元；解析不出返回 None。"""
+    match = re.search(re.escape(label) + r"[:：]\s*" + _MONEY_TAIL, str(text or ""))
+    if not match:
+        return None
+    value = float(match.group(1).replace(",", ""))
+    if match.group(2):
+        value *= 10000
+    return int(round(value))
+
+
+def _parse_account_snapshot(text: str) -> dict | None:
+    """/info 回执里的账号级数字（游戏自算的今日收支）→ 日报做对照，无法归因到通道。"""
+    snapshot = {
+        "income": _money(text, "今日收入"),
+        "expense": _money(text, "今日支出"),
+        "net_income": _money(text, "今日净收入"),
+        "balance": _money(text, "当前银元"),
+    }
+    drop = _DROP_LINE_RE.search(str(text or ""))
+    if drop:
+        snapshot["chat_drop"] = int(drop.group(1))
+        snapshot["game_drop"] = int(drop.group(2))
+    if snapshot["net_income"] is None and snapshot["income"] is None:
+        return None
+    return snapshot
+
+
+def _record_account(ctx: object, cfg: dict, snapshot: dict | None) -> None:
+    if not _stats_enabled(cfg) or not snapshot:
+        return
+    now = time.time()
+    day = _day_key(now)
+    _stats_append(ctx, {"type": "account", "ts": round(now, 3), "date": day, **snapshot})
+    data = _stats_load(ctx)
+    entry = data.setdefault(day, {})
+    entry["account"] = snapshot
+    entry["account_at"] = round(now, 3)
+    _stats_save(ctx, data)
+
+
+def _report_text(day: str, entry: dict, history: dict, trend_days: int = 7) -> str:
+    """收益日报正文：卡级账（可归因）+ 账号级账（真值）+ 差值。"""
+    group = entry.get("group") or _stats_empty_bucket()
+    pm = entry.get("pm") or _stats_empty_bucket()
+    lines = [f"📊 天空刮奖 · 收益日报（{day}）", "", "群聊通道（定时 /scratch）"]
+    lines.append(f"  {group['cards']} 张 · 刮 {group['cells']} 格")
+    lines.append(f"  派奖 {group['payout']} / 成本 {group['cost']} → 净 {group['net']:+d} 银元")
+    lines.append(f"  回本 {group['breakeven']} 张 · 亏损 {group['loss']} 张")
+    if pm["cards"]:
+        lines.append(f"私聊通道 {pm['cards']} 张 → 净 {pm['net']:+d} 银元")
+    account = entry.get("account")
+    if account:
+        lines.append("")
+        lines.append("账号级（游戏自算，含掉落奖励等非卡级收益）")
+        lines.append(f"  今日收入 {account.get('income')} / 支出 {account.get('expense')}")
+        lines.append(f"  今日净收入 {account.get('net_income')} · 当前银元 {account.get('balance')}")
+        if account.get("net_income") is not None:
+            diff = int(account["net_income"]) - (group["net"] + pm["net"])
+            lines.append(f"  差值（掉落奖励等）= {diff:+d} 银元")
+    else:
+        lines.append("（当日无 /info 回执，缺账号级对照）")
+    recent = sorted(k for k in history if k <= day)[-max(1, min(trend_days, 14)):]
+    if len(recent) > 1:
+        lines.append("")
+        lines.append("近几日群聊净额")
+        for key in recent:
+            g = (history.get(key) or {}).get("group") or _stats_empty_bucket()
+            lines.append(f"  {key}: {g['cards']} 张 → 净 {g['net']:+d}")
+    return "\n".join(lines)
+
+
+def _stats_prune(ctx: object, days: int) -> None:
+    """裁剪逐张流水到最近 days 天，并同步清掉超期的日汇总。"""
+    keep = max(1, int(days or 90))
+    cutoff = _day_key(time.time() - keep * 86400)
+    path = _stats_path(ctx, _LEDGER_FILE)
+    kept: list[str] = []
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                text = line.strip()
+                if not text:
+                    continue
+                try:
+                    row = json.loads(text)
+                except ValueError:
+                    continue
+                if str(row.get("date", "")) >= cutoff:
+                    kept.append(text)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(kept) + ("\n" if kept else ""))
+    except OSError as exc:
+        ctx.log.warning("收益流水裁剪失败: %s", exc)
+        return
+    data = _stats_load(ctx)
+    trimmed = {k: v for k, v in data.items() if k >= cutoff}
+    if len(trimmed) != len(data):
+        _stats_save(ctx, trimmed)
+    ctx.log.info("📊 收益流水已裁剪至 %d 天（保留 %d 行）", keep, len(kept))
 
 
 def _result_text(result: object) -> str:
@@ -780,9 +1028,11 @@ async def setup(ctx: object) -> None:
                 return
 
         # Bot 回执校准（双通道共用）：/info 回执与半小时状态卡都带「当前时段剩余掉落」
-        remaining = _parse_drop_line(_message_text(message))
+        reply_text = _message_text(message)
+        remaining = _parse_drop_line(reply_text)
         if remaining is not None:
             _update_drop_remaining(ctx, remaining)
+            _record_account(ctx, cfg, _parse_account_snapshot(reply_text))
             return
 
         if _auto_stopped:
@@ -831,6 +1081,9 @@ async def setup(ctx: object) -> None:
             result = await _play_card(ctx, client, message, cfg, event)
             if not result:
                 return
+
+            # 收益统计（SPEC §12.6）：按通道分别记账，群聊/私聊不混算
+            _record_card(ctx, cfg, result, "pm" if is_pm else "group")
 
             if result["net"] >= 0:
                 _consecutive_loss = 0
@@ -904,17 +1157,44 @@ async def setup(ctx: object) -> None:
         if await _send_command(ctx, bot_id, "/info", " 掉落查询"):
             ctx.log.info("🪙 已私聊 Bot 发送 /info 查询本时段剩余掉落")
 
+    async def _report_tick() -> None:
+        """收益日报：cron 每小时的第 N 分触发，只有北京时间的日报整点才真发。
+
+        容器时区不可信（平台宿主可能是 UTC），所以不用 hour= 换算，改用北京小时自判。
+        """
+        if not _stats_enabled(cfg):
+            return
+        if _cn_now().hour != report_hour:
+            return
+        day = _day_key()
+        data = _stats_load(ctx)
+        entry = data.get(day) or {}
+        text = _report_text(day, entry, data)
+        ctx.log.info("📊 收益日报 %s", text.replace("\n", " ｜ ")[:600])
+        try:
+            await ctx.notify(text, level="info", category="收益日报")
+        except Exception:  # noqa: BLE001 - 推送失败不影响刮奖
+            ctx.log.exception("收益日报推送失败")
+        _stats_prune(ctx, int(cfg.get("stats_retention_days", 90) or 90))
+
     group_interval = max(30, int(cfg.get("group_send_interval", 120) or 120))
     check_minutes = max(5, min(60, int(cfg.get("drop_check_interval", 10) or 10)))
+    report_hour = max(0, min(23, int(cfg.get("stats_report_hour", 23) or 0)))
+    report_minute = max(0, min(59, int(cfg.get("stats_report_minute", 55) or 0)))
     schedule(_group_tick, "interval", seconds=group_interval, id="scratch_group_send")
     if bot_id:
         schedule(_info_tick, "cron", minute=f"*/{check_minutes}", id="scratch_drop_check")
+    if _stats_enabled(cfg):
+        schedule(_report_tick, "cron", minute=report_minute, id="scratch_report")
     ctx.log.info(
         "双通道已启动：群聊每 %ds 发一次 /scratch（掉落满自动暂停）、私聊%s、掉落守卫每 %d 分查一次",
         group_interval,
         "不限次连锁" if bool(cfg.get("pm_unlimited", True)) else "不自动连锁",
         check_minutes,
     )
+    if _stats_enabled(cfg):
+        ctx.log.info("📊 收益统计已启用：北京 %02d:%02d 推日报，流水保留 %s 天",
+                     report_hour, report_minute, cfg.get("stats_retention_days", 90))
 
 
 async def teardown(ctx: object) -> None:
