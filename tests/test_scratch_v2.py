@@ -13,8 +13,11 @@
 
 from __future__ import annotations
 
+import json
+import time
 import types
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -616,3 +619,176 @@ def test_send_candidates_chain_order_and_dedup() -> None:
     chain2 = scratch_mod._send_candidates(ctx2)
     assert chain2.count(shared) == 1
     assert len(chain2) == 3  # user + 去重后的共享 raw + 裸 bot
+
+
+# ─── §4 / §5 契约：元信息、量级约束边界 ─────────────────────────────────────
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_plugin_meta_matches_manifest_and_spec() -> None:
+    """元信息与 manifest_v2.json / SPEC §4 一致（商店按清单版本判定更新，漂移即推送失效）。"""
+    meta = scratch_mod.__plugin__
+    entry = json.loads((ROOT / "manifest_v2.json").read_text(encoding="utf-8"))["plugins"]["scratch"]
+
+    assert meta["id"] == entry["id"] == "scratch"  # id 必须等于文件名
+    assert meta["name"] == entry["name"] == "天空刮奖"
+    assert meta["scope"] == entry["scope"] == "user"
+    assert meta["version"] == entry["version"]
+    assert entry["path"] == "plugins_v2/scratch.py"
+    assert meta["plugin_api_version"] == entry["plugin_api_version"] == 2
+    assert "requirements" not in meta  # §2：只用标准库，不引入依赖
+
+    # §4 配置项：键名 / 默认值 / 边界全部沿用 V1
+    schema = meta["config_schema"]
+    assert set(schema) == {"target_group", "bot_id", "click_delay", "card_cooldown", "max_consecutive_loss"}
+    assert schema["target_group"]["default"] == "-1001326208894"
+    assert schema["bot_id"]["default"] == 0
+    delay = schema["click_delay"]
+    assert (delay["default"], delay["min"], delay["max"]) == (0.6, 0.3, 2.0)
+    cooldown = schema["card_cooldown"]
+    assert (cooldown["default"], cooldown["min"], cooldown["max"]) == (5, 2, 30)
+    max_loss = schema["max_consecutive_loss"]
+    assert (max_loss["default"], max_loss["min"], max_loss["max"]) == (5, 1, 20)
+
+
+async def test_single_card_cost_ceiling_is_900(fast: None) -> None:
+    """§5 量级边界：单卡成本上限 900 = 9 格 × 100；全亏也只刮 9 格，不重复点同一格。"""
+    clicks: list[tuple] = []
+    msg = _TlMsg(clicks=clicks, payout="获得 0 银元，净收益 -100 银元。")
+    client = _TlClient({900: msg})
+    ctx = _V2Ctx(config=_cfg(max_consecutive_loss=99), user=client)
+    await scratch_mod.setup(ctx)
+
+    await ctx.handlers[0](_Event(msg, client=client, chat=object()))
+
+    assert len(clicks) == 9  # 9 格，一格不落
+    assert len(set(clicks)) == 9  # 随机顺序下 9 个位置互不相同 → 不会重复花钱
+    assert all(0 <= row <= 3 and 0 <= col <= 2 for row, col in clicks)
+    assert any("成本900" in text and "净-900" in text for text, _kw in ctx.notifications)
+
+
+def test_seen_ttl_is_300s_and_prune_drops_only_expired() -> None:
+    """§5：去重 TTL 300s，每轮清过期，防无界增长。"""
+    assert scratch_mod._SEEN_TTL == 300
+    now = time.time()
+    scratch_mod._seen["expired"] = now - scratch_mod._SEEN_TTL - 1
+    scratch_mod._seen["fresh"] = now - scratch_mod._SEEN_TTL + 1
+
+    scratch_mod._prune_seen()
+
+    assert set(scratch_mod._seen) == {"fresh"}
+
+
+async def test_dedup_and_playing_guard_skip_card(fast: None) -> None:
+    """§5 串行互斥：同一张卡只玩一次；`_playing=True` 时新卡直接跳过（不并发刮）。"""
+    clicks: list[tuple] = []
+    msg = _TlMsg(clicks=clicks, payout="获得 200 银元，净收益 100 银元。")
+    client = _TlClient({900: msg})
+    ctx = _V2Ctx(config=_cfg(), user=client)
+    await scratch_mod.setup(ctx)
+    handler = ctx.handlers[0]
+
+    await handler(_Event(msg, client=client, chat=object()))
+    assert len(clicks) == 2  # 刮一格 + 点「放弃」
+    assert scratch_mod._playing is False  # 玩完必须放开互斥
+
+    # 同一条卡（同 chat:msg）再次到达 → 去重命中，零点击
+    await handler(_Event(msg, client=client, chat=object()))
+    assert len(clicks) == 2
+    assert sum("识别到刮刮乐" in line for line in ctx.log.records) == 2  # 认出来了，但止步于去重
+
+    # 正在玩卡时新卡到达 → 跳过，零点击、不连锁
+    scratch_mod._playing = True
+    fresh_clicks: list[tuple] = []
+    fresh = _TlMsg(msg_id=901, clicks=fresh_clicks)
+    await handler(_Event(fresh, client=client, chat=object()))
+    assert fresh_clicks == []
+    assert client.sent == [(GROUP, "/scratch")]  # 只有第一张的那次连锁
+    assert any("正在玩卡中" in line for line in ctx.log.records)
+
+
+# ─── V1 → V2 属性访问红线（SPEC §3 / §12）───────────────────────────────────
+
+
+class _V1TrapBtn(_TlBtn):
+    """V1 时代按钮才有 callback_data（str）；一旦被读就炸。"""
+
+    @property
+    def callback_data(self) -> str:
+        raise AssertionError("V1 属性 button.callback_data 不应再被访问")
+
+
+class _V1TrapMarkup(_TlMarkup):
+    """V1 的内联键盘是 inline_keyboard；V2 必须走 rows/buttons，读旧属性即炸。"""
+
+    @property
+    def inline_keyboard(self) -> list[Any]:
+        raise AssertionError("V1 属性 reply_markup.inline_keyboard 不应再被访问")
+
+
+class _V1TrapMsg(_TlMsg):
+    """真机 Telethon 形态 + V1 独有属性陷阱：caption / reply_to_message 一旦被读就炸。"""
+
+    @property
+    def caption(self) -> str:
+        raise AssertionError("V1 属性 message.caption 不应再被访问（V1 崩溃根因）")
+
+    @property
+    def reply_to_message(self) -> Any:
+        raise AssertionError("V1 属性 message.reply_to_message 不应再被访问（归属改判卡面「玩家：」）")
+
+
+def _trap_markup(card_id: int = CARD_ID) -> _V1TrapMarkup:
+    """真机布局（4 行 11 键），按钮与键盘全用 V1 陷阱形态。"""
+    rows: list[list[Any]] = []
+    for base in (1, 4, 7):
+        rows.append([_V1TrapBtn(str(base + n), f"scratch:{card_id}:{base + n}".encode()) for n in range(3)])
+    rows.append(
+        [
+            _V1TrapBtn("一键刮开", f"scratch:{card_id}:all".encode()),
+            _V1TrapBtn("放弃", f"scratch:{card_id}:abandon".encode()),
+        ]
+    )
+    return _V1TrapMarkup(rows)
+
+
+def test_v1_only_attributes_are_never_touched() -> None:
+    """V1→V2 替换后：caption / callback_data / inline_keyboard / reply_to_message 一律不再被访问。"""
+    msg = _V1TrapMsg(markup=_trap_markup())
+
+    assert scratch_mod._message_text(msg) == CARD_TEXT
+    assert scratch_mod._is_scratch_card(msg) is True
+    card_id, cells, abandon_pos = scratch_mod._parse_card(msg)
+    assert card_id == CARD_ID
+    assert sorted(cells) == list(range(1, 10))
+    assert abandon_pos == (3, 1)
+    assert scratch_mod._button_data(_V1TrapBtn("1", b"scratch:77:1")) == "scratch:77:1"
+
+    # 文本为空时（真机的 raw_text 兜底）也只能读 raw_text，不许回落 caption
+    textless = _V1TrapMsg(text="", markup=_trap_markup())
+    textless.raw_text = "🎰 刮刮乐"
+    assert scratch_mod._message_text(textless) == "🎰 刮刮乐"
+
+    # 陷阱必须真会炸（否则这条红线等于没测）
+    with pytest.raises(AssertionError, match="caption"):
+        _ = msg.caption
+    with pytest.raises(AssertionError, match="inline_keyboard"):
+        _ = getattr(msg.reply_markup, "inline_keyboard")
+    with pytest.raises(AssertionError, match="callback_data"):
+        _ = _V1TrapBtn("1", b"scratch:77:1").callback_data
+
+
+async def test_handler_plays_trap_card_end_to_end(fast: None) -> None:
+    """整条 handler 路径在「V1 属性陷阱」消息上跑通：能识别、能刮、能回本停。"""
+    clicks: list[tuple] = []
+    msg = _V1TrapMsg(clicks=clicks, payout="获得 200 银元，净收益 100 银元。", markup=_trap_markup())
+    client = _TlClient({900: msg})
+    ctx = _V2Ctx(config=_cfg(), user=client)
+    await scratch_mod.setup(ctx)
+
+    await ctx.handlers[0](_Event(msg, client=client, chat=object()))
+
+    assert len(clicks) == 2
+    assert clicks[-1] == (3, 1)  # 回本后点「放弃」（第 4 行第 2 列）
+    assert any("回本就停" in text for text, _kw in ctx.notifications)
