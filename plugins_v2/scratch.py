@@ -2,7 +2,8 @@
 # AWBotNest 插件：天空刮奖（scratch）· V2（Telethon 1.44 运行时）
 #
 # 散财童子（@lucifer_hdsky_bot）刮刮乐自动挂机。自 V1 1.6.2 移植，玩法不变：
-# 手动发 /scratch → 检测 Bot 回复你的刮刮乐卡片 → 随机逐格刮开 → 回本就停。
+# 手动发 /scratch → 检测 Bot 发出的刮刮乐卡片（卡面「玩家：<本账号显示名>」判归属，
+# 见 SPEC §12.1）→ 随机逐格刮开 → 回本就停。
 # 赢一把自动在群里发 /scratch 连锁下一张；连续亏损自动停止，关闭插件再开重置。
 # =============================================================================
 
@@ -81,6 +82,9 @@ _auto_stopped: bool = False  # 连续亏损后自动停止
 _seen: dict[str, float] = {}
 _SEEN_TTL: float = 300
 
+# 本账号显示名缓存（client → 候选名元组），仅内存，停用/重载即重置
+_self_names: dict[int, tuple[str, ...]] = {}
+
 
 # ── 工具函数 ────────────────────────────────────────
 
@@ -139,12 +143,20 @@ def _button_rows(message: object) -> list[list[object]]:
 
 
 def _button_data(button: object) -> str:
-    """取按钮 callback data（Telethon 是 bytes，解码成 str）。"""
-    data = button.data if hasattr(button, "data") else None
-    if isinstance(data, bytes):
-        return data.decode("utf-8", "ignore")
-    if isinstance(data, str):
-        return data
+    """取按钮 callback data（bytes → str），兼容两个运行时的按钮形态。
+
+    - Telethon 1.44：回调数据在 ``button.data``（``KeyboardButtonCallback``）
+    - Telethon 1.45+：``KeyboardInlineButton`` **没有 ``.data``**，数据在 ``button.type.data``
+      （SPEC §12.2 真机实测）
+
+    先取 ``type.data``、回退 ``data``，两个版本都不坏。
+    """
+    for holder in (getattr(button, "type", None), button):
+        data = getattr(holder, "data", None)
+        if isinstance(data, bytes):
+            return data.decode("utf-8", "ignore")
+        if isinstance(data, str):
+            return data
     return ""
 
 
@@ -174,6 +186,44 @@ def _is_scratch_card(message: object) -> bool:
             if _button_data(button).startswith("scratch:"):
                 return True
     return False
+
+
+def _is_own_card(message: object, names: tuple[str, ...]) -> bool:
+    """归属判定（SPEC §12.1 真机实测）：卡面文本含「玩家：<本账号显示名>」。
+
+    卡片是 Bot 独立发出的消息（实测 ``reply_to_msg_id=None``，不回复任何人的 ``/scratch``），
+    所以 ``event.get_reply_message()`` 的 ``out`` 标记恒为 None，**不能**用来判归属。
+    """
+    text = _message_text(message)
+    return any(name and f"玩家：{name}" in text for name in names)
+
+
+async def _self_display_names(ctx: object, client: object) -> tuple[str, ...]:
+    """取本账号显示名的候选集合（first_name、first_name+last_name），按 client 缓存在内存里。
+
+    只服务归属判定；不落 kv，停用/重载即重置。Telethon 1.44/1.45 的 client
+    没有 ``.me`` 缓存属性，只能 ``await get_me()``。
+    """
+    if client is None:
+        return ()
+    key = id(client)
+    cached = _self_names.get(key)
+    if cached:
+        return cached
+    get_me = getattr(client, "get_me", None)
+    if not callable(get_me):
+        return ()
+    try:
+        me = await get_me()
+    except Exception as exc:  # noqa: BLE001 - 取不到名字按不处理，不拖垮 handler
+        ctx.log.warning("取本账号信息失败，跳过卡片：%r", exc)
+        return ()
+    first = str(getattr(me, "first_name", "") or "").strip()
+    last = str(getattr(me, "last_name", "") or "").strip()
+    names = tuple(dict.fromkeys(part for part in (first, f"{first} {last}".strip()) if part))
+    if names:
+        _self_names[key] = names
+    return names
 
 
 def _parse_card(message: object) -> tuple[int | None, dict[int, tuple[int, int]], tuple[int, int] | None]:
@@ -561,6 +611,7 @@ async def setup(ctx: object) -> None:
     _auto_stopped = False
     _consecutive_loss = 0
     _seen.clear()
+    _self_names.clear()
 
     cfg = ctx.config
     bot_id = int(cfg.get("bot_id", 0) or 0)
@@ -600,16 +651,16 @@ async def setup(ctx: object) -> None:
         if not _is_scratch_card(message):
             return
 
-        # 只处理「回复我自己消息」的卡片：V2 无 ctx.owner_id，
-        # 用被回复消息的 out 标记判断；取不到/非自己 → 不处理（宁漏不抢）。
-        reply = None
-        get_reply = getattr(event, "get_reply_message", None)
-        if callable(get_reply):
-            try:
-                reply = await get_reply()
-            except Exception:  # noqa: BLE001 - 取不到归属按不处理
-                reply = None
-        if not (reply is not None and getattr(reply, "out", False)):
+        client = _client_of(event, args)
+
+        # 归属判定（SPEC §12.1 真机实测，推翻原 §9.3）：卡片是 Bot 独立发出的消息，
+        # reply_to_msg_id=None，所以 event.get_reply_message() 的 out 标记恒为 None，
+        # 不能用来判归属；改为核对卡面「玩家：<本账号显示名>」（取不到名字 → 不处理，宁漏不抢）。
+        names = await _self_display_names(ctx, client)
+        if not names:
+            ctx.log.warning("⚠️ 取不到本账号显示名，无法判定归属，跳过 msg=%s", getattr(message, "id", None))
+            return
+        if not _is_own_card(message, names):
             return
 
         ctx.log.info("🎰 识别到刮刮乐 msg=%s", getattr(message, "id", None))
@@ -627,7 +678,6 @@ async def setup(ctx: object) -> None:
 
         _playing = True
         try:
-            client = _client_of(event, args)
             result = await _play_card(ctx, client, message, cfg, event)
             if not result:
                 return
