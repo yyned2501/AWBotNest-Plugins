@@ -193,9 +193,18 @@ def _is_own_card(message: object, names: tuple[str, ...]) -> bool:
 
     卡片是 Bot 独立发出的消息（实测 ``reply_to_msg_id=None``，不回复任何人的 ``/scratch``），
     所以 ``event.get_reply_message()`` 的 ``out`` 标记恒为 None，**不能**用来判归属。
+
+    名字后面必须紧跟行尾或非 ``\\w`` 字符：``玩家：Yy2`` / ``玩家：Yy晴`` 是别人以本账号名字为
+    前缀的卡，认了就是花钱路径上的假阳性（本插件原则是「宁漏不抢」）；``玩家：Yy``（行尾）、
+    ``玩家：Yy IX``（空格）、``玩家：Yy（我）``（全角括号）都算本账号。
     """
     text = _message_text(message)
-    return any(name and f"玩家：{name}" in text for name in names)
+    for name in names:
+        if not name:
+            continue
+        if re.search(re.escape(f"玩家：{name}") + r"(?!\w)", text):
+            return True
+    return False
 
 
 async def _self_display_names(ctx: object, client: object) -> tuple[str, ...]:

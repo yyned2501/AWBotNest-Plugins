@@ -335,6 +335,22 @@ def test_is_own_card_requires_player_name() -> None:
     assert scratch_mod._is_own_card(_TlMsg(text=f"🎰 刮刮乐\n玩家：{full}"), (MY_FIRST, full)) is True
 
 
+def test_is_own_card_rejects_prefix_names() -> None:
+    """名字边界（评审阻塞项）：别人以本账号名字为前缀的卡不能被认成自己的（宁漏不抢）。"""
+    text = "🎰 刮刮乐\n玩家：{}\n每格 100 银元"
+    assert scratch_mod._is_own_card(_TlMsg(text=text.format(MY_FIRST)), (MY_FIRST,)) is True
+    assert scratch_mod._is_own_card(_TlMsg(text=text.format(f"{MY_FIRST}2")), (MY_FIRST,)) is False
+    assert scratch_mod._is_own_card(_TlMsg(text=text.format(f"{MY_FIRST}晴")), (MY_FIRST,)) is False
+    assert scratch_mod._is_own_card(_TlMsg(text=text.format(f"{MY_FIRST} IX")), (MY_FIRST,)) is True
+    # 名字后面跟全角括号等非 \w 字符，仍算本账号（Bot 追加内容时不能失效）
+    assert scratch_mod._is_own_card(_TlMsg(text=f"🎰 刮刮乐\n玩家：{MY_FIRST}（我）"), (MY_FIRST,)) is True
+    # 已知残余（按 §12.1 字面成立，本轮不扩大改动）：别人显示名以「本账号名 + 空格」开头时，
+    # 会被短候选命中 —— 玩家：Yy Zhang2 对候选 ('Yy', 'Yy Zhang') 判 True。
+    full = f"{MY_FIRST} Zhang"
+    assert scratch_mod._is_own_card(_TlMsg(text=text.format(f"{full}2")), (MY_FIRST, full)) is True
+    assert scratch_mod._is_own_card(_TlMsg(text=text.format(full)), (MY_FIRST, full)) is True
+
+
 async def test_self_display_names_caches_and_degrades() -> None:
     ctx = _V2Ctx()
     client = _TlClient()
@@ -379,6 +395,23 @@ async def test_handler_ignores_other_group_and_other_players_card() -> None:
     await scratch_mod.setup(ctx2)
     await ctx2.handlers[0](_Event(_TlMsg(sender_id=12345, clicks=clicks), client=client))
     assert clicks == []
+
+
+async def test_handler_ignores_prefix_name_card() -> None:
+    """别人的卡但名字以本账号为前缀（玩家：Yy2 / 玩家：Yy晴）→ 零点击、不连锁（钱不能花）。"""
+    ctx = _V2Ctx(config=_cfg())
+    await scratch_mod.setup(ctx)
+    handler = ctx.handlers[0]
+
+    for other in (f"{MY_FIRST}2", f"{MY_FIRST}晴"):
+        clicks: list[tuple] = []
+        client = _TlClient()
+        msg = _TlMsg(text=f"🎰 刮刮乐\n玩家：{other}\n每格 100 银元，点格子刮开", clicks=clicks)
+        await handler(_Event(msg, client=client))
+
+        assert clicks == []  # 一格都没点
+        assert client.sent == []  # 没有连锁发 /scratch
+        assert not any("识别到刮刮乐" in line for line in ctx.log.records)
 
 
 async def test_handler_skips_when_self_name_unavailable() -> None:
