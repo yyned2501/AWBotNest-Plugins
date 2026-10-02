@@ -579,6 +579,11 @@ def _record_account(ctx: object, cfg: dict, snapshot: dict | None) -> None:
     entry["account"] = snapshot
     entry["account_at"] = round(now, 3)
     _stats_save(ctx, data)
+    ctx.log.info(
+        "📊 记账 账号快照 今日收入%s 支出%s 净%s 余额%s",
+        snapshot.get("income"), snapshot.get("expense"),
+        snapshot.get("net_income"), snapshot.get("balance"),
+    )
 
 
 def _report_text(day: str, entry: dict, history: dict, trend_days: int = 7) -> str:
@@ -1195,6 +1200,8 @@ async def setup(ctx: object) -> None:
     if _stats_enabled(cfg):
         ctx.log.info("📊 收益统计已启用：北京 %02d:%02d 推日报，流水保留 %s 天",
                      report_hour, report_minute, cfg.get("stats_retention_days", 90))
+        ctx.log.info("📊 收益统计目录：%s（不可写则退 /tmp，会在日志报「写盘失败」）",
+                     getattr(ctx, "data_dir", "") or "/tmp")
 
 
 async def teardown(ctx: object) -> None:
