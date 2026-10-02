@@ -910,8 +910,9 @@ async def setup(ctx: object) -> None:
     if bot_id:
         schedule(_info_tick, "cron", minute=f"*/{check_minutes}", id="scratch_drop_check")
     ctx.log.info(
-        "双通道已启动：群聊每 %ds 发一次 /scratch（掉落满自动暂停）、私聊不限次连锁、掉落守卫每 %d 分查一次",
+        "双通道已启动：群聊每 %ds 发一次 /scratch（掉落满自动暂停）、私聊%s、掉落守卫每 %d 分查一次",
         group_interval,
+        "不限次连锁" if bool(cfg.get("pm_unlimited", True)) else "不自动连锁",
         check_minutes,
     )
 
