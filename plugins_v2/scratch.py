@@ -18,7 +18,7 @@ import time
 __plugin__ = {
     "name": "天空刮奖",
     "id": "scratch",
-    "version": "1.6.2",
+    "version": "1.6.3",
     "author": "Yy",
     "description": "散财童子刮刮乐自动挂机（V2）：按钮点击+发送命令双重试，回复归属过滤 Bot，每轮自动连锁。",
     "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/scratch.svg",
