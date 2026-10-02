@@ -29,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 __plugin__ = {
     "name": "天空刮奖",
     "id": "scratch",
-    "version": "1.7.1",
+    "version": "1.7.2",
     "author": "Yy",
     "description": (
         "散财童子（@lucifer_hdsky_bot）刮刮乐自动挂机：群聊每"
@@ -537,83 +537,32 @@ def _record_card(ctx: object, cfg: dict, result: dict, channel: str) -> None:
     )
 
 
-_MONEY_TAIL = r"(-?[\d,]+(?:\.\d+)?)\s*([Ww万]?)"
-
-
-def _money(text: str, label: str) -> int | None:
-    """解析「当前银元: 8.39W」「今日净收入: 1,368」为整数银元；解析不出返回 None。"""
-    match = re.search(re.escape(label) + r"[:：]\s*" + _MONEY_TAIL, str(text or ""))
-    if not match:
-        return None
-    value = float(match.group(1).replace(",", ""))
-    if match.group(2):
-        value *= 10000
-    return int(round(value))
-
-
-def _parse_account_snapshot(text: str) -> dict | None:
-    """/info 回执里的账号级数字（游戏自算的今日收支）→ 日报做对照，无法归因到通道。"""
-    snapshot = {
-        "income": _money(text, "今日收入"),
-        "expense": _money(text, "今日支出"),
-        "net_income": _money(text, "今日净收入"),
-        "balance": _money(text, "当前银元"),
-    }
-    drop = _DROP_LINE_RE.search(str(text or ""))
-    if drop:
-        snapshot["chat_drop"] = int(drop.group(1))
-        snapshot["game_drop"] = int(drop.group(2))
-    if snapshot["net_income"] is None and snapshot["income"] is None:
-        return None
-    return snapshot
-
-
-def _record_account(ctx: object, cfg: dict, snapshot: dict | None) -> None:
-    if not _stats_enabled(cfg) or not snapshot:
-        return
-    now = time.time()
-    day = _day_key(now)
-    _stats_append(ctx, {"type": "account", "ts": round(now, 3), "date": day, **snapshot})
-    data = _stats_load(ctx)
-    entry = data.setdefault(day, {})
-    entry["account"] = snapshot
-    entry["account_at"] = round(now, 3)
-    _stats_save(ctx, data)
-    ctx.log.info(
-        "📊 记账 账号快照 今日收入%s 支出%s 净%s 余额%s",
-        snapshot.get("income"), snapshot.get("expense"),
-        snapshot.get("net_income"), snapshot.get("balance"),
-    )
-
-
 def _report_text(day: str, entry: dict, history: dict, trend_days: int = 7) -> str:
-    """收益日报正文：卡级账（可归因）+ 账号级账（真值）+ 差值。"""
+    """刮奖收支日报：只记刮奖本身的派奖/成本/净额。
+
+    账号级总额（今日收入/支出/净收入）**不记账**——那是游戏自算的全账号活动，
+    混了掉落奖励与人工操作，会污染「刮奖收支」的判断口径（用户 2026-10-02 明确）。
+    """
     group = entry.get("group") or _stats_empty_bucket()
     pm = entry.get("pm") or _stats_empty_bucket()
-    lines = [f"📊 天空刮奖 · 收益日报（{day}）", "", "群聊通道（定时 /scratch）"]
+    lines = [f"📊 天空刮奖 · 刮奖收支日报（{day}）", "", "群聊通道（定时 /scratch）"]
     lines.append(f"  {group['cards']} 张 · 刮 {group['cells']} 格")
     lines.append(f"  派奖 {group['payout']} / 成本 {group['cost']} → 净 {group['net']:+d} 银元")
     lines.append(f"  回本 {group['breakeven']} 张 · 亏损 {group['loss']} 张")
     if pm["cards"]:
-        lines.append(f"私聊通道 {pm['cards']} 张 → 净 {pm['net']:+d} 银元")
-    account = entry.get("account")
-    if account:
         lines.append("")
-        lines.append("账号级（游戏自算，含掉落奖励等非卡级收益）")
-        lines.append(f"  今日收入 {account.get('income')} / 支出 {account.get('expense')}")
-        lines.append(f"  今日净收入 {account.get('net_income')} · 当前银元 {account.get('balance')}")
-        if account.get("net_income") is not None:
-            diff = int(account["net_income"]) - (group["net"] + pm["net"])
-            lines.append(f"  差值（掉落奖励等）= {diff:+d} 银元")
-    else:
-        lines.append("（当日无 /info 回执，缺账号级对照）")
+        lines.append("私聊通道")
+        lines.append(f"  {pm['cards']} 张 · 刮 {pm['cells']} 格")
+        lines.append(f"  派奖 {pm['payout']} / 成本 {pm['cost']} → 净 {pm['net']:+d} 银元")
+    if not group["cards"] and not pm["cards"]:
+        lines.append("  （当日无卡片结算）")
     recent = sorted(k for k in history if k <= day)[-max(1, min(trend_days, 14)):]
     if len(recent) > 1:
         lines.append("")
-        lines.append("近几日群聊净额")
+        lines.append("近几日群聊刮奖净额")
         for key in recent:
-            g = (history.get(key) or {}).get("group") or _stats_empty_bucket()
-            lines.append(f"  {key}: {g['cards']} 张 → 净 {g['net']:+d}")
+            bucket = (history.get(key) or {}).get("group") or _stats_empty_bucket()
+            lines.append(f"  {key}: {bucket['cards']} 张 → 净 {bucket['net']:+d}")
     return "\n".join(lines)
 
 
@@ -1033,11 +982,10 @@ async def setup(ctx: object) -> None:
                 return
 
         # Bot 回执校准（双通道共用）：/info 回执与半小时状态卡都带「当前时段剩余掉落」
-        reply_text = _message_text(message)
-        remaining = _parse_drop_line(reply_text)
+        # /info 回执只用来校准掉落配额；账号级总额不记账（统计口径只要刮奖收支）
+        remaining = _parse_drop_line(_message_text(message))
         if remaining is not None:
             _update_drop_remaining(ctx, remaining)
-            _record_account(ctx, cfg, _parse_account_snapshot(reply_text))
             return
 
         if _auto_stopped:

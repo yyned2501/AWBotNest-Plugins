@@ -278,14 +278,13 @@ PYTHONPATH=/home/hermes/.hermes/profiles/coder/cache/scratch/tl144_pkg \
 
 ## 12.6 收益统计（v1.7.1，真机驱动「跑几天判断赚亏」）
 
-**目标**：判断群聊通道是赚是亏，需要**可归因**的逐张流水 + **真值**的账号级对照。
+**目标**：判断群聊通道是赚是亏。统计口径 = **刮奖本身的收支**（派奖/成本/净额），逐张流水 + 日汇总。
 
 **存储契约**（都在 `ctx.data_dir`，跨重载持久）：
 
 - `scratch_ledger.jsonl`：逐张 append-only
-  - 卡片行：`{type:"card", ts, date, channel:"group"|"pm", card_id, cells, cost, payout, net, outcome:"breakeven"|"loss"}`
-  - 账号行：`{type:"account", ts, date, income, expense, net_income, balance, chat_drop?, game_drop?}`
-- `scratch_daily.json`：`{date: {group: bucket, pm: bucket, account: {...}, account_at}}`，
+  - 唯一行型：`{type:"card", ts, date, channel:"group"|"pm", card_id, cells, cost, payout, net, outcome:"breakeven"|"loss"}`
+- `scratch_daily.json`：`{date: {group: bucket, pm: bucket}}`，
   写盘用 **临时文件 + os.replace 原子替换**（防写一半把日汇总写坏）
 - `bucket = {cards, cells, cost, payout, net, breakeven, loss}`
 
@@ -302,6 +301,7 @@ PYTHONPATH=/home/hermes/.hermes/profiles/coder/cache/scratch/tl144_pkg \
 **归因红线（不许越界）**：
 
 1. 卡级账**只记插件自己刮的卡**，按 `channel` 分桶，群聊与私聊**不混算**（私聊无掉落收益，是另一条腿）。
-2. 账号级「今日收入/支出/净收入」是**游戏自算的全账号**活动，含掉落奖励与人工操作。
-   日报必须标注来源并单独给出 `差值 = 账号净收入 − 卡级净额`，**不得**把差值当作某个通道的收益。
+2. **账号级总额（今日收入/支出/净收入/当前银元）一律不记账**：那是游戏自算的全账号活动，混了
+   掉落奖励与人工操作，记进来会污染「刮奖收支」口径。`/info` 回执只用于校准掉落配额。
+   回归保护：`test_info_reply_only_feeds_drop_guard_not_ledger`、`test_report_text_only_books_scratch_income_expense`。
 3. 统计失败不影响刮奖：写盘异常只 `ctx.log.warning`，不向上抛。

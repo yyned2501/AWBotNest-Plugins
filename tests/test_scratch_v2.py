@@ -973,6 +973,27 @@ async def test_group_tick_skipped_when_auto_stopped() -> None:
     assert client.sent == []
 
 
+async def test_info_reply_only_feeds_drop_guard_not_ledger(tmp_path: Path) -> None:
+    """/info 回执只校准掉落配额；账号级总额不记账（用户口径：只要刮奖收支）。"""
+    info = _TlMsg(
+        text=(
+            "💰 账户\n当前银元: 8.39W\n今日收入: 5.49W\n今日支出: 5.36W\n今日净收入: 1,368\n"
+            "当前时段剩余掉落: 聊天 3 · 游戏 2"
+        ),
+        msg_id=901,
+        chat_id=BOT_ID,
+        markup=_TlMarkup([]),
+    )
+    client = _TlClient({901: info})
+    ctx = _V2Ctx(config=_cfg(bot_id=BOT_ID), user=client, data_dir=str(tmp_path))
+    await scratch_mod.setup(ctx)
+    await ctx.handlers[0](_Event(info, client=client, chat=object()))
+
+    assert scratch_mod._drop_game_remaining == 2  # 守卫仍校准
+    assert not (tmp_path / "scratch_ledger.jsonl").exists()  # 没有任何账号级流水
+    assert not (tmp_path / "scratch_daily.json").exists()
+
+
 # ─── v1.7.1 收益统计（SPEC §12.6）─────────────────────────────────────────
 
 
@@ -983,17 +1004,6 @@ def test_day_key_uses_beijing_timezone() -> None:
 
     assert scratch_mod._day_key(_dt(2026, 10, 2, 15, 59, tzinfo=_tz.utc).timestamp()) == "2026-10-02"
     assert scratch_mod._day_key(_dt(2026, 10, 2, 16, 30, tzinfo=_tz.utc).timestamp()) == "2026-10-03"
-
-
-def test_money_parser_handles_wan_commas_and_negative() -> None:
-    """/info 回执金额形态：8.39W / 5.36万 / 1,368 / 负数。"""
-    assert scratch_mod._money("当前银元: 8.39W", "当前银元") == 83900
-    assert scratch_mod._money("今日支出: 5.36万", "今日支出") == 53600
-    assert scratch_mod._money("今日净收入: 1,368", "今日净收入") == 1368
-    assert scratch_mod._money("今日净收入: -1,110", "今日净收入") == -1110
-    assert scratch_mod._money("没这个字段", "今日收入") is None
-
-
 async def test_group_card_lands_in_ledger_and_daily_rollup(tmp_path: Path) -> None:
     """群聊通道每张卡落 JSONL 流水 + 当日聚合（成本/派奖/净额可归因）。"""
     clicks: list[tuple] = []
@@ -1047,47 +1057,6 @@ async def test_stats_disabled_writes_no_files(tmp_path: Path) -> None:
     await ctx.handlers[0](_Event(msg, client=client, chat=object()))
     assert not (tmp_path / "scratch_ledger.jsonl").exists()
     assert not (tmp_path / "scratch_daily.json").exists()
-
-
-async def test_info_reply_records_account_snapshot(tmp_path: Path) -> None:
-    """/info 回执的账号级数字（游戏自算）进日报做对照。"""
-    info = _TlMsg(
-        text=(
-            "💰 账户\n当前银元: 8.39W\n今日收入: 5.49W\n今日支出: 5.36W\n今日净收入: 1,368\n"
-            "当前时段剩余掉落: 聊天 3 · 游戏 2"
-        ),
-        msg_id=901,
-        chat_id=BOT_ID,
-        markup=_TlMarkup([]),
-    )
-    client = _TlClient({901: info})
-    ctx = _V2Ctx(config=_cfg(bot_id=BOT_ID), user=client, data_dir=str(tmp_path))
-    await scratch_mod.setup(ctx)
-    await ctx.handlers[0](_Event(info, client=client, chat=object()))
-
-    day = scratch_mod._day_key()
-    daily = json.loads((tmp_path / "scratch_daily.json").read_text(encoding="utf-8"))
-    account = daily[day]["account"]
-    assert account["net_income"] == 1368
-    assert account["balance"] == 83900
-    assert account["game_drop"] == 2
-
-
-def test_report_text_covers_group_channel_and_account() -> None:
-    """日报文案：群聊张数/派奖/成本/净额 + 账号级对照 + 差值（掉落奖励等）。"""
-    day = "2026-10-02"
-    entry = {
-        "group": {"cards": 3, "cells": 5, "cost": 300, "payout": 420, "net": 120, "breakeven": 1, "loss": 2},
-        "pm": scratch_mod._stats_empty_bucket(),
-        "account": {"income": 54900, "expense": 53600, "net_income": 1368, "balance": 83900},
-    }
-    text = scratch_mod._report_text(day, entry, {day: entry})
-    assert "群聊通道" in text
-    assert "派奖 420 / 成本 300 → 净 +120 银元" in text
-    assert "今日净收入 1368" in text
-    assert "差值（掉落奖励等）= +1248 银元" in text
-
-
 async def test_report_tick_pushes_only_in_report_hour(tmp_path: Path) -> None:
     """日报 cron 每小时一次、内部按北京小时自判：不是日报整点就不发。"""
     hour = scratch_mod._cn_now().hour
@@ -1095,7 +1064,7 @@ async def test_report_tick_pushes_only_in_report_hour(tmp_path: Path) -> None:
     await scratch_mod.setup(ctx)
     tick = next(fn for fn, _kind, kw in ctx.scheduled if kw.get("id") == "scratch_report")
     await tick()
-    assert any("收益日报" in text for text, _kw in ctx.notifications)
+    assert any("刮奖收支日报" in text for text, _kw in ctx.notifications)
 
     ctx2 = _V2Ctx(config=_cfg(stats_report_hour=(hour + 1) % 24, stats_report_minute=0), data_dir=str(tmp_path))
     await scratch_mod.setup(ctx2)
@@ -1123,3 +1092,18 @@ def test_stats_prune_keeps_window(tmp_path: Path) -> None:
         if line.strip()
     ]
     assert [row["net"] for row in rows] == [2]
+
+
+def test_report_text_only_books_scratch_income_expense() -> None:
+    """日报只写刮奖收支（派奖/成本/净额），账号级总额与差值一律不许出现。"""
+    day = "2026-10-02"
+    entry = {
+        "group": {"cards": 3, "cells": 5, "cost": 300, "payout": 420, "net": 120, "breakeven": 1, "loss": 2},
+        "pm": scratch_mod._stats_empty_bucket(),
+        "account": {"income": 54900, "expense": 53600, "net_income": 1368, "balance": 83900},
+    }
+    text = scratch_mod._report_text(day, entry, {day: entry})
+    assert "群聊通道" in text
+    assert "派奖 420 / 成本 300 → 净 +120 银元" in text
+    for banned in ("账号级", "今日收入", "今日净收入", "差值", "54900", "1368", "83900"):
+        assert banned not in text, f"日报不该出现账号级数字：{banned}"
