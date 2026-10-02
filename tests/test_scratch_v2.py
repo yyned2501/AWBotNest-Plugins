@@ -69,6 +69,12 @@ class _V2Ctx:
         self.bot: Any = None
         self.handlers: list[Any] = []
         self.notifications: list[tuple[str, dict[str, Any]]] = []
+        self.scheduled: list[tuple[Any, str, dict[str, Any]]] = []
+
+    def schedule(self, fn: Any, kind: str, **kwargs: Any) -> Any:
+        """平台定时器面：V2 支持 kind="interval"（seconds=）与 kind="cron"（minute=）。"""
+        self.scheduled.append((fn, kind, kwargs))
+        return fn
 
     def on_message(self, *args: Any, **kwargs: Any) -> Any:
         assert not args and not kwargs, "V2 运行时的 on_message 只接受裸装饰器"
@@ -231,6 +237,10 @@ def _clear() -> None:
     scratch_mod._auto_stopped = False
     scratch_mod._seen.clear()
     scratch_mod._self_names.clear()
+    scratch_mod._group_last_sent = 0.0
+    scratch_mod._group_last_skip_log = 0.0
+    scratch_mod._drop_game_remaining = None
+    scratch_mod._drop_checked_ts = 0.0
 
 
 @pytest.fixture
@@ -442,8 +452,8 @@ async def test_handler_skips_when_self_name_unavailable() -> None:
     assert not any("识别到刮刮乐" in line for line in ctx.log.records)
 
 
-async def test_handler_plays_until_breakeven_and_chains(fast: None) -> None:
-    """回本即停：点一格派奖 200 ≥ 成本 100 → 立刻点「放弃」，并连锁下一张。"""
+async def test_handler_plays_until_breakeven_without_group_chain(fast: None) -> None:
+    """回本即停：点一格派奖 200 ≥ 成本 100 → 立刻点「放弃」；群聊卡不即时连锁（v1.7.0 定时器控节奏）。"""
     clicks: list[tuple] = []
     msg = _TlMsg(clicks=clicks, payout="获得 200 银元，净收益 100 银元。")
     client = _TlClient({900: msg})
@@ -461,8 +471,8 @@ async def test_handler_plays_until_breakeven_and_chains(fast: None) -> None:
     assert clicks[-1] == (3, 1)
     assert len(clicks) == 2
     assert any("回本就停" in text for text, _kw in ctx.notifications)
-    # 赢后连锁发送 /scratch
-    assert client.sent == [(GROUP, "/scratch")]
+    # 群聊卡不再即时连锁：群发节奏由 scratch_group_send 定时器控制（SPEC §12.5）
+    assert client.sent == []
     assert scratch_mod._consecutive_loss == 0
 
 
@@ -641,7 +651,23 @@ def test_plugin_meta_matches_manifest_and_spec() -> None:
 
     # §4 配置项：键名 / 默认值 / 边界全部沿用 V1
     schema = meta["config_schema"]
-    assert set(schema) == {"target_group", "bot_id", "click_delay", "card_cooldown", "max_consecutive_loss"}
+    assert set(schema) == {
+        "target_group",
+        "bot_id",
+        "player_names",
+        "click_delay",
+        "card_cooldown",
+        "max_consecutive_loss",
+        "group_send_interval",
+        "pm_unlimited",
+        "drop_guard_enabled",
+        "drop_check_interval",
+    }
+    assert schema["player_names"]["default"] == ""
+    assert schema["group_send_interval"]["default"] == 120
+    assert schema["pm_unlimited"]["default"] is True
+    assert schema["drop_guard_enabled"]["default"] is True
+    assert (schema["drop_check_interval"]["default"], schema["drop_check_interval"]["min"]) == (10, 5)
     assert schema["target_group"]["default"] == "-1001326208894"
     assert schema["bot_id"]["default"] == 0
     delay = schema["click_delay"]
@@ -704,7 +730,7 @@ async def test_dedup_and_playing_guard_skip_card(fast: None) -> None:
     fresh = _TlMsg(msg_id=901, clicks=fresh_clicks)
     await handler(_Event(fresh, client=client, chat=object()))
     assert fresh_clicks == []
-    assert client.sent == [(GROUP, "/scratch")]  # 只有第一张的那次连锁
+    assert client.sent == []  # 群聊卡不即时连锁（v1.7.0 双通道）
     assert any("正在玩卡中" in line for line in ctx.log.records)
 
 
@@ -792,3 +818,140 @@ async def test_handler_plays_trap_card_end_to_end(fast: None) -> None:
     assert len(clicks) == 2
     assert clicks[-1] == (3, 1)  # 回本后点「放弃」（第 4 行第 2 列）
     assert any("回本就停" in text for text, _kw in ctx.notifications)
+
+
+# ─── v1.7.0 双通道 / 群聊节流 / 掉落守卫（SPEC §12.5）────────────────────────
+
+
+def test_drop_line_parses_new_legacy_and_rejects_noise() -> None:
+    """掉落配额行：新格式取「游戏」数，旧格式回退，非配额文本返回 None。"""
+    assert scratch_mod._parse_drop_line("当前时段剩余掉落: 聊天 3 · 游戏 0") == 0
+    assert scratch_mod._parse_drop_line("当前时段剩余掉落：聊天 1 · 游戏 12") == 12
+    assert scratch_mod._parse_drop_line("当前时段剩余掉落: 5") == 5
+    assert scratch_mod._parse_drop_line(f"🎰 刮刮乐\n玩家：{MY_FIRST}") is None
+    assert scratch_mod._parse_drop_line("") is None
+
+
+def test_drop_exhausted_only_zero_in_same_hour() -> None:
+    """掉落满判据：剩余 0、且 /info 结果落在同一小时；跨整点视为刷新，不再拦。"""
+    base = 3600 * 100000 + 30
+    scratch_mod._drop_game_remaining = 0
+    scratch_mod._drop_checked_ts = base
+    assert scratch_mod._drop_exhausted(base + 5) is True
+    assert scratch_mod._drop_exhausted(base + 3700) is False  # 跨整点 → 配额刷新
+    scratch_mod._drop_game_remaining = 3
+    assert scratch_mod._drop_exhausted(base + 5) is False
+    scratch_mod._drop_game_remaining = None
+    assert scratch_mod._drop_exhausted(base + 5) is False  # 从没校准过 → 不拦
+
+
+async def test_info_reply_calibrates_quota_and_is_not_a_card() -> None:
+    """私聊 /info 回执（与半小时状态卡同格式）校准配额，且不会被当成卡片刮。"""
+    info = _TlMsg(
+        text="当前时段剩余掉落: 聊天 3 · 游戏 0\n当前银元: 8.49W",
+        msg_id=901,
+        markup=_TlMarkup([]),
+    )
+    client = _TlClient({901: info})
+    ctx = _V2Ctx(config=_cfg(bot_id=BOT_ID), user=client)
+    await scratch_mod.setup(ctx)
+
+    await ctx.handlers[0](_Event(info, client=client, chat=object()))
+
+    assert scratch_mod._drop_game_remaining == 0
+    assert client.sent == []  # 不是卡片 → 不刮不连锁
+    assert any("本时段剩余掉落 0" in line for line in ctx.log.records)
+
+
+async def test_group_tick_throttles_and_pauses_when_drops_full() -> None:
+    """群聊定时器：按间隔发 /scratch；间隔内不重发；本时段掉落满则暂停。"""
+    client = _TlClient()
+    ctx = _V2Ctx(config=_cfg(), user=client)
+    await scratch_mod.setup(ctx)
+    tick = next((fn for fn, _kind, kw in ctx.scheduled if kw.get("id") == "scratch_group_send"), None)
+    assert tick is not None
+
+    await tick()
+    assert client.sent == [(GROUP, "/scratch")]
+
+    await tick()  # 间隔内触发 → 不重发
+    assert len(client.sent) == 1
+
+    scratch_mod._group_last_sent = 0.0
+    scratch_mod._drop_game_remaining = 0
+    scratch_mod._drop_checked_ts = time.time()
+    await tick()
+    assert len(client.sent) == 1  # 掉落满 → 暂停群发
+    assert any("掉落已满" in line for line in ctx.log.records)
+
+
+async def test_pm_card_chains_unlimited(fast: None) -> None:
+    """私聊通道（SPEC §12.5）：刮完立刻私聊再发 /scratch，不限次数。"""
+    clicks: list[tuple] = []
+    msg = _TlMsg(clicks=clicks, chat_id=BOT_ID, payout="获得 200 银元，净收益 100 银元。")
+    client = _TlClient({900: msg})
+    ctx = _V2Ctx(config=_cfg(bot_id=BOT_ID), user=client)
+    await scratch_mod.setup(ctx)
+
+    await ctx.handlers[0](_Event(msg, client=client, chat=object()))
+
+    assert client.sent == [(BOT_ID, "/scratch")]
+    assert any("已在私聊发送 /scratch" in line for line in ctx.log.records)
+
+
+async def test_pm_chain_can_be_disabled(fast: None) -> None:
+    """关掉「私聊通道不限次」→ 私聊卡照常刮，但刮完不连锁。"""
+    clicks: list[tuple] = []
+    msg = _TlMsg(clicks=clicks, chat_id=BOT_ID, payout="获得 200 银元，净收益 100 银元。")
+    client = _TlClient({900: msg})
+    ctx = _V2Ctx(config=_cfg(bot_id=BOT_ID, pm_unlimited=False), user=client)
+    await scratch_mod.setup(ctx)
+
+    await ctx.handlers[0](_Event(msg, client=client, chat=object()))
+
+    assert len(clicks) == 2  # 刮一格 + 放弃
+    assert client.sent == []
+
+
+async def test_player_names_alias_claims_fancy_display_name_card(fast: None) -> None:
+    """显示名是花体（𝐘𝐲 𝐈𝐗）时，配置 player_names=Yy 仍能认领卡面「玩家：Yy」。"""
+    clicks: list[tuple] = []
+    msg = _TlMsg(clicks=clicks, payout="获得 200 银元，净收益 100 银元。")
+    client = _TlClient({900: msg}, first_name="𝐘𝐲", last_name="𝐈𝐗")
+
+    # 不配别名 → 严格相等失配，零点击
+    ctx = _V2Ctx(config=_cfg(), user=client)
+    await scratch_mod.setup(ctx)
+    await ctx.handlers[0](_Event(msg, client=client, chat=object()))
+    assert clicks == []
+
+    # 配上别名 → 认领并刮开
+    ctx2 = _V2Ctx(config=_cfg(player_names="Yy"), user=client)
+    await scratch_mod.setup(ctx2)
+    await ctx2.handlers[0](_Event(msg, client=client, chat=object()))
+    assert len(clicks) == 2
+
+
+async def test_setup_registers_both_timers_only_with_bot_id() -> None:
+    """setup 注册群聊发送（interval）与掉落查询（cron）；没有 bot_id 时不注册掉落查询。"""
+    ctx = _V2Ctx(config=_cfg(bot_id=BOT_ID))
+    await scratch_mod.setup(ctx)
+    kinds = {kw.get("id"): kind for _fn, kind, kw in ctx.scheduled}
+    assert kinds.get("scratch_group_send") == "interval"
+    assert kinds.get("scratch_drop_check") == "cron"
+
+    ctx2 = _V2Ctx(config=_cfg())
+    await scratch_mod.setup(ctx2)
+    assert {kw.get("id") for _fn, _kind, kw in ctx2.scheduled} == {"scratch_group_send"}
+
+
+async def test_group_tick_skipped_when_auto_stopped() -> None:
+    """连亏自动停止后，群聊定时器也不发（与卡片 handler 同一熔断）。"""
+    client = _TlClient()
+    ctx = _V2Ctx(config=_cfg(), user=client)
+    await scratch_mod.setup(ctx)
+    tick = next(fn for fn, _kind, kw in ctx.scheduled if kw.get("id") == "scratch_group_send")
+
+    scratch_mod._auto_stopped = True
+    await tick()
+    assert client.sent == []

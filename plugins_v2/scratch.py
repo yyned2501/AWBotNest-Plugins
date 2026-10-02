@@ -2,9 +2,14 @@
 # AWBotNest 插件：天空刮奖（scratch）· V2（Telethon 1.44 运行时）
 #
 # 散财童子（@lucifer_hdsky_bot）刮刮乐自动挂机。自 V1 1.6.2 移植，玩法不变：
-# 手动发 /scratch → 检测 Bot 发出的刮刮乐卡片（卡面「玩家：<本账号显示名>」判归属，
-# 见 SPEC §12.1）→ 随机逐格刮开 → 回本就停。
-# 赢一把自动在群里发 /scratch 连锁下一张；连续亏损自动停止，关闭插件再开重置。
+# 发 /scratch → 检测 Bot 发出的刮刮乐卡片（卡面「玩家：<本账号显示名>」判归属，
+# 见 SPEC §12.1）→ 随机逐格刮开 → 回本就停；连续亏损自动停止，关闭插件再开重置。
+#
+# 双通道（v1.7.0 真机实测）：卡片实测由 Bot **私聊**送达、群聊只贴公告，所以 handler
+# 同时认「目标群」与「与 Bot 的私聊」两个会话：
+#   · 群聊通道：定时器每 group_send_interval（默认 120 秒）发一次 /scratch 刷「游戏掉落」，
+#     本时段掉落满（/info 解析剩余 0）时暂停，整点刷新自动恢复；
+#   · 私聊通道：卡片刮完立刻开下一张、不限次数（pm_unlimited），是刮奖收益主通道。
 # =============================================================================
 
 from __future__ import annotations
@@ -18,9 +23,9 @@ import time
 __plugin__ = {
     "name": "天空刮奖",
     "id": "scratch",
-    "version": "1.6.3",
+    "version": "1.7.0",
     "author": "Yy",
-    "description": "散财童子刮刮乐自动挂机（V2）：按钮点击+发送命令双重试，回复归属过滤 Bot，每轮自动连锁。",
+    "description": "散财童子刮刮乐自动挂机（V2）：群聊定时刷掉落 + 私聊不限次连锁；按钮+命令双试，卡面归属过滤 Bot。",
     "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/scratch.svg",
     "scope": "user",
     "plugin_api_version": 2,
@@ -40,6 +45,13 @@ __plugin__ = {
             "help": "@lucifer_hdsky_bot 的数字 ID。填 0 = 不按 Bot 过滤（会处理群内所有刮刮乐）。",
             "min": 0,
             "max": 9999999999,
+        },
+        "player_names": {
+            "type": "string",
+            "default": "",
+            "label": "卡片玩家名（逗号分隔）",
+            "section": "基础",
+            "help": "卡面「玩家：」应匹配的名字，逗号分隔。显示名是花体/别名导致识别不到时在此填写（如 Yy）。",
         },
         "click_delay": {
             "type": "slider",
@@ -70,6 +82,38 @@ __plugin__ = {
             "min": 1,
             "max": 20,
         },
+        "group_send_interval": {
+            "type": "number",
+            "default": 120,
+            "label": "群聊发送间隔(秒)",
+            "section": "策略",
+            "help": "群聊通道自动发 /scratch 的最小间隔，默认 120 秒（每 2 分钟一次）。私聊通道不受此限制。",
+            "min": 30,
+            "max": 3600,
+        },
+        "pm_unlimited": {
+            "type": "boolean",
+            "default": True,
+            "label": "私聊通道不限次",
+            "section": "策略",
+            "help": "勾选：私聊收到的卡片刮完立刻开下一张，不限次、不受群聊间隔限制。取消：私聊卡片不连锁。",
+        },
+        "drop_guard_enabled": {
+            "type": "boolean",
+            "default": True,
+            "label": "掉落配额守卫",
+            "section": "策略",
+            "help": "定期私聊发 /info 查「当前时段剩余掉落」；剩余 0 时暂停群聊发送，整点刷新自动恢复。",
+        },
+        "drop_check_interval": {
+            "type": "number",
+            "default": 10,
+            "label": "掉落检查间隔(分)",
+            "section": "策略",
+            "help": "每多少分钟私聊发一次 /info 校准掉落配额（整点对齐）。",
+            "min": 5,
+            "max": 60,
+        },
     },
 }
 
@@ -84,6 +128,17 @@ _SEEN_TTL: float = 300
 
 # 本账号显示名缓存（client → 候选名元组），仅内存，停用/重载即重置
 _self_names: dict[int, tuple[str, ...]] = {}
+
+# ── 双通道 / 掉落守卫状态（仅内存，停用/重载即重置）──────────
+_group_last_sent: float = 0.0  # 上次群聊发 /scratch 的时间戳
+_group_last_skip_log: float = 0.0  # 上次「掉落已满跳过」日志时间（防刷屏）
+_drop_game_remaining: int | None = None  # 最近一次 /info 解析出的本时段「游戏」剩余掉落
+_drop_checked_ts: float = 0.0  # 最近一次成功解析 /info 回复的时间
+
+_DROP_STALE_AFTER: float = 3600.0  # /info 结果超过 1 小时视为过期（时段本就按小时轮换）
+_INFO_IGNORE_TEXT = "银元奖励"  # 掉落消息不是 /info 回复（照抄 skyGame/games/drop_guard.py）
+_DROP_LINE_RE = re.compile(r"当前时段剩余掉落[:：]\s*聊天\s*(\d+)\s*·\s*游戏\s*(\d+)")
+_DROP_LINE_LEGACY_RE = re.compile(r"当前时段剩余掉落[:：]\s*(\d+)")
 
 
 # ── 工具函数 ────────────────────────────────────────
@@ -295,6 +350,50 @@ def _prune_seen() -> None:
         _seen.pop(key, None)
 
 
+def _parse_drop_line(text: str) -> int | None:
+    """从 /info 回执（或半小时状态卡）解析本时段「游戏」剩余掉落；解析不出返回 None。
+
+    真机格式（2026-10-02 实测）：``当前时段剩余掉落: 聊天 3 · 游戏 0``。
+    只看「游戏」——群聊发 /scratch 消耗的是游戏配额；「聊天」配额与发命令无关。
+    """
+    body = str(text or "")
+    match = _DROP_LINE_RE.search(body)
+    if match:
+        return int(match.group(2))
+    legacy = _DROP_LINE_LEGACY_RE.search(body)
+    return int(legacy.group(1)) if legacy else None
+
+
+def _update_drop_remaining(ctx: object, remaining: int) -> None:
+    """记录 /info 解析出的剩余掉落；状态翻转时各提示一次。"""
+    global _drop_game_remaining, _drop_checked_ts
+    prev = _drop_game_remaining
+    _drop_game_remaining = remaining
+    _drop_checked_ts = time.time()
+    if prev != remaining:
+        ctx.log.info(
+            "掉落守卫：本时段剩余掉落 %d（%s）",
+            remaining,
+            "已满，暂停群聊发送" if remaining <= 0 else "未满，照常群聊发送",
+        )
+
+
+def _drop_exhausted(now: float | None = None) -> bool:
+    """本时段「游戏」掉落是否已满（剩余 0）→ 群聊发送该暂停。
+
+    跨整点直接返回 False：时段按小时轮换、配额必然刷新，不等 /info 回执
+    （照抄 skyGame/games/drop_guard.py 的 v1.23.7 语义）；/info 结果本身 1 小时后也失效。
+    """
+    ts = time.time() if now is None else now
+    if _drop_game_remaining is None or _drop_checked_ts <= 0:
+        return False
+    if int(ts // 3600) != int(_drop_checked_ts // 3600):
+        return False  # 跨整点：新时段配额已刷新
+    if ts - _drop_checked_ts > _DROP_STALE_AFTER:
+        return False
+    return _drop_game_remaining <= 0
+
+
 def _result_text(result: object) -> str:
     """从点击返回里取回调文案（Telethon BotCallbackAnswer.message 是 str）。"""
     if result is None:
@@ -437,19 +536,19 @@ def _send_candidates(ctx: object) -> list[object]:
     return candidates
 
 
-async def _send_scratch(ctx: object, chat_id: object, label: str = "") -> bool:
-    """在群里发送 /scratch，带重试与发送兜底链。返回 True=成功。"""
+async def _send_command(ctx: object, chat_id: object, command: str, label: str = "") -> bool:
+    """向指定会话发送命令（/scratch、/info），带重试与发送兜底链。返回 True=成功。"""
     for attempt in range(3):
         last_err: Exception | None = None
         for client_obj in _send_candidates(ctx):
             try:
                 send = getattr(client_obj, "send", None)
                 if callable(send):
-                    await send(chat_id, "/scratch")
+                    await send(chat_id, command)
                     return True
                 send_message = getattr(client_obj, "send_message", None)
                 if callable(send_message):
-                    await send_message(chat_id, "/scratch")
+                    await send_message(chat_id, command)
                     return True
             except Exception as exc:  # noqa: BLE001 - 依次尝试下一个发送端
                 last_err = exc
@@ -459,10 +558,15 @@ async def _send_scratch(ctx: object, chat_id: object, label: str = "") -> bool:
             ctx.log.warning("⏳ 发送 /scratch FloodWait %ss", wait)
             await asyncio.sleep(wait)
             continue
-        ctx.log.warning("发送 /scratch 失败 (attempt %d/3)%s: %s", attempt + 1, label, last_err)
+        ctx.log.warning("发送 %s 失败 (attempt %d/3)%s: %s", command, attempt + 1, label, last_err)
         if attempt < 2:
             await asyncio.sleep(2)
     return False
+
+
+async def _send_scratch(ctx: object, chat_id: object, label: str = "") -> bool:
+    """发送 /scratch（保留旧名：既有调用方与测试不变）。"""
+    return await _send_command(ctx, chat_id, "/scratch", label)
 
 
 # ── 刮奖策略 ────────────────────────────────────────
@@ -626,12 +730,17 @@ async def _play_card(ctx: object, client: object, message: object, cfg: dict, ev
 async def setup(ctx: object) -> None:
     """注册处理器。V2 的 on_message 只接受裸装饰器，无 filters、无 group。"""
     global _playing, _consecutive_loss, _auto_stopped
+    global _group_last_sent, _group_last_skip_log, _drop_game_remaining, _drop_checked_ts
 
     _playing = False
     _auto_stopped = False
     _consecutive_loss = 0
     _seen.clear()
     _self_names.clear()
+    _group_last_sent = 0.0
+    _group_last_skip_log = 0.0
+    _drop_game_remaining = None
+    _drop_checked_ts = 0.0
 
     cfg = ctx.config
     bot_id = int(cfg.get("bot_id", 0) or 0)
@@ -657,13 +766,24 @@ async def setup(ctx: object) -> None:
         chat_id = getattr(message, "chat_id", None)
         if chat_id is None:
             chat_id = getattr(getattr(message, "chat", None), "id", None)
-        if chat_id is None or str(chat_id) != str(target):
+        # 双通道（v1.7.0 真机实测）：卡片由 Bot 私聊送达，群聊只贴公告 → 两个会话都要认
+        allowed_chats = {str(target)}
+        if bot_id:
+            allowed_chats.add(str(bot_id))
+        if chat_id is None or str(chat_id) not in allowed_chats:
             return
+        is_pm = bool(bot_id) and str(chat_id) == str(bot_id)
 
         if bot_id:
             sender = _sender_id(message, event)
             if sender is not None and sender != bot_id:
                 return
+
+        # Bot 回执校准（双通道共用）：/info 回执与半小时状态卡都带「当前时段剩余掉落」
+        remaining = _parse_drop_line(_message_text(message))
+        if remaining is not None:
+            _update_drop_remaining(ctx, remaining)
+            return
 
         if _auto_stopped:
             return
@@ -677,8 +797,18 @@ async def setup(ctx: object) -> None:
         # reply_to_msg_id=None，所以 event.get_reply_message() 的 out 标记恒为 None，
         # 不能用来判归属；改为核对卡面「玩家：<本账号显示名>」（取不到名字 → 不处理，宁漏不抢）。
         names = await _self_display_names(ctx, client)
+        # 显式别名优先：显示名改成花体/别名后（如 𝐘𝐲 𝐈𝐗）自动探测拿不到卡面玩家名，
+        # 由配置补进候选集合；_is_own_card 仍走严格相等，不引入前缀误配（宁漏不抢）。
+        extra_names = tuple(
+            n.strip() for n in str(cfg.get("player_names", "") or "").split(",") if n.strip()
+        )
+        if extra_names:
+            names = tuple(dict.fromkeys(extra_names + tuple(names)))
         if not names:
-            ctx.log.warning("⚠️ 取不到本账号显示名，无法判定归属，跳过 msg=%s", getattr(message, "id", None))
+            ctx.log.warning(
+                "⚠️ 取不到本账号显示名（也未配置 player_names），无法判定归属，跳过 msg=%s",
+                getattr(message, "id", None),
+            )
             return
         if not _is_own_card(message, names):
             return
@@ -724,17 +854,66 @@ async def setup(ctx: object) -> None:
                 )
                 return  # 不连锁
 
-            # 无论盈亏，只要没停就连锁下一张
-            cooldown = int(cfg.get("card_cooldown", 5) or 5)
-            wait = cooldown + random.uniform(0, 3)
-            ctx.log.info("🔄 %.1fs 后群内发送 /scratch（连续亏损=%d）", wait, _consecutive_loss)
-            await asyncio.sleep(wait)
-            if await _send_scratch(ctx, target, f" 连续亏损={_consecutive_loss}"):
-                ctx.log.info("📤 已在群内发送 /scratch")
+            # 连锁分流：私聊通道不限次（刮完立刻开下一张）；群聊通道**不在此连锁**——
+            # 群发节奏交给 group_send_interval 定时器，避免群里每几秒刷一条 /scratch。
+            if is_pm and bool(cfg.get("pm_unlimited", True)):
+                cooldown = int(cfg.get("card_cooldown", 5) or 5)
+                wait = cooldown + random.uniform(0, 3)
+                ctx.log.info("🔄 %.1fs 后私聊发送 /scratch（连续亏损=%d）", wait, _consecutive_loss)
+                await asyncio.sleep(wait)
+                if await _send_scratch(ctx, chat_id, f" 私聊 连续亏损={_consecutive_loss}"):
+                    ctx.log.info("📤 已在私聊发送 /scratch")
         except Exception:  # noqa: BLE001 - 单卡异常不拖垮 handler
             ctx.log.exception("刮奖流程异常")
         finally:
             _playing = False
+
+    schedule = getattr(ctx, "schedule", None)
+    if not callable(schedule):
+        ctx.log.warning("平台无 ctx.schedule，群聊定时发送与掉落守卫均不启动")
+        return
+
+    # 群聊定时器在 setup 作用域发命令，必须在此解析一次目标群（handler 里的是局部变量）
+    group_target = _parse_group(cfg.get("target_group", ""))
+    if not group_target:
+        ctx.log.error("target_group 未配置，群聊定时发送不启动")
+        return
+
+    async def _group_tick() -> None:
+        """群聊通道：每 group_send_interval 秒发一次 /scratch 刷掉落；本时段掉落满则暂停。"""
+        global _group_last_sent, _group_last_skip_log
+        if _auto_stopped:
+            return
+        interval = max(30, int(cfg.get("group_send_interval", 120) or 120))
+        now = time.time()
+        if now - _group_last_sent < interval * 0.9:  # 定时器抖动保护，不重复发
+            return
+        if bool(cfg.get("drop_guard_enabled", True)) and _drop_exhausted(now):
+            if now - _group_last_skip_log > 600:  # 每 10 分钟最多提示一次，防刷日志
+                _group_last_skip_log = now
+                ctx.log.info("🪙 本时段掉落已满（剩余 %s），暂停群聊发送到整点", _drop_game_remaining)
+            return
+        _group_last_sent = now
+        if await _send_scratch(ctx, group_target, " 群聊定时"):
+            ctx.log.info("📤 已在群内发送 /scratch（定时 %ds）", interval)
+
+    async def _info_tick() -> None:
+        """掉落守卫：私聊 Bot 发 /info，回执由 on_scratch_card 解析校准配额。"""
+        if not bot_id or not bool(cfg.get("drop_guard_enabled", True)):
+            return
+        if await _send_command(ctx, bot_id, "/info", " 掉落查询"):
+            ctx.log.info("🪙 已私聊 Bot 发送 /info 查询本时段剩余掉落")
+
+    group_interval = max(30, int(cfg.get("group_send_interval", 120) or 120))
+    check_minutes = max(5, min(60, int(cfg.get("drop_check_interval", 10) or 10)))
+    schedule(_group_tick, "interval", seconds=group_interval, id="scratch_group_send")
+    if bot_id:
+        schedule(_info_tick, "cron", minute=f"*/{check_minutes}", id="scratch_drop_check")
+    ctx.log.info(
+        "双通道已启动：群聊每 %ds 发一次 /scratch（掉落满自动暂停）、私聊不限次连锁、掉落守卫每 %d 分查一次",
+        group_interval,
+        check_minutes,
+    )
 
 
 async def teardown(ctx: object) -> None:
