@@ -3,7 +3,8 @@
 #
 # 覆盖：setup 在无 ctx.filters、on_message 只接受裸装饰器的 V2 运行时下不抛异常；
 # 刮刮乐识别/解析走 Telethon 的 rows[].buttons[].data(bytes)；重拉消息用 ids= 关键字
-# 并带 get_chat 回退；点击走 click(i=行, j=列)；回本即停+放弃；连亏自动停止；
+# 并带 get_chat 回退、再失败回退②用事件消息快照点击；点击走 click(i=行, j=列)
+# 并兼容旧签名 click(x=列, y=行)；回本即停+放弃；连亏自动停止；
 # 连锁发送的兜底链。宿主依赖全部 fake 隔离，不碰真实 Telegram。
 
 from __future__ import annotations
@@ -388,3 +389,82 @@ async def test_click_uses_ids_and_handles_missing_button() -> None:
     out = await scratch_mod._click_btn(ctx, client, GROUP, 900, 5, 0, "格5", None)
     assert out is None
     assert clicks == []
+
+
+# ─── §9.1 回退②（事件消息快照）与点击签名自适应 ──────────────────────────────
+
+
+class _DeadClient(_TlClient):
+    """两条重拉路都失败的 client（模拟实体解析失败 / 网络断）。"""
+
+    async def get_messages(self, chat: Any, ids: Any = None, limit: Any = None) -> Any:
+        self.refetches.append((chat, ids))
+        raise RuntimeError("Could not find the input entity")
+
+
+async def test_click_btn_falls_back_to_event_snapshot(fast: None) -> None:
+    """回退②：主写法与 get_chat 都失败 → 改用事件消息快照点击（功能降级，不崩）。"""
+    clicks: list[tuple] = []
+    snapshot = _TlMsg(clicks=clicks, payout="获得 5 银元，净收益 -95 银元。")
+    client = _DeadClient({900: snapshot})
+    ctx = _V2Ctx()
+    event = _Event(snapshot, client=client, chat=None)  # get_chat 抛错 → 回退①也失败
+
+    out = await scratch_mod._click_btn(ctx, client, GROUP, 900, 0, 0, "格1", event, snapshot=snapshot)
+    assert out == "获得 5 银元，净收益 -95 银元。"
+    assert clicks == [(0, 0)]
+    assert any("回退②用事件快照点击" in line for line in ctx.log.records)
+
+    # 没给快照时仍返回 None（调用方按累计值结算）
+    assert await scratch_mod._click_btn(ctx, client, GROUP, 900, 0, 0, "格1", event) is None
+
+
+async def test_play_card_degrades_to_snapshot(fast: None) -> None:
+    """重拉全失败时 _play_card 走快照，仍能刮完整张卡并结算，不抛异常。"""
+    clicks: list[tuple] = []
+    msg = _TlMsg(clicks=clicks, payout="获得 0 银元，净收益 -100 银元。")
+    client = _DeadClient({900: msg})
+    ctx = _V2Ctx(config=_cfg())
+
+    result = await scratch_mod._play_card(ctx, client, msg, _cfg())
+
+    assert result is not None
+    assert result["cells"] == 9
+    assert result["cost"] == 900
+    assert result["net"] == -900
+    assert len(clicks) == 9
+    assert any("回退②用事件快照" in line for line in ctx.log.records)
+
+
+async def test_click_index_adapts_to_pyrogram_xy_signature() -> None:
+    """旧签名 click(x=列, y=行)：必须按列行传，不能当成行列。"""
+    calls: list[tuple[Any, Any]] = []
+
+    class _XyMsg:
+        async def click(self, x: Any = None, y: Any = None, **kwargs: Any) -> Any:
+            calls.append((x, y))
+            return types.SimpleNamespace(message="获得 1 银元")
+
+    out = await scratch_mod._click_index(_XyMsg(), 2, 1)
+    assert calls == [(1, 2)]
+    assert out == "获得 1 银元"
+
+
+def test_send_candidates_chain_order_and_dedup() -> None:
+    ctx = _V2Ctx()
+    user = types.SimpleNamespace(raw=types.SimpleNamespace())
+    ctx.user = user
+    ctx.bot = types.SimpleNamespace(raw=types.SimpleNamespace())
+    chain = scratch_mod._send_candidates(ctx)
+    assert chain[0] is user
+    assert chain[1] is user.raw
+    assert chain[2] is ctx.bot.raw
+
+    # user.raw 与 bot.raw 是同一个 client → raw 只入链一次
+    ctx2 = _V2Ctx()
+    shared = types.SimpleNamespace()
+    ctx2.user = types.SimpleNamespace(raw=shared)
+    ctx2.bot = types.SimpleNamespace(raw=shared)
+    chain2 = scratch_mod._send_candidates(ctx2)
+    assert chain2.count(shared) == 1
+    assert len(chain2) == 3  # user + 去重后的共享 raw + 裸 bot

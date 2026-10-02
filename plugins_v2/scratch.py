@@ -286,6 +286,9 @@ async def _click_index(message: object, row: int, col: int) -> str:
         params = set()
     if {"i", "j"} & params:
         result = await click(i=row, j=col)
+    elif {"x", "y"} & params:
+        # Pyrogram 时代的签名把列放在 x、行放在 y：用 kwargs 传，避免位置参数被当成行列互换
+        result = await click(**{"x": col, "y": row})
     else:
         result = await click(row, col)
     return _result_text(result)
@@ -300,13 +303,21 @@ async def _click_btn(
     col: int,
     label: str = "格子",
     event: object = None,
+    snapshot: object = None,
 ) -> str | None:
-    """点击按钮，带重试。返回 callback_answer 文本（含「获得 X 银元」），失败返回 None。"""
+    """点击按钮，带重试。返回 callback_answer 文本（含「获得 X 银元」），失败返回 None。
+
+    重拉消息的两条路都失败时回退②：改用事件里的 message 快照点击（功能降级，
+    按钮位置可能错位；回执解析不出就按累计值结算，不会崩）。
+    """
     for attempt in range(3):
         try:
             message = await _refetch_card(ctx, client, chat_id, msg_id, event)
+            if not message and snapshot is not None:
+                ctx.log.warning("重拉失败，回退②用事件快照点击 (%s) msg=%s", label, msg_id)
+                message = snapshot
             if not message:
-                ctx.log.warning("get_messages 返回空 msg=%s", msg_id)
+                ctx.log.warning("get_messages 返回空且无可用快照 (%s) msg=%s", label, msg_id)
                 return None
 
             rows = _button_rows(message)
@@ -335,7 +346,12 @@ async def _click_btn(
 
 
 def _send_candidates(ctx: object) -> list[object]:
-    """发送兜底链：ctx.user → ctx.user.raw → ctx.bot.raw → ctx.bot。"""
+    """发送兜底链：ctx.user → ctx.user.raw → ctx.bot.raw → ctx.bot。
+
+    链条照抄 skyGame/games/drop_guard.py:151；末尾的裸 ``ctx.bot`` 是必要的补充——
+    V2 的 ``ctx.bot`` 本身就是 Telethon client（awbotnest/context.py:153），
+    没有 ``.raw``，只有它才带 ``send_message``。
+    """
     candidates: list[object] = []
     user = getattr(ctx, "user", None)
     if user is not None:
@@ -343,9 +359,10 @@ def _send_candidates(ctx: object) -> list[object]:
         if getattr(user, "raw", None) is not None:
             candidates.append(user.raw)
     bot = getattr(ctx, "bot", None)
-    if getattr(bot, "raw", None) is not None:
-        candidates.append(bot.raw)
-    if bot is not None:
+    bot_raw = getattr(bot, "raw", None) if bot is not None else None
+    if bot_raw is not None and bot_raw is not getattr(user, "raw", None):
+        candidates.append(bot_raw)
+    if bot is not None and bot is not bot_raw:
         candidates.append(bot)
     return candidates
 
@@ -403,10 +420,12 @@ async def _play_card(ctx: object, client: object, message: object, cfg: dict, ev
     click_delay = float(cfg.get("click_delay", 0.6) or 0)
 
     for cell_num in remaining:
-        # 重新拉消息看当前键盘状态
+        # 重新拉消息看当前键盘状态；两条路都失败则回退②用事件快照（功能降级）
         refetched = await _refetch_card(ctx, client, chat_id, msg_id, event)
         if not refetched:
-            ctx.log.warning("重拉消息失败，跳过格%s msg=%s", cell_num, msg_id)
+            ctx.log.warning("重拉消息失败，回退②用事件快照 格%s msg=%s", cell_num, msg_id)
+            refetched = message
+        if not refetched:
             continue
 
         _, current_cells, _ = _parse_card(refetched)
@@ -417,7 +436,7 @@ async def _play_card(ctx: object, client: object, message: object, cfg: dict, ev
 
         await asyncio.sleep(click_delay * random.uniform(0.8, 1.2))
 
-        cb_text = await _click_btn(ctx, client, chat_id, msg_id, row, col, f"格{cell_num}", event)
+        cb_text = await _click_btn(ctx, client, chat_id, msg_id, row, col, f"格{cell_num}", event, snapshot=message)
         if cb_text is None:
             # 按钮失效 → 当前卡报废，用累计值结算
             cost = cells_revealed * 100
@@ -467,12 +486,23 @@ async def _play_card(ctx: object, client: object, message: object, cfg: dict, ev
         if cum_payout >= cells_revealed * 100:
             ctx.log.info("✅ 回本 卡#%s %d格 累计%d", card_id, cells_revealed, cum_payout)
 
-            # 点「放弃」按钮（重新拉消息拿最新位置）
-            refetched = await _refetch_card(ctx, client, chat_id, msg_id, event)
-            if refetched:
-                _, _, abandon_pos = _parse_card(refetched)
-                if abandon_pos:
-                    await _click_btn(ctx, client, chat_id, msg_id, abandon_pos[0], abandon_pos[1], "放弃", event)
+            # 点「放弃」按钮（重新拉消息拿最新位置；失败回退②用事件快照）
+            refetched = await _refetch_card(ctx, client, chat_id, msg_id, event) or message
+            _, _, abandon_pos = _parse_card(refetched)
+            if abandon_pos:
+                await _click_btn(
+                    ctx,
+                    client,
+                    chat_id,
+                    msg_id,
+                    abandon_pos[0],
+                    abandon_pos[1],
+                    "放弃",
+                    event,
+                    snapshot=message,
+                )
+            else:
+                ctx.log.warning("找不到「放弃」按钮 卡#%s msg=%s", card_id, msg_id)
 
             net = cum_payout - cells_revealed * 100
             await ctx.notify(
