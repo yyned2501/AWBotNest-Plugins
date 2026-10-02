@@ -189,21 +189,32 @@ def _is_scratch_card(message: object) -> bool:
 
 
 def _is_own_card(message: object, names: tuple[str, ...]) -> bool:
-    """归属判定（SPEC §12.1 真机实测）：卡面文本含「玩家：<本账号显示名>」。
+    """归属判定（SPEC §12.1 真机实测 + 规则 A）：卡面「玩家：」字段是本账号显示名。
 
     卡片是 Bot 独立发出的消息（实测 ``reply_to_msg_id=None``，不回复任何人的 ``/scratch``），
     所以 ``event.get_reply_message()`` 的 ``out`` 标记恒为 None，**不能**用来判归属。
 
-    名字后面必须紧跟行尾或非 ``\\w`` 字符：``玩家：Yy2`` / ``玩家：Yy晴`` 是别人以本账号名字为
-    前缀的卡，认了就是花钱路径上的假阳性（本插件原则是「宁漏不抢」）；``玩家：Yy``（行尾）、
-    ``玩家：Yy IX``（空格）、``玩家：Yy（我）``（全角括号）都算本账号。
+    取「玩家：」之后的**整行字段**（``strip()``）后只认两种形态：
+
+    ① 字段与某个候选名**完全相等** —— 真机卡面 ``玩家：Yy`` 走这条；
+    ② 字段是「候选名 + 一整段括号注记」（``玩家：Yy（我）``），Bot 追加注记时仍算本账号。
+
+    不允许「候选名 + 空格 + 任意内容」：``玩家：Yy Zhang2`` 与真机 ``玩家：Yy IX``（自己）在
+    字符串上同形，任何前缀规则都必然二选一；漏判 = 不刮 = 零开销，误判 = 点别人的卡 = 真花钱，
+    所以取最保守的整行字段族（本插件原则「宁漏不抢」）。
     """
     text = _message_text(message)
-    for name in names:
-        if not name:
+    for raw_line in text.splitlines():
+        if "玩家：" not in raw_line:
             continue
-        if re.search(re.escape(f"玩家：{name}") + r"(?!\w)", text):
-            return True
+        field = raw_line.split("玩家：", 1)[1].strip()
+        for name in names:
+            if not name:
+                continue
+            if field == name:
+                return True
+            if re.fullmatch(re.escape(name) + r"\s*[（(][^（()）]*[)）]", field):
+                return True
     return False
 
 
