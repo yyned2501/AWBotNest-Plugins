@@ -161,3 +161,35 @@ git status --short && git log --oneline -1
 ## 11. 冲突规则
 
 本 spec 与现有代码/参考实现冲突时，**以本 spec 为准**；spec 自身有问题（例如某个 API 在 Telethon 1.44 不存在）→ **停下来把实测证据贴回卡里提问**，不许自行改契约（尤其不许改配置项语义、不许为了绕障碍改玩法）。
+
+## 12. 真机实测契约（2026-10-02，实例 18001，账号 yy7221，实测推翻前文假设）
+
+> **本节优先级高于 §9 中与之冲突的条目。** 来源：真实群 `-1001326208894` 发 `/scratch` 后抓取的卡片 #3286/#3289/#3290。
+
+### 12.1 卡片归属：不回复任何人（推翻 §9.3）
+
+- 卡片是 bot（`8907007783` 天空小秘）**独立发出的消息**，实测 `reply_to_msg_id = None` —— **它不回复任何人的 `/scratch`**。
+- 因此 §9.3 的归属判定 `(await event.get_reply_message()).out` **在刮刮乐场景下恒为 None**，handler 在 `🎰 识别到刮刮乐` 日志之前静默 return。
+- **实测证据**：连续 4 张卡（#3285/3286/3289/3290）插件零动作，实例日志中「识别到刮刮乐」计数 = **0**。
+- §9.3 引用 `skyDropAnswer` 的 `get_reply_message().out` 是**答题场景**（用户 reply 题目消息），**形态不同，不可照搬** —— 该引用无效。
+- **替代判定**：卡片文本含 `刮刮乐` **且** 文本含 `玩家：<本账号显示名>`（实测卡面 `玩家：Yy`；账号 `DoBgcYy_IX` 的 first_name = `Yy`）。
+
+### 12.2 按钮 data 路径：`button.type.data`（推翻 §9.1 回退①）
+
+- Telethon 1.44 的 `message.reply_markup.rows[r].buttons[c]` 返回 **`KeyboardInlineButton`**，**没有 `.data` 属性**（实测 `dir()` 中不存在）。
+- 真实回调数据在 **`button.type.data`**，实测 `b'scratch:3290:1'`（`button.type` 为 `InlineButtonTypeCallback`）。
+- 因此 `getattr(button, "data", b"")` 恒为空 → `_is_scratch_card` 恒为 False —— **与 12.1 相互独立的第二个根因**。
+- 正确写法：`getattr(getattr(button, "type", None), "data", b"")`；点击仍走 `message.click(...)`（Telethon 自行解析 TL，不必手拆 data）。
+- **卡片形态**：`rows = 4`，按钮 11 个 = `未刮开`×9 + `一键刮开` + `放弃`。
+
+### 12.3 其他实测
+
+- **卡片生命周期短**：发出后约 5 分钟即从历史不可读（bot 回收）。真机验收必须**发完立刻抓**。
+- `get_messages(chat_id, ids=[...])` 在**冷连接**（未 `get_dialogs`）下**返回 None 而不抛错**；平台常驻 client 不受影响 —— §9.1 的重拉实测**通过**（实例探针已验证主写法与回退①均可用）。
+- **平台 `proxy_url` 必须是 `socks5://192.168.31.10:7890`**：写 `http://` 时到 DC5 的 MTProto 必超时（账号永不上线 → 插件 raise「没有可用的 user Telegram 客户端」）。同一 7890 端口两种协议行为不同，已实测对照。
+
+### 12.4 测试与验收口径修订
+
+- 现有 17 个测试**对真机无效**：夹具自造了 `button.data`，与真机 `KeyboardInlineButton.type.data` 不符，且未覆盖 `reply_to=None`。两处必须按真机形态补测试。
+- §9.5 真机验收口径：**插件在群里自动刮开 ≥1 格且解析出派奖数**才算通过；「开出卡片」不算。
+
