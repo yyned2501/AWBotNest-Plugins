@@ -12,7 +12,13 @@ from typing import Any
 
 import pytest
 
-from plugins_v2.skyGame.games.hdsky import HdskyClient, _DebugRecorder, _redact, is_csrf_error
+from plugins_v2.skyGame.games.hdsky import (
+    HdskyClient,
+    _DebugRecorder,
+    _redact,
+    is_csrf_error,
+    resolve_proxy,
+)
 
 
 class _FakeResp:
@@ -301,3 +307,49 @@ async def test_client_does_not_trace_when_debug_disabled(tmp_path: Path) -> None
     assert client._debug is None
     await client.get("/api/portal/horse")
     assert not f.exists()
+
+
+# ── 出站代理：门户按来源 IP 拦站时，插件必须能走代理（v1.28.9）──
+
+
+def test_resolve_proxy_precedence_and_direct() -> None:
+    class Settings:
+        def __init__(self, value: str) -> None:
+            self.proxy_url = value
+
+    class Ctx:
+        def __init__(self, cfg_proxy: str, sys_proxy: str) -> None:
+            self.config = {"hdsky_proxy": cfg_proxy}
+            self.settings = Settings(sys_proxy)
+
+    assert resolve_proxy(Ctx("http://cfg:1", "http://sys:2")) == "http://cfg:1"  # 配置项优先
+    assert resolve_proxy(Ctx("", "http://sys:2")) == "http://sys:2"  # 留空跟随系统设置
+    for direct in ("none", "off", "direct", "DIRECT", "直连"):
+        assert resolve_proxy(Ctx(direct, "http://sys:2")) == "", direct  # 显式强制直连
+    assert resolve_proxy(Ctx("", "")) == ""
+
+
+def test_resolve_proxy_without_platform_settings_attr() -> None:
+    class Legacy:
+        config = {"hdsky_proxy": ""}
+
+    assert resolve_proxy(Legacy()) == ""  # 老平台没有 ctx.settings 时退化为直连，不抛异常
+
+
+@pytest.mark.asyncio
+async def test_configure_swaps_client_only_when_proxy_changes() -> None:
+    client = HdskyClient(cookie_file="/nonexistent_cookie.txt", base_url="https://example.test")
+    first = client._http
+
+    client.configure("", "https://example.test", proxy="http://192.168.31.10:7890")
+    assert client._proxy == "http://192.168.31.10:7890"
+    second = client._http
+    assert second is not first
+
+    client.configure("", "https://example.test", proxy="http://192.168.31.10:7890")
+    assert client._http is second  # 代理没变不重建连接池
+
+    client.configure("", "https://example.test", proxy=None)
+    assert client._http is second  # 不传 proxy = 不改动
+
+    await client.aclose()

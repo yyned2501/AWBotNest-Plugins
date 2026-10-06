@@ -31,7 +31,7 @@ import json
 import re
 
 from . import ai_review, drop_guard, hdsky_auth
-from .hdsky import HdskyClient, request_key
+from .hdsky import HdskyClient, request_key, resolve_proxy
 
 _task: asyncio.Task[None] | None = None
 
@@ -546,6 +546,7 @@ async def _care_loop(ctx: object) -> None:
                         str(cfg.get("hdsky_base_url", "") or ""),
                         debug_enabled=bool(cfg.get("hdsky_debug", False)),
                         debug_file=str(cfg.get("hdsky_debug_file", "") or ""),
+                        proxy=resolve_proxy(ctx, cfg),
                     )
                 except Exception as cfg_exc:
                     ctx.log.error(

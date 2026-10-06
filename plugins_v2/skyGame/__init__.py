@@ -30,7 +30,7 @@ from .games import hdsky_auth, kv_facade
 __plugin__ = {
     "name": "天空游戏",
     "id": "skyGame",
-    "version": "1.28.8",
+    "version": "1.28.9",
     "author": "Yy",
     "description": "天空系列游戏统一入口：炸金花/养马/十点半自动参与、幸运轮盘免费抽奖，左侧按游戏分组配置。",
     "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/skyGame.svg",
@@ -39,7 +39,7 @@ __plugin__ = {
     "cookie_domains": ["hdsky.supertimi.de", "hdsky.me"],
     "render_mode": "vue",
     "default_enabled": False,
-    "requirements": ["httpx>=0.27"],
+    "requirements": ["httpx>=0.28"],
     "tags": ["炸金花", "养马", "十点半", "Cookie 续期"],
     "config_schema": {
         # ── 全局设置 ──
@@ -58,12 +58,22 @@ __plugin__ = {
             "section": "全局设置",
             "order": 4,
         },
+        "hdsky_proxy": {
+            "type": "string",
+            "default": "",
+            "label": "出站代理",
+            "section": "全局设置",
+            "help": "门户与 PT 站的请求走这个代理，例如 http://192.168.31.10:7890。"
+            "留空=跟随系统设置里的代理；填 none 或 直连 = 强制直连。"
+            "门户按来源 IP 拦站时（日志报 All connection attempts failed / Connection refused）必须走代理。",
+            "order": 45,
+        },
         "hdsky_debug": {
             "type": "boolean",
             "default": False,
             "label": "门户调试记录",
             "section": "全局设置",
-            "order": 5,
+            "order": 46,
             "help": "开启后把每次门户 API 的请求与响应（脱敏后）追加写入调试文件，"
             "供事后核对实际请求；不改变平台日志级别",
         },
@@ -72,7 +82,7 @@ __plugin__ = {
             "default": "/app/data/hdsky_debug.jsonl",
             "label": "调试记录文件路径",
             "section": "全局设置",
-            "order": 6,
+            "order": 47,
             "help": "容器内 JSONL 路径（宿主 appdata/awbotnest/data 目录）；超过 10MB 自动轮转为 .1",
         },
         # ── Cookie 自动续期 ──

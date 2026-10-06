@@ -165,11 +165,11 @@ async def test_renew_reuses_platform_session(monkeypatch: pytest.MonkeyPatch) ->
     renewer = CookieRenewer(ctx)
     login_called = {"n": 0}
 
-    async def alive(cookie_file: str, base_url: str, cookie_header: str = "") -> bool:
+    async def alive(cookie_file: str, base_url: str, cookie_header: str = "", proxy: str = "") -> bool:
         assert cookie_header == "hdsky_portal_session=platform"
         return True
 
-    async def no_login(self: CookieRenewer, base: str) -> None:
+    async def no_login(self: CookieRenewer, base: str, proxy: str = "") -> None:
         login_called["n"] += 1
 
     monkeypatch.setattr("plugins_v2.skyGame.games.hdsky_auth.session_alive", alive)
@@ -182,18 +182,18 @@ async def test_renew_reuses_platform_session(monkeypatch: pytest.MonkeyPatch) ->
 
 
 async def test_renew_falls_back_to_portal_login(monkeypatch: pytest.MonkeyPatch) -> None:
-    """平台快照里的门户会话已失效（探测不通）→ 转 PT 站验证码自动登录。"""
+    """平台快照里的门户会话已失效（探测不通）→ 转 PT 站验证码自动登录，并带上代理。"""
     ctx = FakeCtx()
     ctx.cookies = FakeCookies({"hdsky.supertimi.de": "hdsky_portal_session=stale"})
     renewer = CookieRenewer(ctx)
     seen: dict[str, Any] = {}
 
-    async def alive(cookie_file: str, base_url: str, cookie_header: str = "") -> bool:
+    async def alive(cookie_file: str, base_url: str, cookie_header: str = "", proxy: str = "") -> bool:
         seen["header"] = cookie_header
         return False
 
-    async def login(self: CookieRenewer, base: str) -> None:
-        seen["base"] = base
+    async def login(self: CookieRenewer, base: str, proxy: str = "") -> None:
+        seen["base"], seen["proxy"] = base, proxy
 
     monkeypatch.setattr("plugins_v2.skyGame.games.hdsky_auth.session_alive", alive)
     monkeypatch.setattr(CookieRenewer, "_login_portal", login)
@@ -201,6 +201,7 @@ async def test_renew_falls_back_to_portal_login(monkeypatch: pytest.MonkeyPatch)
     await renewer._do_renew()
 
     assert seen["header"] == "hdsky_portal_session=stale" and seen["base"]
+    assert seen["proxy"] == ""  # 无系统代理设置时直连
 
 
 async def test_login_portal_without_pt_cookie_raises(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -211,6 +212,38 @@ async def test_login_portal_without_pt_cookie_raises(monkeypatch: pytest.MonkeyP
 
     with pytest.raises(RenewError, match="hdsky.me"):
         await renewer._login_portal("https://hdsky.supertimi.de")
+
+
+async def test_login_portal_uses_resolved_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """出站代理要真的传到门户与 PT 站两个客户端（家宽直连被站方拒连时的唯一出路）。"""
+    ctx = FakeCtx({"hdsky_proxy": "http://192.168.31.10:7890"})
+    ctx.cookies = FakeCookies({"hdsky.me": "c_secure_uid=aaa"})  # 无门户会话 → 直接进验证码登录
+    renewer = CookieRenewer(ctx)
+    built: list[str] = []
+
+    class _NullClient:
+        async def __aenter__(self) -> Any:
+            return self
+
+        async def __aexit__(self, *exc: object) -> None:
+            return None
+
+    def fake_client(*args: Any, **kwargs: Any) -> _NullClient:
+        value = kwargs.get("proxy", args[0] if args else "")
+        built.append(str(value or ""))
+        return _NullClient()
+
+    async def stop_here(self: CookieRenewer, http: Any, url: str, headers: dict[str, str]) -> Any:
+        raise RenewError("到此为止")
+
+    monkeypatch.setattr("plugins_v2.skyGame.games.hdsky_auth.make_client", fake_client)
+    monkeypatch.setattr("plugins_v2.skyGame.games.hdsky_auth.httpx.AsyncClient", fake_client)
+    monkeypatch.setattr(CookieRenewer, "_pt_get", stop_here)
+
+    with pytest.raises(RenewError, match="到此为止"):
+        await renewer._do_renew()
+
+    assert built == ["http://192.168.31.10:7890", "http://192.168.31.10:7890"]
 
 
 async def test_login_portal_writes_renewed_cookie(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:

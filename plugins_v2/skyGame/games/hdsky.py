@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import json
 import os
@@ -39,6 +40,30 @@ _CSRF_MAX_AGE = 1800
 def request_key() -> str:
     """门户幂等键：web_ + 32 位 hex（与前端 createRequestKey 一致）。"""
     return "web_" + secrets.token_hex(16)
+
+
+# 显式写这几个值 = 强制直连（不跟随系统代理）
+_DIRECT_VALUES = {"none", "direct", "off", "直连", "无"}
+
+
+def resolve_proxy(ctx: Any, cfg: dict | None = None) -> str:
+    """门户/PT 站出站代理：配置项优先，留空跟随系统设置的代理，返回空串表示直连。
+
+    门户常按来源 IP 拦站（家宽直连被拒、浏览器走实例代理却通），插件必须能走代理；
+    V2 平台不会把系统代理导出成环境变量，httpx 的 trust_env 在这里不起作用。
+    """
+    cfg = cfg if cfg is not None else getattr(ctx, "config", {}) or {}
+    value = str(cfg.get("hdsky_proxy", "") or "").strip()
+    if value.lower() in _DIRECT_VALUES:
+        return ""
+    if value:
+        return value
+    return str(getattr(getattr(ctx, "settings", None), "proxy_url", "") or "").strip()
+
+
+def make_client(proxy: str = "") -> httpx.AsyncClient:
+    """门户是自签证书，一律禁用校验；proxy 为空即直连。"""
+    return httpx.AsyncClient(verify=make_ssl_ctx(), proxy=proxy or None)
 
 
 def is_csrf_error(data: dict[str, Any]) -> bool:
@@ -150,14 +175,16 @@ class HdskyClient:
         base_url: str = "",
         log: Any = None,
         cookie_provider: CookieProvider | None = None,
+        proxy: str = "",
     ) -> None:
         self._cookie_file = cookie_file or DEFAULT_COOKIE_FILE
         self._base = (base_url or DEFAULT_BASE_URL).rstrip("/")
         self._log = log
         self._cookie_provider = cookie_provider
+        self._proxy = proxy or ""
         self._renewer: Callable[[], Awaitable[bool]] | None = None
         self._debug: _DebugRecorder | None = None
-        self._http = httpx.AsyncClient(verify=make_ssl_ctx())
+        self._http = make_client(self._proxy)
 
     async def __aenter__(self) -> HdskyClient:
         return self
@@ -176,6 +203,7 @@ class HdskyClient:
         *,
         debug_enabled: bool = False,
         debug_file: str = "",
+        proxy: str | None = None,
     ) -> None:
         """热更新连接参数（每轮轮询开头调用一次即可，值不变时无副作用）。"""
         self._cookie_file = cookie_file or DEFAULT_COOKIE_FILE
@@ -183,7 +211,18 @@ class HdskyClient:
         if base != self._base:
             self._base = base
             self.reset_csrf()
+        if proxy is not None and proxy != self._proxy:
+            self._set_proxy(proxy)
         self._debug = _DebugRecorder(debug_file or DEFAULT_DEBUG_FILE) if debug_enabled else None
+
+    def _set_proxy(self, proxy: str) -> None:
+        """换代理要重建底层连接池（httpx 的代理在客户端上，不能按请求改）。"""
+        old, self._http = self._http, make_client(proxy)
+        self._proxy = proxy
+        try:
+            asyncio.get_running_loop().create_task(old.aclose())
+        except RuntimeError:  # 不在事件循环里（单测直接调用）：交给 GC 收敛
+            pass
 
     def reset_csrf(self) -> None:
         """作废共享缓存的 CSRF（接口报错或换站时调用，下次 POST 自动重取）。"""

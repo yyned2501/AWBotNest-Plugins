@@ -26,7 +26,7 @@ import time
 from typing import Any
 
 from .. import ai_review, drop_guard, hdsky_auth
-from ..hdsky import HdskyClient
+from ..hdsky import HdskyClient, resolve_proxy
 from .zjh_hand import (
     _acquire_hand_after_peek,
     _extract_hand_value,
@@ -516,6 +516,7 @@ async def _poll_loop(ctx: object) -> None:
                     str(cfg.get("hdsky_base_url", "") or ""),
                     debug_enabled=bool(cfg.get("hdsky_debug", False)),
                     debug_file=str(cfg.get("hdsky_debug_file", "") or ""),
+                    proxy=resolve_proxy(ctx, cfg),
                 )
                 seen_threshold = float(cfg.get("zjh_peeked_threshold", 50)) / 100
 

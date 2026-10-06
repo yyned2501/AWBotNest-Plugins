@@ -65,7 +65,7 @@ import json
 import re
 
 from . import ai_review, drop_guard, hdsky_auth
-from .hdsky import HdskyClient, request_key
+from .hdsky import HdskyClient, request_key, resolve_proxy
 
 _TARGET = 10.5
 _STATE_PATH = "/api/portal/tenhalf"
@@ -1267,6 +1267,7 @@ def start(ctx: object) -> None:
                     str(cfg.get("hdsky_base_url", "") or ""),
                     debug_enabled=bool(cfg.get("hdsky_debug", False)),
                     debug_file=str(cfg.get("hdsky_debug_file", "") or ""),
+                    proxy=resolve_proxy(ctx, cfg),
                 )
                 await _once(ctx, cfg, client)
         except Exception as e:

@@ -18,13 +18,12 @@ import asyncio
 import html as html_lib
 import os
 import re
-import ssl
 import time
 from typing import Any
 
 import httpx
 
-from .hdsky import DEFAULT_BASE_URL, DEFAULT_COOKIE_FILE, make_ssl_ctx, read_portal_session
+from .hdsky import DEFAULT_BASE_URL, DEFAULT_COOKIE_FILE, make_client, read_portal_session, resolve_proxy
 
 DEFAULT_HDSKY_UID = "105577"
 DEFAULT_CHECK_INTERVAL = 1800
@@ -83,7 +82,7 @@ def write_portal_cookie(path: str, value: str, max_age: float) -> None:
     os.replace(tmp, path)
 
 
-async def session_alive(cookie_file: str, base_url: str, cookie_header: str = "") -> bool:
+async def session_alive(cookie_file: str, base_url: str, cookie_header: str = "", proxy: str = "") -> bool:
     """快速探测门户会话是否有效（GET /api/portal/session）。"""
     cookie = read_portal_session(cookie_file or DEFAULT_COOKIE_FILE)
     base = (base_url or DEFAULT_BASE_URL).rstrip("/")
@@ -93,7 +92,7 @@ async def session_alive(cookie_file: str, base_url: str, cookie_header: str = ""
     elif cookie:
         headers["Cookie"] = f"{PORTAL_COOKIE_NAME}={cookie}"
     try:
-        async with httpx.AsyncClient(verify=make_ssl_ctx(), timeout=10) as http:
+        async with make_client(proxy) as http:
             resp = await http.get(f"{base}/api/portal/session", headers=headers)
         return resp.status_code == 200 and bool(resp.json().get("csrfToken"))
     except Exception:
@@ -131,6 +130,11 @@ class CookieRenewer:
             except RenewError as e:
                 self._on_fail(str(e))
                 return False
+            except httpx.ConnectError as e:
+                self._on_fail(
+                    f"门户/PT 站连不上（{e}）；直连被站方拒时请在「全局设置 → 出站代理」填代理地址"
+                )
+                return False
             except Exception as e:  # 最外层边界：收敛一切异常为失败通知
                 self._on_fail(f"意外异常: {e!r}")
                 return False
@@ -153,24 +157,26 @@ class CookieRenewer:
 
     async def _do_renew(self) -> None:
         """续期主流程：先复用平台同步的门户会话，拿不到则用 PT 站 Cookie 自动登录。"""
-        base = str(self._ctx.config.get("hdsky_base_url", "") or DEFAULT_BASE_URL).rstrip("/")
-        if await self._use_platform_session(base):
+        cfg = self._ctx.config
+        base = str(cfg.get("hdsky_base_url", "") or DEFAULT_BASE_URL).rstrip("/")
+        proxy = resolve_proxy(self._ctx, cfg)
+        if await self._use_platform_session(base, proxy):
             return
-        await self._login_portal(base)
+        await self._login_portal(base, proxy)
 
-    async def _use_platform_session(self, base: str) -> bool:
+    async def _use_platform_session(self, base: str, proxy: str) -> bool:
         """平台 CookieCloud 里的门户会话仍有效则复用；不可用返回 False（不抛错）。"""
         cookie_header = await cookie_provider(self._ctx)
         if not cookie_header:
             return False
-        if not await session_alive("", base, cookie_header):
+        if not await session_alive("", base, cookie_header, proxy):
             self._ctx.log.info("平台同步的门户会话已失效，改用 PT 站验证码自动登录")
             return False
         self._ctx.log.info("已使用平台 CookieCloud 同步的 HDSky 会话")
         await self._notify("续期成功：已使用平台 CookieCloud 同步的门户会话")
         return True
 
-    async def _login_portal(self, base: str) -> None:
+    async def _login_portal(self, base: str, proxy: str = "") -> None:
         """PT 站验证码自动登录门户，新会话写入本地 cookie 文件供客户端兜底读取。"""
         cookies = getattr(self._ctx, "cookies", None)
         if cookies is None or not getattr(cookies, "available", False):
@@ -183,11 +189,9 @@ class CookieRenewer:
 
         pt_headers = {"Cookie": pt_cookie, "User-Agent": _BROWSER_UA, "Referer": f"{PT_BASE}/messages.php"}
         portal_headers = {"User-Agent": _BROWSER_UA, "Origin": base, "Referer": f"{base}/portal"}
-        # PT 站走平台出站代理（与浏览器同出口 IP 以过 Cloudflare）
-        ssl_ctx: ssl.SSLContext = make_ssl_ctx()
         async with (
-            httpx.AsyncClient(verify=ssl_ctx, timeout=15) as portal_http,
-            httpx.AsyncClient(timeout=15) as pt_http,
+            make_client(proxy) as portal_http,
+            httpx.AsyncClient(proxy=proxy or None, timeout=15) as pt_http,
         ):
             before = set(latest_message_ids((await self._pt_get(pt_http, f"{PT_BASE}/messages.php", pt_headers)).text))
 
@@ -317,10 +321,11 @@ async def _watchdog(ctx: Any) -> None:
             if cfg.get("auth_auto_renew", True):
                 cookie_file = str(cfg.get("hdsky_cookie_file", "") or DEFAULT_COOKIE_FILE)
                 base = str(cfg.get("hdsky_base_url", "") or DEFAULT_BASE_URL)
+                proxy = resolve_proxy(ctx, cfg)
                 cookie_header = await cookie_provider(ctx)
-                alive = bool(cookie_header) and await session_alive("", base, cookie_header)
+                alive = bool(cookie_header) and await session_alive("", base, cookie_header, proxy)
                 if not alive:  # 平台没给会话（或已失效）时再看本地续期落盘的会话
-                    alive = await session_alive(cookie_file, base)
+                    alive = await session_alive(cookie_file, base, proxy=proxy)
                 if not alive:
                     ctx.log.info("体检发现门户会话失效，触发续期")
                     await renewer.renew()

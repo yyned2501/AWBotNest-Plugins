@@ -17,7 +17,7 @@ from __future__ import annotations
 import datetime
 
 from . import ai_review, hdsky_auth
-from .hdsky import HdskyClient, request_key
+from .hdsky import HdskyClient, request_key, resolve_proxy
 
 _KV_LAST_DRAW_DATE = "lucky:last_draw_date"
 
@@ -108,6 +108,7 @@ async def _lucky_tick(ctx: object) -> None:
             str(cfg.get("hdsky_base_url", "") or ""),
             debug_enabled=bool(cfg.get("hdsky_debug", False)),
             debug_file=str(cfg.get("hdsky_debug_file", "") or ""),
+            proxy=resolve_proxy(ctx, cfg),
         )
         if await draw_free_spins(ctx, cfg, client):
             ctx.kv.set(_KV_LAST_DRAW_DATE, datetime.datetime.now().strftime("%Y-%m-%d"))
