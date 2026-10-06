@@ -191,7 +191,7 @@ class CookieRenewer:
         portal_headers = {"User-Agent": _BROWSER_UA, "Origin": base, "Referer": f"{base}/portal"}
         async with (
             make_client(proxy) as portal_http,
-            httpx.AsyncClient(proxy=proxy or None, timeout=15) as pt_http,
+            make_client(proxy, secure=True, timeout=15) as pt_http,
         ):
             before = set(latest_message_ids((await self._pt_get(pt_http, f"{PT_BASE}/messages.php", pt_headers)).text))
 

@@ -61,9 +61,9 @@ def resolve_proxy(ctx: Any, cfg: dict | None = None) -> str:
     return str(getattr(getattr(ctx, "settings", None), "proxy_url", "") or "").strip()
 
 
-def make_client(proxy: str = "") -> httpx.AsyncClient:
-    """门户是自签证书，一律禁用校验；proxy 为空即直连。"""
-    return httpx.AsyncClient(verify=make_ssl_ctx(), proxy=proxy or None)
+def make_client(proxy: str = "", *, secure: bool = False, timeout: float | None = None) -> httpx.AsyncClient:
+    """插件唯一的 HTTP 出口封装：默认禁用证书校验（门户自签），secure=True 走正常校验（PT 站/Cloudflare）。"""
+    return httpx.AsyncClient(verify=True if secure else make_ssl_ctx(), proxy=proxy or None, timeout=timeout)
 
 
 def is_csrf_error(data: dict[str, Any]) -> bool:
