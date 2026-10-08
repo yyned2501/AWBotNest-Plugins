@@ -1014,7 +1014,7 @@ return (_ctx, _cache) => {
                                 }, null, 512), [
                                   [_vModelCheckbox, cfg.tenhalf_notify]
                                 ]),
-                                _cache[141] || (_cache[141] = _createElementVNode("span", null, "报名/结算推送", -1))
+                                _cache[141] || (_cache[141] = _createElementVNode("span", null, "仅异常告警（报名失败/轮询异常）", -1))
                               ])
                             ])
                           ])
@@ -1251,6 +1251,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const Config = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-67a35615"]]);
+const Config = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-5efb12ad"]]);
 
 export { Config as default };

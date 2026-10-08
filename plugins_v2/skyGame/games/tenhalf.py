@@ -20,7 +20,8 @@
 #   主要收益，多一局是一份）；满了之后领不到掉落，只打名单里值得用银元去打的庄家，
 #   名单为空则满了就不再新报名。勾选「指定庄家始终生效」（tenhalf_dealer_always）则
 #   回到 v1.24.0 专打语义：无论配额满不满都只打名单里的庄家。
-# 推送策略：每局只在报名成功与结算时各推一次，要牌/停牌过程不推送（只记日志）
+# 推送策略：全程不推送（v1.28.5 停结算推送、v1.29.0 停报名推送），报名/决策/结算只记运行日志；
+#   tenhalf_notify 现在只管报名失败与轮询异常两类告警
 #   结算后若有本局决策轨迹，用平台 AI 在群聊总结「心路历程」（v1.23.15 起、v1.23.16 抽成
 #   games/ai_review.py 通用模块）：赢了炫决策、输了吐槽庄家运气好（带庄家简称）；
 #   prompt 只喂动作序列与输赢，绝不含 EV 数值；平台无 AI/失败静默跳过，不阻塞结算
@@ -89,7 +90,7 @@ _HISTORY_SCAN_CAP = 10
 _DEALER_CARDS_KEY = "tenhalf:dealer_cards"
 _CARDS_STASH_CAP = 30
 # 本局决策轨迹暂存：每次要牌/停牌/认输提交成功后记一条（点数/手牌/动作/拿牌EV/停牌EV/认输EV），
-# 结算推送时拼进表格（过程不推送，每局只在结算时推一次）。
+# 结算时取出让平台 AI 生成群聊点评（游戏本身不推送，v1.29.0 起报名与结算均静默）。
 _DECISION_LOG_KEY = "tenhalf:decision_log"
 _DECISION_LOG_CAP = 30
 _ACTION_LABELS = {"hit": "要牌", "stand": "停牌", "fold": "认输"}
@@ -981,14 +982,6 @@ async def _safe_notify(ctx: object, message: str, **kwargs: object) -> None:
         ctx.log.warning("十点半通知发送失败（渠道暂不可用）: %r", e)
 
 
-async def _safe_notify_table(ctx: object, header: list, rows: list, **kwargs: object) -> None:
-    """_safe_notify 的表格版，同样吞异常只记日志。"""
-    try:
-        await ctx.notify_table(header, rows, **kwargs)
-    except Exception as e:
-        ctx.log.warning("十点半通知发送失败（渠道暂不可用）: %r", e)
-
-
 async def _settle_round(ctx: object, cfg: dict, rid: object, settlement: dict) -> None:
     """入账一局结算：记庄家画像；我方参局则累计战绩。
 
@@ -1076,12 +1069,6 @@ async def _try_join(ctx: object, cfg: dict, client: HdskyClient, game: dict, lim
     if result.get("ok", r.get("ok", False)):
         ctx.kv.set(_JOINED_ROUND_KEY, str(rid))  # 记录报名局号，供结算补扫定位
         ctx.log.info("加入十点半 #%s（下注 %s，单桌上限 %s）", rid, amount, game.get("amount"))
-        if cfg.get("tenhalf_notify", True):
-            await _safe_notify(
-                ctx,
-                f"🎲 加入十点半 #{rid}，下注 {amount:,} 银元（单桌上限 {game.get('amount')}）",
-                category="十点半",
-            )
         return
     ctx.kv.set(_JOIN_FAIL_KEY, str(rid))
     msg = result.get("message") or r.get("error") or "未知"
@@ -1101,7 +1088,7 @@ async def _submit_action(
     ev_stand: float | None = None,
     ev_fold: float | None = None,
 ) -> None:
-    """提交要牌/停牌/认输。同局同点数同动作去重；过程不推送，每局只在结算时推一次。"""
+    """提交要牌/停牌/认输。同局同点数同动作去重；过程不推送，只记日志与本局决策轨迹。"""
     rid = game.get("roundId")
     sig = f"{rid}:{action}:{total:g}"
     if ctx.kv.get(_LAST_ACTION_KEY, "") == sig:

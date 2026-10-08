@@ -517,7 +517,7 @@ async function renewNow() {
                 <span class="lbl">十点半通知</span>
                 <label class="row switch">
                   <input v-model="cfg.tenhalf_notify" type="checkbox" />
-                  <span>报名/结算推送</span>
+                  <span>仅异常告警（报名失败/轮询异常）</span>
                 </label>
               </div>
             </div>

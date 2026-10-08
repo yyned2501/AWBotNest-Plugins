@@ -736,7 +736,8 @@ async def test_signup_joins_with_clamped_amount() -> None:
     body = client.posts[0][1]
     assert body["action"] == "join" and body["amount"] == 500  # 夹到单桌上限
     assert "requestKey" in body
-    assert any("加入十点半" in str(msg) for msg, _ in ctx.notifications)
+    assert ctx.notifications == []  # v1.29.0：报名不推送，只在运行日志留痕
+    assert any("加入十点半" in msg for _, msg in ctx.log.records)
 
 
 @pytest.mark.asyncio
@@ -937,17 +938,14 @@ async def test_notify_failure_does_not_break_poll() -> None:
         async def notify(self, message: object, *args: object, **kwargs: object) -> None:
             raise RuntimeError("无可用通知渠道")
 
-        async def notify_table(self, *args: object, **kwargs: object) -> None:
-            raise RuntimeError("无可用通知渠道")
-
     ctx = _BrokenCtx()
-    # 结算已不推表格，这里用报名成功的通知触发坏渠道，验证异常被吞不冒泡
-    client = _FakeClient(_game(phase="signup", actions=["join"]), _OK)
+    # 报名/结算都不推送了，用仍会推送的「报名失败告警」验证异常被吞、不打断轮询
+    client = _FakeClient(_game(phase="signup", actions=["join"]), _FAIL)
 
     await _once(ctx, {}, client)  # 不抛异常
 
     assert any("通知发送失败" in msg for _, msg in ctx.log.records)
-    assert any("加入十点半" in msg for _, msg in ctx.log.records)
+    assert any("十点半报名失败" in msg for _, msg in ctx.log.records)
 
 
 @pytest.mark.asyncio

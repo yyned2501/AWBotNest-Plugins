@@ -30,7 +30,7 @@ from .games import hdsky_auth, kv_facade
 __plugin__ = {
     "name": "天空游戏",
     "id": "skyGame",
-    "version": "1.28.9",
+    "version": "1.29.0",
     "author": "Yy",
     "description": "天空系列游戏统一入口：炸金花/养马/十点半自动参与、幸运轮盘免费抽奖，左侧按游戏分组配置。",
     "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/skyGame.svg",
@@ -486,7 +486,8 @@ __plugin__ = {
             "default": True,
             "label": "十点半通知",
             "section": "十点半",
-            "help": "报名/要牌停牌决策/结算推送",
+            "help": "只推异常告警（报名失败、轮询异常）。报名/决策/结算本身不推送，仅记运行日志；"
+            "本局决策轨迹交给「AI 评价」生成群聊点评。",
             "order": 46,
         },
         "tenhalf_dealer_keep": {
@@ -591,6 +592,16 @@ __plugin__ = {
         },
     },
     "changelog": (
+        "v1.29.0 变更：\n"
+        "- 十点半移除报名（参与）推送：报名/要牌停牌/结算全程静默，只在运行日志留痕；"
+        "「十点半通知」开关从此只负责报名失败与轮询异常两类告警，"
+        "决策轨迹仍交给「AI 评价」生成群聊点评；\n"
+        "v1.28.9 修复：\n"
+        "- 门户/PT 站出站支持代理：门户按来源 IP 拦站后家宽直连一律 Connection refused，"
+        "十点半/养马全天刷「All connection attempts failed」；"
+        "新增「全局设置 → 出站代理」，留空自动跟随系统设置的代理，填 none/直连 强制直连"
+        "（V2 平台不会把系统代理导出成环境变量，插件必须自己传 proxy）；\n"
+        "- 连不上时通知中心给出「填代理地址」的可执行提示（30 分钟节流）；\n"
         "v1.28.8 修复：\n"
         "- Cookie 续期改为两级：平台 CookieCloud 快照里的门户会话按其 expirationDate 过期后，\n"
         "  平台会过滤掉该 Cookie（即便服务端会话仍有效），插件此前只能报「未获取到平台 Cookie」；\n"
