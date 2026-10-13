@@ -128,18 +128,33 @@ const _hoisted_105 = ["disabled"];
 const _hoisted_106 = { class: "card" };
 const _hoisted_107 = { class: "row switch" };
 const _hoisted_108 = { class: "fld" };
-const _hoisted_109 = { class: "ai-check-group" };
-const _hoisted_110 = ["value"];
-const _hoisted_111 = { class: "card" };
+const _hoisted_109 = { class: "lbl" };
+const _hoisted_110 = { class: "fld" };
+const _hoisted_111 = { class: "lbl" };
 const _hoisted_112 = { class: "fld" };
 const _hoisted_113 = { class: "card" };
-const _hoisted_114 = { class: "fld" };
-const _hoisted_115 = {
+const _hoisted_114 = { class: "row switch" };
+const _hoisted_115 = { class: "grid" };
+const _hoisted_116 = { class: "fld" };
+const _hoisted_117 = { class: "fld" };
+const _hoisted_118 = { class: "fld" };
+const _hoisted_119 = { class: "savebar" };
+const _hoisted_120 = ["disabled"];
+const _hoisted_121 = { class: "card" };
+const _hoisted_122 = { class: "row switch" };
+const _hoisted_123 = { class: "fld" };
+const _hoisted_124 = { class: "ai-check-group" };
+const _hoisted_125 = ["value"];
+const _hoisted_126 = { class: "card" };
+const _hoisted_127 = { class: "fld" };
+const _hoisted_128 = { class: "card" };
+const _hoisted_129 = { class: "fld" };
+const _hoisted_130 = {
   class: "row",
   style: {"justify-content":"flex-end"}
 };
-const _hoisted_116 = { class: "savebar" };
-const _hoisted_117 = ["disabled"];
+const _hoisted_131 = { class: "savebar" };
+const _hoisted_132 = ["disabled"];
 
 const {ref,reactive,onMounted} = await importShared('vue');
 
@@ -191,6 +206,15 @@ const DEFAULTS = {
   // 幸运轮盘
   lucky_enabled: true,
   lucky_draw_time: '23:50',
+  // 刮奖（刮刮乐兜底）
+  scratch_enabled: true,
+  scratch_fallback_minute: 50,
+  scratch_reveal_delay: 0.6,
+  scratch_max_consecutive_loss: 5,
+  scratch_stats_enabled: true,
+  scratch_stats_report_hour: 23,
+  scratch_stats_report_minute: 55,
+  scratch_stats_retention_days: 90,
   // 炸金花
   zjh_enabled: true,
   zjh_poll_interval: 2,
@@ -249,6 +273,7 @@ const GROUPS = [
   { key: 'zjh', label: '炸金花', icon: '🃏' },
   { key: 'tenhalf', label: '十点半', icon: '🎲' },
   { key: 'lucky', label: '幸运轮盘', icon: '🎰' },
+  { key: 'scratch', label: '刮奖', icon: '🎫' },
   { key: 'ai', label: 'AI 评价', icon: '🤖' },
 ];
 
@@ -301,7 +326,7 @@ return (_ctx, _cache) => {
       ? (_openBlock(), _createElementBlock("div", _hoisted_2, "加载配置…"))
       : (_openBlock(), _createElementBlock("div", _hoisted_3, [
           _createElementVNode("aside", _hoisted_4, [
-            _cache[54] || (_cache[54] = _createElementVNode("div", { class: "side-title" }, "游戏", -1)),
+            _cache[62] || (_cache[62] = _createElementVNode("div", { class: "side-title" }, "游戏", -1)),
             (_openBlock(), _createElementBlock(_Fragment, null, _renderList(GROUPS, (g) => {
               return _createElementVNode("button", {
                 key: g.key,
@@ -316,11 +341,11 @@ return (_ctx, _cache) => {
           _createElementVNode("div", _hoisted_7, [
             (group.value === 'global')
               ? (_openBlock(), _createElementBlock(_Fragment, { key: 0 }, [
-                  _cache[77] || (_cache[77] = _createElementVNode("h3", { class: "det-title" }, "全局设置", -1)),
+                  _cache[85] || (_cache[85] = _createElementVNode("h3", { class: "det-title" }, "全局设置", -1)),
                   _createElementVNode("section", _hoisted_8, [
-                    _cache[57] || (_cache[57] = _createElementVNode("div", { class: "card-h" }, "天空小秘机器人", -1)),
+                    _cache[65] || (_cache[65] = _createElementVNode("div", { class: "card-h" }, "天空小秘机器人", -1)),
                     _createElementVNode("div", _hoisted_9, [
-                      _cache[55] || (_cache[55] = _createElementVNode("span", { class: "lbl" }, "机器人", -1)),
+                      _cache[63] || (_cache[63] = _createElementVNode("span", { class: "lbl" }, "机器人", -1)),
                       _withDirectives(_createElementVNode("input", {
                         "onUpdate:modelValue": _cache[0] || (_cache[0] = $event => ((cfg.bot) = $event)),
                         class: "inp",
@@ -328,13 +353,13 @@ return (_ctx, _cache) => {
                       }, null, 512), [
                         [_vModelText, cfg.bot]
                       ]),
-                      _cache[56] || (_cache[56] = _createElementVNode("span", { class: "help" }, "掉落配额守卫使用此配置私聊 /info；留空=默认天空小秘。", -1))
+                      _cache[64] || (_cache[64] = _createElementVNode("span", { class: "help" }, "掉落配额守卫使用此配置私聊 /info；留空=默认天空小秘。", -1))
                     ])
                   ]),
                   _createElementVNode("section", _hoisted_10, [
-                    _cache[59] || (_cache[59] = _createElementVNode("div", { class: "card-h" }, "HDSky 门户（炸金花/养马共用）", -1)),
+                    _cache[67] || (_cache[67] = _createElementVNode("div", { class: "card-h" }, "HDSky 门户（炸金花/养马共用）", -1)),
                     _createElementVNode("div", _hoisted_11, [
-                      _cache[58] || (_cache[58] = _createElementVNode("span", { class: "lbl" }, "门户地址", -1)),
+                      _cache[66] || (_cache[66] = _createElementVNode("span", { class: "lbl" }, "门户地址", -1)),
                       _withDirectives(_createElementVNode("input", {
                         "onUpdate:modelValue": _cache[1] || (_cache[1] = $event => ((cfg.hdsky_base_url) = $event)),
                         class: "inp",
@@ -345,7 +370,7 @@ return (_ctx, _cache) => {
                     ])
                   ]),
                   _createElementVNode("section", _hoisted_12, [
-                    _cache[63] || (_cache[63] = _createElementVNode("div", { class: "card-h" }, "掉落配额守卫", -1)),
+                    _cache[71] || (_cache[71] = _createElementVNode("div", { class: "card-h" }, "掉落配额守卫", -1)),
                     _createElementVNode("label", _hoisted_13, [
                       _withDirectives(_createElementVNode("input", {
                         "onUpdate:modelValue": _cache[2] || (_cache[2] = $event => ((cfg.drop_guard_enabled) = $event)),
@@ -353,14 +378,14 @@ return (_ctx, _cache) => {
                       }, null, 512), [
                         [_vModelCheckbox, cfg.drop_guard_enabled]
                       ]),
-                      _cache[60] || (_cache[60] = _createElementVNode("span", null, "掉落满时暂停游戏参与", -1))
+                      _cache[68] || (_cache[68] = _createElementVNode("span", null, "掉落满时暂停游戏参与", -1))
                     ]),
-                    _cache[64] || (_cache[64] = _createElementVNode("span", {
+                    _cache[72] || (_cache[72] = _createElementVNode("span", {
                       class: "help",
                       style: {"margin-top":"-4px"}
                     }, " 定期私聊天空小秘发 /info 查「当前时段剩余掉落」，剩余为 0 时暂停十点半报名/炸金花入桌/赛马报名 （养马喂食/遛马不受影响），时段刷新后自动恢复；状态切换会通知一次。 十点半若配置了「指定庄家」，掉落满时不是完全停，而是只报名名单内庄家的局 ", -1)),
                     _createElementVNode("div", _hoisted_14, [
-                      _cache[61] || (_cache[61] = _createElementVNode("span", { class: "lbl" }, "掉落检查间隔(分钟)", -1)),
+                      _cache[69] || (_cache[69] = _createElementVNode("span", { class: "lbl" }, "掉落检查间隔(分钟)", -1)),
                       _withDirectives(_createElementVNode("input", {
                         "onUpdate:modelValue": _cache[3] || (_cache[3] = $event => ((cfg.drop_guard_interval) = $event)),
                         class: "inp",
@@ -376,11 +401,11 @@ return (_ctx, _cache) => {
                           { number: true }
                         ]
                       ]),
-                      _cache[62] || (_cache[62] = _createElementVNode("span", { class: "help" }, "多久私聊 bot 发一次 /info；越短对配额满的反应越快", -1))
+                      _cache[70] || (_cache[70] = _createElementVNode("span", { class: "help" }, "多久私聊 bot 发一次 /info；越短对配额满的反应越快", -1))
                     ])
                   ]),
                   _createElementVNode("section", _hoisted_15, [
-                    _cache[68] || (_cache[68] = _createElementVNode("div", { class: "card-h" }, "调试", -1)),
+                    _cache[76] || (_cache[76] = _createElementVNode("div", { class: "card-h" }, "调试", -1)),
                     _createElementVNode("label", _hoisted_16, [
                       _withDirectives(_createElementVNode("input", {
                         "onUpdate:modelValue": _cache[4] || (_cache[4] = $event => ((cfg.hdsky_debug) = $event)),
@@ -388,14 +413,14 @@ return (_ctx, _cache) => {
                       }, null, 512), [
                         [_vModelCheckbox, cfg.hdsky_debug]
                       ]),
-                      _cache[65] || (_cache[65] = _createElementVNode("span", null, "门户调试记录", -1))
+                      _cache[73] || (_cache[73] = _createElementVNode("span", null, "门户调试记录", -1))
                     ]),
-                    _cache[69] || (_cache[69] = _createElementVNode("span", {
+                    _cache[77] || (_cache[77] = _createElementVNode("span", {
                       class: "help",
                       style: {"margin-top":"-4px"}
                     }, " 开启后把每次门户 API 的请求与响应（脱敏后）追加写入下方 JSONL 文件，供事后核对实际请求；不改变平台日志级别 ", -1)),
                     _createElementVNode("div", _hoisted_17, [
-                      _cache[66] || (_cache[66] = _createElementVNode("span", { class: "lbl" }, "调试记录文件路径", -1)),
+                      _cache[74] || (_cache[74] = _createElementVNode("span", { class: "lbl" }, "调试记录文件路径", -1)),
                       _withDirectives(_createElementVNode("input", {
                         "onUpdate:modelValue": _cache[5] || (_cache[5] = $event => ((cfg.hdsky_debug_file) = $event)),
                         class: "inp",
@@ -403,11 +428,11 @@ return (_ctx, _cache) => {
                       }, null, 512), [
                         [_vModelText, cfg.hdsky_debug_file]
                       ]),
-                      _cache[67] || (_cache[67] = _createElementVNode("span", { class: "help" }, "插件数据目录中的 JSONL 文件，超 10MB 自动轮转为 .1", -1))
+                      _cache[75] || (_cache[75] = _createElementVNode("span", { class: "help" }, "插件数据目录中的 JSONL 文件，超 10MB 自动轮转为 .1", -1))
                     ])
                   ]),
                   _createElementVNode("section", _hoisted_18, [
-                    _cache[75] || (_cache[75] = _createElementVNode("div", { class: "card-h" }, "Cookie 自动续期", -1)),
+                    _cache[83] || (_cache[83] = _createElementVNode("div", { class: "card-h" }, "Cookie 自动续期", -1)),
                     _createElementVNode("label", _hoisted_19, [
                       _withDirectives(_createElementVNode("input", {
                         "onUpdate:modelValue": _cache[6] || (_cache[6] = $event => ((cfg.auth_auto_renew) = $event)),
@@ -415,15 +440,15 @@ return (_ctx, _cache) => {
                       }, null, 512), [
                         [_vModelCheckbox, cfg.auth_auto_renew]
                       ]),
-                      _cache[70] || (_cache[70] = _createElementVNode("span", null, "门户会话过期自动续期", -1))
+                      _cache[78] || (_cache[78] = _createElementVNode("span", null, "门户会话过期自动续期", -1))
                     ]),
-                    _cache[76] || (_cache[76] = _createElementVNode("span", {
+                    _cache[84] || (_cache[84] = _createElementVNode("span", {
                       class: "help",
                       style: {"margin-top":"-4px"}
                     }, " 使用平台 CookieCloud 同步 HDSky 门户 Cookie；未同步时平台会在通知中心提醒管理员。 ", -1)),
                     _createElementVNode("div", _hoisted_20, [
                       _createElementVNode("div", _hoisted_21, [
-                        _cache[71] || (_cache[71] = _createElementVNode("span", { class: "lbl" }, "会话体检间隔(秒)", -1)),
+                        _cache[79] || (_cache[79] = _createElementVNode("span", { class: "lbl" }, "会话体检间隔(秒)", -1)),
                         _withDirectives(_createElementVNode("input", {
                           "onUpdate:modelValue": _cache[7] || (_cache[7] = $event => ((cfg.auth_check_interval) = $event)),
                           class: "inp",
@@ -439,10 +464,10 @@ return (_ctx, _cache) => {
                             { number: true }
                           ]
                         ]),
-                        _cache[72] || (_cache[72] = _createElementVNode("span", { class: "help" }, "定期探测+主动续期；轮询遇到 401 也会即时触发", -1))
+                        _cache[80] || (_cache[80] = _createElementVNode("span", { class: "help" }, "定期探测+主动续期；轮询遇到 401 也会即时触发", -1))
                       ]),
                       _createElementVNode("div", _hoisted_22, [
-                        _cache[74] || (_cache[74] = _createElementVNode("span", { class: "lbl" }, "续期通知", -1)),
+                        _cache[82] || (_cache[82] = _createElementVNode("span", { class: "lbl" }, "续期通知", -1)),
                         _createElementVNode("label", _hoisted_23, [
                           _withDirectives(_createElementVNode("input", {
                             "onUpdate:modelValue": _cache[8] || (_cache[8] = $event => ((cfg.auth_notify) = $event)),
@@ -450,7 +475,7 @@ return (_ctx, _cache) => {
                           }, null, 512), [
                             [_vModelCheckbox, cfg.auth_notify]
                           ]),
-                          _cache[73] || (_cache[73] = _createElementVNode("span", null, "结果推送", -1))
+                          _cache[81] || (_cache[81] = _createElementVNode("span", null, "结果推送", -1))
                         ])
                       ])
                     ]),
@@ -472,9 +497,9 @@ return (_ctx, _cache) => {
                 ], 64))
               : (group.value === 'horse')
                 ? (_openBlock(), _createElementBlock(_Fragment, { key: 1 }, [
-                    _cache[103] || (_cache[103] = _createElementVNode("h3", { class: "det-title" }, "养马", -1)),
+                    _cache[111] || (_cache[111] = _createElementVNode("h3", { class: "det-title" }, "养马", -1)),
                     _createElementVNode("section", _hoisted_28, [
-                      _cache[86] || (_cache[86] = _createElementVNode("div", { class: "card-h" }, "基础设置", -1)),
+                      _cache[94] || (_cache[94] = _createElementVNode("div", { class: "card-h" }, "基础设置", -1)),
                       _createElementVNode("label", _hoisted_29, [
                         _withDirectives(_createElementVNode("input", {
                           "onUpdate:modelValue": _cache[9] || (_cache[9] = $event => ((cfg.horse_enabled) = $event)),
@@ -482,15 +507,15 @@ return (_ctx, _cache) => {
                         }, null, 512), [
                           [_vModelCheckbox, cfg.horse_enabled]
                         ]),
-                        _cache[78] || (_cache[78] = _createElementVNode("span", null, "启用养马自动化", -1))
+                        _cache[86] || (_cache[86] = _createElementVNode("span", null, "启用养马自动化", -1))
                       ]),
-                      _cache[87] || (_cache[87] = _createElementVNode("span", {
+                      _cache[95] || (_cache[95] = _createElementVNode("span", {
                         class: "help",
                         style: {"margin-top":"-4px"}
                       }, "每轮最多一个动作：参赛补体力（先精草后仙草）→ 喂食额度 → 遛马 → 官方赛", -1)),
                       _createElementVNode("div", _hoisted_30, [
                         _createElementVNode("div", _hoisted_31, [
-                          _cache[79] || (_cache[79] = _createElementVNode("span", { class: "lbl" }, "养护轮询间隔(秒)", -1)),
+                          _cache[87] || (_cache[87] = _createElementVNode("span", { class: "lbl" }, "养护轮询间隔(秒)", -1)),
                           _withDirectives(_createElementVNode("input", {
                             "onUpdate:modelValue": _cache[10] || (_cache[10] = $event => ((cfg.horse_poll_interval) = $event)),
                             class: "inp",
@@ -506,10 +531,10 @@ return (_ctx, _cache) => {
                               { number: true }
                             ]
                           ]),
-                          _cache[80] || (_cache[80] = _createElementVNode("span", { class: "help" }, "节奏拟人，不用太频繁", -1))
+                          _cache[88] || (_cache[88] = _createElementVNode("span", { class: "help" }, "节奏拟人，不用太频繁", -1))
                         ]),
                         _createElementVNode("div", _hoisted_32, [
-                          _cache[82] || (_cache[82] = _createElementVNode("span", { class: "lbl" }, "养马通知", -1)),
+                          _cache[90] || (_cache[90] = _createElementVNode("span", { class: "lbl" }, "养马通知", -1)),
                           _createElementVNode("label", _hoisted_33, [
                             _withDirectives(_createElementVNode("input", {
                               "onUpdate:modelValue": _cache[11] || (_cache[11] = $event => ((cfg.horse_notify) = $event)),
@@ -517,11 +542,11 @@ return (_ctx, _cache) => {
                             }, null, 512), [
                               [_vModelCheckbox, cfg.horse_notify]
                             ]),
-                            _cache[81] || (_cache[81] = _createElementVNode("span", null, "操作结果推送", -1))
+                            _cache[89] || (_cache[89] = _createElementVNode("span", null, "操作结果推送", -1))
                           ])
                         ]),
                         _createElementVNode("div", _hoisted_34, [
-                          _cache[84] || (_cache[84] = _createElementVNode("span", { class: "lbl" }, "掉落控制", -1)),
+                          _cache[92] || (_cache[92] = _createElementVNode("span", { class: "lbl" }, "掉落控制", -1)),
                           _createElementVNode("label", _hoisted_35, [
                             _withDirectives(_createElementVNode("input", {
                               "onUpdate:modelValue": _cache[12] || (_cache[12] = $event => ((cfg.horse_drop_guard) = $event)),
@@ -529,17 +554,17 @@ return (_ctx, _cache) => {
                             }, null, 512), [
                               [_vModelCheckbox, cfg.horse_drop_guard]
                             ]),
-                            _cache[83] || (_cache[83] = _createElementVNode("span", null, "受游戏掉落控制", -1))
+                            _cache[91] || (_cache[91] = _createElementVNode("span", null, "受游戏掉落控制", -1))
                           ]),
-                          _cache[85] || (_cache[85] = _createElementVNode("span", { class: "help" }, "默认关：掉落配额满时养马照常；勾选后参赛也随守卫暂停", -1))
+                          _cache[93] || (_cache[93] = _createElementVNode("span", { class: "help" }, "默认关：掉落配额满时养马照常；勾选后参赛也随守卫暂停", -1))
                         ])
                       ])
                     ]),
                     _createElementVNode("section", _hoisted_36, [
-                      _cache[91] || (_cache[91] = _createElementVNode("div", { class: "card-h" }, "自动喂食", -1)),
+                      _cache[99] || (_cache[99] = _createElementVNode("div", { class: "card-h" }, "自动喂食", -1)),
                       _createElementVNode("div", _hoisted_37, [
                         _createElementVNode("div", _hoisted_38, [
-                          _cache[88] || (_cache[88] = _createElementVNode("span", { class: "lbl" }, "草料", -1)),
+                          _cache[96] || (_cache[96] = _createElementVNode("span", { class: "lbl" }, "草料", -1)),
                           _withDirectives(_createElementVNode("select", {
                             "onUpdate:modelValue": _cache[13] || (_cache[13] = $event => ((cfg.horse_feed_type) = $event)),
                             class: "inp"
@@ -555,7 +580,7 @@ return (_ctx, _cache) => {
                           ])
                         ]),
                         _createElementVNode("div", _hoisted_40, [
-                          _cache[89] || (_cache[89] = _createElementVNode("span", { class: "lbl" }, "体力阈值", -1)),
+                          _cache[97] || (_cache[97] = _createElementVNode("span", { class: "lbl" }, "体力阈值", -1)),
                           _withDirectives(_createElementVNode("input", {
                             "onUpdate:modelValue": _cache[14] || (_cache[14] = $event => ((cfg.horse_feed_threshold) = $event)),
                             class: "inp",
@@ -571,12 +596,12 @@ return (_ctx, _cache) => {
                               { number: true }
                             ]
                           ]),
-                          _cache[90] || (_cache[90] = _createElementVNode("span", { class: "help" }, "体力低于此值才喂；优先配置草料，普通草冷却/额度用尽才喂仙草", -1))
+                          _cache[98] || (_cache[98] = _createElementVNode("span", { class: "help" }, "体力低于此值才喂；优先配置草料，普通草冷却/额度用尽才喂仙草", -1))
                         ])
                       ])
                     ]),
                     _createElementVNode("section", _hoisted_41, [
-                      _cache[98] || (_cache[98] = _createElementVNode("div", { class: "card-h" }, "自动行为", -1)),
+                      _cache[106] || (_cache[106] = _createElementVNode("div", { class: "card-h" }, "自动行为", -1)),
                       _createElementVNode("label", _hoisted_42, [
                         _withDirectives(_createElementVNode("input", {
                           "onUpdate:modelValue": _cache[15] || (_cache[15] = $event => ((cfg.horse_auto_walk) = $event)),
@@ -584,9 +609,9 @@ return (_ctx, _cache) => {
                         }, null, 512), [
                           [_vModelCheckbox, cfg.horse_auto_walk]
                         ]),
-                        _cache[92] || (_cache[92] = _createElementVNode("span", null, "自动遛马", -1))
+                        _cache[100] || (_cache[100] = _createElementVNode("span", null, "自动遛马", -1))
                       ]),
-                      _cache[99] || (_cache[99] = _createElementVNode("span", {
+                      _cache[107] || (_cache[107] = _createElementVNode("span", {
                         class: "help",
                         style: {"margin-top":"-4px"}
                       }, "用完每日遛马额度（4 次），赚银元+经验，体力耗尽自动停", -1)),
@@ -597,14 +622,14 @@ return (_ctx, _cache) => {
                         }, null, 512), [
                           [_vModelCheckbox, cfg.horse_auto_match_race]
                         ]),
-                        _cache[93] || (_cache[93] = _createElementVNode("span", null, "自动加入玩家养马赛", -1))
+                        _cache[101] || (_cache[101] = _createElementVNode("span", null, "自动加入玩家养马赛", -1))
                       ]),
-                      _cache[100] || (_cache[100] = _createElementVNode("span", {
+                      _cache[108] || (_cache[108] = _createElementVNode("span", {
                         class: "help",
                         style: {"margin-top":"-4px"}
                       }, "发现玩家开的 Horse2 时自动加入，报名额取房主设定", -1)),
                       _createElementVNode("div", _hoisted_44, [
-                        _cache[94] || (_cache[94] = _createElementVNode("span", { class: "lbl" }, "参赛最低体力", -1)),
+                        _cache[102] || (_cache[102] = _createElementVNode("span", { class: "lbl" }, "参赛最低体力", -1)),
                         _withDirectives(_createElementVNode("input", {
                           "onUpdate:modelValue": _cache[17] || (_cache[17] = $event => ((cfg.horse_race_min_stamina) = $event)),
                           class: "inp",
@@ -620,7 +645,7 @@ return (_ctx, _cache) => {
                             { number: true }
                           ]
                         ]),
-                        _cache[95] || (_cache[95] = _createElementVNode("span", { class: "help" }, "体力不够时喂一个仙草(+50)立即参赛（仙草每日 3 次）", -1))
+                        _cache[103] || (_cache[103] = _createElementVNode("span", { class: "help" }, "体力不够时喂一个仙草(+50)立即参赛（仙草每日 3 次）", -1))
                       ]),
                       _createElementVNode("label", _hoisted_45, [
                         _withDirectives(_createElementVNode("input", {
@@ -629,9 +654,9 @@ return (_ctx, _cache) => {
                         }, null, 512), [
                           [_vModelCheckbox, cfg.horse_auto_official_race]
                         ]),
-                        _cache[96] || (_cache[96] = _createElementVNode("span", null, "自动报名官方赛", -1))
+                        _cache[104] || (_cache[104] = _createElementVNode("span", null, "自动报名官方赛", -1))
                       ]),
-                      _cache[101] || (_cache[101] = _createElementVNode("span", {
+                      _cache[109] || (_cache[109] = _createElementVNode("span", {
                         class: "help",
                         style: {"margin-top":"-4px"}
                       }, "每日官方赛开放报名时免费参加", -1)),
@@ -642,9 +667,9 @@ return (_ctx, _cache) => {
                         }, null, 512), [
                           [_vModelCheckbox, cfg.horse_auto_revive]
                         ]),
-                        _cache[97] || (_cache[97] = _createElementVNode("span", null, "死亡自动复活", -1))
+                        _cache[105] || (_cache[105] = _createElementVNode("span", null, "死亡自动复活", -1))
                       ]),
-                      _cache[102] || (_cache[102] = _createElementVNode("span", {
+                      _cache[110] || (_cache[110] = _createElementVNode("span", {
                         class: "help",
                         style: {"margin-top":"-4px"}
                       }, "马匹死亡且余额足够时复活（约 30 万银元，默认关）", -1))
@@ -659,9 +684,9 @@ return (_ctx, _cache) => {
                   ], 64))
                 : (group.value === 'zjh')
                   ? (_openBlock(), _createElementBlock(_Fragment, { key: 2 }, [
-                      _cache[136] || (_cache[136] = _createElementVNode("h3", { class: "det-title" }, "炸金花", -1)),
+                      _cache[144] || (_cache[144] = _createElementVNode("h3", { class: "det-title" }, "炸金花", -1)),
                       _createElementVNode("section", _hoisted_49, [
-                        _cache[107] || (_cache[107] = _createElementVNode("div", { class: "card-h" }, "基础设置", -1)),
+                        _cache[115] || (_cache[115] = _createElementVNode("div", { class: "card-h" }, "基础设置", -1)),
                         _createElementVNode("label", _hoisted_50, [
                           _withDirectives(_createElementVNode("input", {
                             "onUpdate:modelValue": _cache[20] || (_cache[20] = $event => ((cfg.zjh_enabled) = $event)),
@@ -669,14 +694,14 @@ return (_ctx, _cache) => {
                           }, null, 512), [
                             [_vModelCheckbox, cfg.zjh_enabled]
                           ]),
-                          _cache[104] || (_cache[104] = _createElementVNode("span", null, "启用自动参与", -1))
+                          _cache[112] || (_cache[112] = _createElementVNode("span", null, "启用自动参与", -1))
                         ]),
-                        _cache[108] || (_cache[108] = _createElementVNode("span", {
+                        _cache[116] || (_cache[116] = _createElementVNode("span", {
                           class: "help",
                           style: {"margin-top":"-4px"}
                         }, "轮询牌局：自动加入 → 首轮盲跟 → 看牌后按期望收益决策", -1)),
                         _createElementVNode("div", _hoisted_51, [
-                          _cache[105] || (_cache[105] = _createElementVNode("span", { class: "lbl" }, "轮询间隔(秒)", -1)),
+                          _cache[113] || (_cache[113] = _createElementVNode("span", { class: "lbl" }, "轮询间隔(秒)", -1)),
                           _withDirectives(_createElementVNode("input", {
                             "onUpdate:modelValue": _cache[21] || (_cache[21] = $event => ((cfg.zjh_poll_interval) = $event)),
                             class: "inp",
@@ -692,10 +717,10 @@ return (_ctx, _cache) => {
                               { number: true }
                             ]
                           ]),
-                          _cache[106] || (_cache[106] = _createElementVNode("span", { class: "help" }, "Cookie 与门户地址见「全局设置」", -1))
+                          _cache[114] || (_cache[114] = _createElementVNode("span", { class: "help" }, "Cookie 与门户地址见「全局设置」", -1))
                         ])
                       ]),
-                      _cache[137] || (_cache[137] = _createElementVNode("section", { class: "card" }, [
+                      _cache[145] || (_cache[145] = _createElementVNode("section", { class: "card" }, [
                         _createElementVNode("div", { class: "card-h" }, "决策策略"),
                         _createElementVNode("span", { class: "help" }, " 已看牌完全按期望收益（EV）决策：胜率 ×（底池 + 跟注成本）− 跟注成本 ≥ 0 即跟注，否则弃牌。 胜率随剩余对手数衰减；已看牌且继续下注的对手按其行动时底池赔率反推牌力门槛，再做条件胜率。 "),
                         _createElementVNode("span", {
@@ -704,8 +729,8 @@ return (_ctx, _cache) => {
                         }, " 蒙牌用「终局 EV 决策树」：递归推演未来数轮对手的跟注/加注/弃牌，条件胜率随对手加注贝叶斯衰减， 求到达摊牌/弃牌时的终局期望，再和看牌、弃牌比较。避免单步 EV 把「跟这手就摊牌」当事实—— 实际门户单挑对手可持续加注把底池滚大，蒙牌闭眼跟到强制摊牌常常巨亏。 ")
                       ], -1)),
                       _createElementVNode("section", _hoisted_52, [
-                        _cache[117] || (_cache[117] = _createElementVNode("div", { class: "card-h" }, "进攻策略（可选）", -1)),
-                        _cache[118] || (_cache[118] = _createElementVNode("span", { class: "help" }, " 所有阈值均基于最终实际胜率：蒙牌对手按单挑胜率相乘；已看牌对手按其实际下注反推的最低牌力条件化后相乘。 开牌和追加只会在门户 actions 明确允许时发送；默认关闭，建议先观察日志中的服务端成本。 ", -1)),
+                        _cache[125] || (_cache[125] = _createElementVNode("div", { class: "card-h" }, "进攻策略（可选）", -1)),
+                        _cache[126] || (_cache[126] = _createElementVNode("span", { class: "help" }, " 所有阈值均基于最终实际胜率：蒙牌对手按单挑胜率相乘；已看牌对手按其实际下注反推的最低牌力条件化后相乘。 开牌和追加只会在门户 actions 明确允许时发送；默认关闭，建议先观察日志中的服务端成本。 ", -1)),
                         _createElementVNode("div", _hoisted_53, [
                           _createElementVNode("div", _hoisted_54, [
                             _createElementVNode("label", _hoisted_55, [
@@ -715,9 +740,9 @@ return (_ctx, _cache) => {
                               }, null, 512), [
                                 [_vModelCheckbox, cfg.zjh_open_enabled]
                               ]),
-                              _cache[109] || (_cache[109] = _createElementVNode("span", null, "启用低胜率主动开牌", -1))
+                              _cache[117] || (_cache[117] = _createElementVNode("span", null, "启用低胜率主动开牌", -1))
                             ]),
-                            _cache[110] || (_cache[110] = _createElementVNode("span", { class: "help" }, "正 EV 且最终实际胜率低于阈值时，若允许 open 则发起比牌。", -1)),
+                            _cache[118] || (_cache[118] = _createElementVNode("span", { class: "help" }, "正 EV 且最终实际胜率低于阈值时，若允许 open 则发起比牌。", -1)),
                             _createElementVNode("span", _hoisted_56, "最高实际胜率：" + _toDisplayString(cfg.zjh_open_max_win_rate) + "%", 1),
                             _withDirectives(_createElementVNode("input", {
                               "onUpdate:modelValue": _cache[23] || (_cache[23] = $event => ((cfg.zjh_open_max_win_rate) = $event)),
@@ -748,7 +773,7 @@ return (_ctx, _cache) => {
                                 { number: true }
                               ]
                             ]),
-                            _cache[111] || (_cache[111] = _createElementVNode("span", { class: "help" }, " 双向混合防读牌：弱牌该开牌止损时小概率改跟注慢打、强牌该继续时小概率直接开牌—— 对手统计不出「开牌=弱牌、继续=强牌」。0=关（旧行为：低于开牌阈值必开）。 ", -1))
+                            _cache[119] || (_cache[119] = _createElementVNode("span", { class: "help" }, " 双向混合防读牌：弱牌该开牌止损时小概率改跟注慢打、强牌该继续时小概率直接开牌—— 对手统计不出「开牌=弱牌、继续=强牌」。0=关（旧行为：低于开牌阈值必开）。 ", -1))
                           ]),
                           _createElementVNode("div", _hoisted_58, [
                             _createElementVNode("label", _hoisted_59, [
@@ -758,9 +783,9 @@ return (_ctx, _cache) => {
                               }, null, 512), [
                                 [_vModelCheckbox, cfg.zjh_raise_enabled]
                               ]),
-                              _cache[112] || (_cache[112] = _createElementVNode("span", null, "启用高胜率主动追加", -1))
+                              _cache[120] || (_cache[120] = _createElementVNode("span", null, "启用高胜率主动追加", -1))
                             ]),
-                            _cache[116] || (_cache[116] = _createElementVNode("span", { class: "help" }, "正 EV 且最终实际胜率达到阈值时，若允许 raise 则追加。", -1)),
+                            _cache[124] || (_cache[124] = _createElementVNode("span", { class: "help" }, "正 EV 且最终实际胜率达到阈值时，若允许 raise 则追加。", -1)),
                             _createElementVNode("span", _hoisted_60, "最低实际胜率：" + _toDisplayString(cfg.zjh_raise_min_win_rate) + "%", 1),
                             _withDirectives(_createElementVNode("input", {
                               "onUpdate:modelValue": _cache[26] || (_cache[26] = $event => ((cfg.zjh_raise_min_win_rate) = $event)),
@@ -793,7 +818,7 @@ return (_ctx, _cache) => {
                                       { number: true }
                                     ]
                                   ]),
-                                  _cache[114] || (_cache[114] = _createElementVNode("span", { class: "help" }, "达阈值时按此概率加注、其余慢打平跟做伪装；100=达标必加。", -1)),
+                                  _cache[122] || (_cache[122] = _createElementVNode("span", { class: "help" }, "达阈值时按此概率加注、其余慢打平跟做伪装；100=达标必加。", -1)),
                                   _createElementVNode("label", _hoisted_62, [
                                     _withDirectives(_createElementVNode("input", {
                                       "onUpdate:modelValue": _cache[28] || (_cache[28] = $event => ((cfg.zjh_first_peek_no_raise) = $event)),
@@ -801,16 +826,16 @@ return (_ctx, _cache) => {
                                     }, null, 512), [
                                       [_vModelCheckbox, cfg.zjh_first_peek_no_raise]
                                     ]),
-                                    _cache[113] || (_cache[113] = _createElementVNode("span", null, "第一次看牌不加注（慢打留人）", -1))
+                                    _cache[121] || (_cache[121] = _createElementVNode("span", null, "第一次看牌不加注（慢打留人）", -1))
                                   ]),
-                                  _cache[115] || (_cache[115] = _createElementVNode("span", { class: "help" }, "本局首次看牌即使达阈值也平跟不加注，避免吓退对手；后续轮次才按频率加注。", -1))
+                                  _cache[123] || (_cache[123] = _createElementVNode("span", { class: "help" }, "本局首次看牌即使达阈值也平跟不加注，避免吓退对手；后续轮次才按频率加注。", -1))
                                 ], 64))
                               : _createCommentVNode("", true)
                           ])
                         ])
                       ]),
                       _createElementVNode("section", _hoisted_63, [
-                        _cache[120] || (_cache[120] = _createElementVNode("div", { class: "card-h" }, "看牌对手推断", -1)),
+                        _cache[128] || (_cache[128] = _createElementVNode("div", { class: "card-h" }, "看牌对手推断", -1)),
                         _createElementVNode("div", _hoisted_64, [
                           _createElementVNode("span", _hoisted_65, "未观测到下注时的牌力阈值：" + _toDisplayString(cfg.zjh_peeked_threshold) + "%", 1),
                           _withDirectives(_createElementVNode("input", {
@@ -827,12 +852,12 @@ return (_ctx, _cache) => {
                               { number: true }
                             ]
                           ]),
-                          _cache[119] || (_cache[119] = _createElementVNode("span", { class: "help" }, " 系统优先按对手看牌后实际下注时的底池和成本反推门槛；轮询漏掉该动作时才使用此回退值。 ", -1))
+                          _cache[127] || (_cache[127] = _createElementVNode("span", { class: "help" }, " 系统优先按对手看牌后实际下注时的底池和成本反推门槛；轮询漏掉该动作时才使用此回退值。 ", -1))
                         ])
                       ]),
                       _createElementVNode("section", _hoisted_66, [
-                        _cache[123] || (_cache[123] = _createElementVNode("div", { class: "card-h" }, "对手范围与反诈唬（画像自动驱动）", -1)),
-                        _cache[124] || (_cache[124] = _createElementVNode("span", { class: "help" }, " 看牌后评估胜率时，对手手牌范围与反诈唬全部由对手画像自动推断，无需手动设置： 加注对手按实测加注牌力下限估计，平跟对手永不封顶（可能慢打坚果牌）； 继续频率异常高的对手自动计入诈唬概率。无画像对手按推断门槛、不反诈唬。 ", -1)),
+                        _cache[131] || (_cache[131] = _createElementVNode("div", { class: "card-h" }, "对手范围与反诈唬（画像自动驱动）", -1)),
+                        _cache[132] || (_cache[132] = _createElementVNode("span", { class: "help" }, " 看牌后评估胜率时，对手手牌范围与反诈唬全部由对手画像自动推断，无需手动设置： 加注对手按实测加注牌力下限估计，平跟对手永不封顶（可能慢打坚果牌）； 继续频率异常高的对手自动计入诈唬概率。无画像对手按推断门槛、不反诈唬。 ", -1)),
                         _createElementVNode("div", _hoisted_67, [
                           _createElementVNode("span", _hoisted_68, "弃牌 EV 容差：" + _toDisplayString(cfg.zjh_fold_ev_tolerance) + "% callBet", 1),
                           _withDirectives(_createElementVNode("input", {
@@ -849,7 +874,7 @@ return (_ctx, _cache) => {
                               { number: true }
                             ]
                           ]),
-                          _cache[121] || (_cache[121] = _createElementVNode("span", { class: "help" }, "跟注 EV 只是略负（≥ −此比例×callBet）时不弃牌。0% = 旧行为（EV<0 即弃）。", -1))
+                          _cache[129] || (_cache[129] = _createElementVNode("span", { class: "help" }, "跟注 EV 只是略负（≥ −此比例×callBet）时不弃牌。0% = 旧行为（EV<0 即弃）。", -1))
                         ]),
                         _createElementVNode("div", _hoisted_69, [
                           _createElementVNode("span", _hoisted_70, "画像半衰期：" + _toDisplayString(cfg.zjh_profile_halflife) + " 手", 1),
@@ -867,12 +892,12 @@ return (_ctx, _cache) => {
                               { number: true }
                             ]
                           ]),
-                          _cache[122] || (_cache[122] = _createElementVNode("span", { class: "help" }, " 画像按对手已完成手数衰减：每结算一手，历史计数与手牌样本权重减半（半衰期手数见上）。 高频对手自然衰减快、低频慢；0 = 不衰减（永久保留全部历史，旧行为）。 手牌样本窗口自动跟随半衰期（3 个半衰期、最少 100 条），调大半衰期不会缩短真实记忆窗口。 ", -1))
+                          _cache[130] || (_cache[130] = _createElementVNode("span", { class: "help" }, " 画像按对手已完成手数衰减：每结算一手，历史计数与手牌样本权重减半（半衰期手数见上）。 高频对手自然衰减快、低频慢；0 = 不衰减（永久保留全部历史，旧行为）。 手牌样本窗口自动跟随半衰期（3 个半衰期、最少 100 条），调大半衰期不会缩短真实记忆窗口。 ", -1))
                         ])
                       ]),
                       _createElementVNode("section", _hoisted_71, [
-                        _cache[128] || (_cache[128] = _createElementVNode("div", { class: "card-h" }, "蒙牌决策（终局 EV 决策树）", -1)),
-                        _cache[129] || (_cache[129] = _createElementVNode("span", { class: "help" }, " 蒙牌不再只看当前一步的期望收益，而是推演未来几轮：对手每轮跟/加/弃（概率来自对手画像）， 我方蒙牌胜率随对手连续加注衰减（门槛贝叶斯上调），求到达摊牌/弃牌的终局期望。 连续盲跟过多会被强制看牌止损，避免像单步 EV 那样闭眼跟到强制摊牌巨亏。 ", -1)),
+                        _cache[136] || (_cache[136] = _createElementVNode("div", { class: "card-h" }, "蒙牌决策（终局 EV 决策树）", -1)),
+                        _cache[137] || (_cache[137] = _createElementVNode("span", { class: "help" }, " 蒙牌不再只看当前一步的期望收益，而是推演未来几轮：对手每轮跟/加/弃（概率来自对手画像）， 我方蒙牌胜率随对手连续加注衰减（门槛贝叶斯上调），求到达摊牌/弃牌的终局期望。 连续盲跟过多会被强制看牌止损，避免像单步 EV 那样闭眼跟到强制摊牌巨亏。 ", -1)),
                         _createElementVNode("div", _hoisted_72, [
                           _createElementVNode("span", _hoisted_73, "决策树深度：" + _toDisplayString(cfg.zjh_terminal_depth) + " 轮", 1),
                           _withDirectives(_createElementVNode("input", {
@@ -889,7 +914,7 @@ return (_ctx, _cache) => {
                               { number: true }
                             ]
                           ]),
-                          _cache[125] || (_cache[125] = _createElementVNode("span", { class: "help" }, "推演未来 N 轮对手动作再算终局 EV。1 = 退回旧单步 EV 行为。", -1))
+                          _cache[133] || (_cache[133] = _createElementVNode("span", { class: "help" }, "推演未来 N 轮对手动作再算终局 EV。1 = 退回旧单步 EV 行为。", -1))
                         ]),
                         _createElementVNode("div", _hoisted_74, [
                           _createElementVNode("span", _hoisted_75, "连续盲跟上限：" + _toDisplayString(cfg.zjh_blind_max_calls) + " 轮", 1),
@@ -907,7 +932,7 @@ return (_ctx, _cache) => {
                               { number: true }
                             ]
                           ]),
-                          _cache[126] || (_cache[126] = _createElementVNode("span", { class: "help" }, "蒙牌连续盲跟达该轮数后强制看牌止损。0 = 不限，纯按终局 EV。", -1))
+                          _cache[134] || (_cache[134] = _createElementVNode("span", { class: "help" }, "蒙牌连续盲跟达该轮数后强制看牌止损。0 = 不限，纯按终局 EV。", -1))
                         ]),
                         _createElementVNode("label", _hoisted_76, [
                           _withDirectives(_createElementVNode("input", {
@@ -916,12 +941,12 @@ return (_ctx, _cache) => {
                           }, null, 512), [
                             [_vModelCheckbox, cfg.zjh_profile_enabled]
                           ]),
-                          _cache[127] || (_cache[127] = _createElementVNode("span", null, "启用对手画像", -1))
+                          _cache[135] || (_cache[135] = _createElementVNode("span", null, "启用对手画像", -1))
                         ]),
-                        _cache[130] || (_cache[130] = _createElementVNode("span", { class: "help" }, "按玩家 ID 跨局统计每个对手的动作频率与实测手牌分位：决策树据此预测动作，已看牌胜率据此定对手范围与反诈唬。未知对手用全局先验、不反诈唬。", -1))
+                        _cache[138] || (_cache[138] = _createElementVNode("span", { class: "help" }, "按玩家 ID 跨局统计每个对手的动作频率与实测手牌分位：决策树据此预测动作，已看牌胜率据此定对手范围与反诈唬。未知对手用全局先验、不反诈唬。", -1))
                       ]),
                       _createElementVNode("section", _hoisted_77, [
-                        _cache[135] || (_cache[135] = _createElementVNode("div", { class: "card-h" }, "通知", -1)),
+                        _cache[143] || (_cache[143] = _createElementVNode("div", { class: "card-h" }, "通知", -1)),
                         _createElementVNode("label", _hoisted_78, [
                           _withDirectives(_createElementVNode("input", {
                             "onUpdate:modelValue": _cache[35] || (_cache[35] = $event => ((cfg.zjh_notify_join) = $event)),
@@ -929,7 +954,7 @@ return (_ctx, _cache) => {
                           }, null, 512), [
                             [_vModelCheckbox, cfg.zjh_notify_join]
                           ]),
-                          _cache[131] || (_cache[131] = _createElementVNode("span", null, "加入牌局", -1))
+                          _cache[139] || (_cache[139] = _createElementVNode("span", null, "加入牌局", -1))
                         ]),
                         _createElementVNode("label", _hoisted_79, [
                           _withDirectives(_createElementVNode("input", {
@@ -938,7 +963,7 @@ return (_ctx, _cache) => {
                           }, null, 512), [
                             [_vModelCheckbox, cfg.zjh_notify_hand]
                           ]),
-                          _cache[132] || (_cache[132] = _createElementVNode("span", null, "手牌决策（跟注/弃牌）", -1))
+                          _cache[140] || (_cache[140] = _createElementVNode("span", null, "手牌决策（跟注/弃牌）", -1))
                         ]),
                         _createElementVNode("label", _hoisted_80, [
                           _withDirectives(_createElementVNode("input", {
@@ -947,7 +972,7 @@ return (_ctx, _cache) => {
                           }, null, 512), [
                             [_vModelCheckbox, cfg.zjh_notify_fold_confirm]
                           ]),
-                          _cache[133] || (_cache[133] = _createElementVNode("span", null, "双击确认弃牌", -1))
+                          _cache[141] || (_cache[141] = _createElementVNode("span", null, "双击确认弃牌", -1))
                         ]),
                         _createElementVNode("label", _hoisted_81, [
                           _withDirectives(_createElementVNode("input", {
@@ -956,7 +981,7 @@ return (_ctx, _cache) => {
                           }, null, 512), [
                             [_vModelCheckbox, cfg.zjh_notify_error]
                           ]),
-                          _cache[134] || (_cache[134] = _createElementVNode("span", null, "异常", -1))
+                          _cache[142] || (_cache[142] = _createElementVNode("span", null, "异常", -1))
                         ])
                       ]),
                       _createElementVNode("div", _hoisted_82, [
@@ -969,9 +994,9 @@ return (_ctx, _cache) => {
                     ], 64))
                   : (group.value === 'tenhalf')
                     ? (_openBlock(), _createElementBlock(_Fragment, { key: 3 }, [
-                        _cache[158] || (_cache[158] = _createElementVNode("h3", { class: "det-title" }, "十点半", -1)),
+                        _cache[166] || (_cache[166] = _createElementVNode("h3", { class: "det-title" }, "十点半", -1)),
                         _createElementVNode("section", _hoisted_84, [
-                          _cache[143] || (_cache[143] = _createElementVNode("div", { class: "card-h" }, "基础设置", -1)),
+                          _cache[151] || (_cache[151] = _createElementVNode("div", { class: "card-h" }, "基础设置", -1)),
                           _createElementVNode("label", _hoisted_85, [
                             _withDirectives(_createElementVNode("input", {
                               "onUpdate:modelValue": _cache[39] || (_cache[39] = $event => ((cfg.tenhalf_enabled) = $event)),
@@ -979,15 +1004,15 @@ return (_ctx, _cache) => {
                             }, null, 512), [
                               [_vModelCheckbox, cfg.tenhalf_enabled]
                             ]),
-                            _cache[138] || (_cache[138] = _createElementVNode("span", null, "启用自动参与", -1))
+                            _cache[146] || (_cache[146] = _createElementVNode("span", null, "启用自动参与", -1))
                           ]),
-                          _cache[144] || (_cache[144] = _createElementVNode("span", {
+                          _cache[152] || (_cache[152] = _createElementVNode("span", {
                             class: "help",
                             style: {"margin-top":"-4px"}
                           }, " 有桌开局时报名下注 → 抓牌阶段要牌/停牌 → 结算推送战绩。只玩玩家位不开庄。 动作契约来自门户前端尚未实测，首次启用建议同时开启「全局设置 · 门户调试记录」核对 ", -1)),
                           _createElementVNode("div", _hoisted_86, [
                             _createElementVNode("div", _hoisted_87, [
-                              _cache[139] || (_cache[139] = _createElementVNode("span", { class: "lbl" }, "轮询间隔(秒)", -1)),
+                              _cache[147] || (_cache[147] = _createElementVNode("span", { class: "lbl" }, "轮询间隔(秒)", -1)),
                               _withDirectives(_createElementVNode("input", {
                                 "onUpdate:modelValue": _cache[40] || (_cache[40] = $event => ((cfg.tenhalf_poll_interval) = $event)),
                                 class: "inp",
@@ -1003,10 +1028,10 @@ return (_ctx, _cache) => {
                                   { number: true }
                                 ]
                               ]),
-                              _cache[140] || (_cache[140] = _createElementVNode("span", { class: "help" }, "报名阶段有倒计时，轮询太慢会错过报名", -1))
+                              _cache[148] || (_cache[148] = _createElementVNode("span", { class: "help" }, "报名阶段有倒计时，轮询太慢会错过报名", -1))
                             ]),
                             _createElementVNode("div", _hoisted_88, [
-                              _cache[142] || (_cache[142] = _createElementVNode("span", { class: "lbl" }, "十点半通知", -1)),
+                              _cache[150] || (_cache[150] = _createElementVNode("span", { class: "lbl" }, "十点半通知", -1)),
                               _createElementVNode("label", _hoisted_89, [
                                 _withDirectives(_createElementVNode("input", {
                                   "onUpdate:modelValue": _cache[41] || (_cache[41] = $event => ((cfg.tenhalf_notify) = $event)),
@@ -1014,16 +1039,16 @@ return (_ctx, _cache) => {
                                 }, null, 512), [
                                   [_vModelCheckbox, cfg.tenhalf_notify]
                                 ]),
-                                _cache[141] || (_cache[141] = _createElementVNode("span", null, "仅异常告警（报名失败/轮询异常）", -1))
+                                _cache[149] || (_cache[149] = _createElementVNode("span", null, "仅异常告警（报名失败/轮询异常）", -1))
                               ])
                             ])
                           ])
                         ]),
                         _createElementVNode("section", _hoisted_90, [
-                          _cache[152] || (_cache[152] = _createElementVNode("div", { class: "card-h" }, "参与策略", -1)),
+                          _cache[160] || (_cache[160] = _createElementVNode("div", { class: "card-h" }, "参与策略", -1)),
                           _createElementVNode("div", _hoisted_91, [
                             _createElementVNode("div", _hoisted_92, [
-                              _cache[145] || (_cache[145] = _createElementVNode("span", { class: "lbl" }, "报名下注额", -1)),
+                              _cache[153] || (_cache[153] = _createElementVNode("span", { class: "lbl" }, "报名下注额", -1)),
                               _withDirectives(_createElementVNode("input", {
                                 "onUpdate:modelValue": _cache[42] || (_cache[42] = $event => ((cfg.tenhalf_bet_amount) = $event)),
                                 class: "inp",
@@ -1039,10 +1064,10 @@ return (_ctx, _cache) => {
                                   { number: true }
                                 ]
                               ]),
-                              _cache[146] || (_cache[146] = _createElementVNode("span", { class: "help" }, "自动夹在门户最小下注与本桌单人上限之间", -1))
+                              _cache[154] || (_cache[154] = _createElementVNode("span", { class: "help" }, "自动夹在门户最小下注与本桌单人上限之间", -1))
                             ]),
                             _createElementVNode("div", _hoisted_93, [
-                              _cache[147] || (_cache[147] = _createElementVNode("span", { class: "lbl" }, "停牌点数阈值（基准）", -1)),
+                              _cache[155] || (_cache[155] = _createElementVNode("span", { class: "lbl" }, "停牌点数阈值（基准）", -1)),
                               _withDirectives(_createElementVNode("input", {
                                 "onUpdate:modelValue": _cache[43] || (_cache[43] = $event => ((cfg.tenhalf_stand_threshold) = $event)),
                                 class: "inp",
@@ -1058,11 +1083,11 @@ return (_ctx, _cache) => {
                                   { number: true }
                                 ]
                               ]),
-                              _cache[148] || (_cache[148] = _createElementVNode("span", { class: "help" }, "仅画像样本不足时的回退基准；样本足够时走 EV 决策（停牌 EV 对要牌 EV 递推择优）", -1))
+                              _cache[156] || (_cache[156] = _createElementVNode("span", { class: "help" }, "仅画像样本不足时的回退基准；样本足够时走 EV 决策（停牌 EV 对要牌 EV 递推择优）", -1))
                             ])
                           ]),
                           _createElementVNode("div", _hoisted_94, [
-                            _cache[149] || (_cache[149] = _createElementVNode("span", { class: "lbl" }, "指定庄家（掉落配额满时才生效）", -1)),
+                            _cache[157] || (_cache[157] = _createElementVNode("span", { class: "lbl" }, "指定庄家（掉落配额满时才生效）", -1)),
                             _withDirectives(_createElementVNode("textarea", {
                               "onUpdate:modelValue": _cache[44] || (_cache[44] = $event => ((cfg.tenhalf_dealer_whitelist) = $event)),
                               class: "inp",
@@ -1072,7 +1097,7 @@ return (_ctx, _cache) => {
                             }, null, 512), [
                               [_vModelText, cfg.tenhalf_dealer_whitelist]
                             ]),
-                            _cache[150] || (_cache[150] = _createElementVNode("span", { class: "help" }, "掉落配额未满时所有庄家的局都报名（掉落才是主要收益）；满了领不到掉落，此时只打名单里的庄家（填显示名或 id:xxx）。留空=配额满就不再新报名", -1))
+                            _cache[158] || (_cache[158] = _createElementVNode("span", { class: "help" }, "掉落配额未满时所有庄家的局都报名（掉落才是主要收益）；满了领不到掉落，此时只打名单里的庄家（填显示名或 id:xxx）。留空=配额满就不再新报名", -1))
                           ]),
                           _createElementVNode("label", _hoisted_95, [
                             _withDirectives(_createElementVNode("input", {
@@ -1081,18 +1106,18 @@ return (_ctx, _cache) => {
                             }, null, 512), [
                               [_vModelCheckbox, cfg.tenhalf_dealer_always]
                             ]),
-                            _cache[151] || (_cache[151] = _createElementVNode("span", null, "指定庄家始终生效", -1))
+                            _cache[159] || (_cache[159] = _createElementVNode("span", null, "指定庄家始终生效", -1))
                           ]),
-                          _cache[153] || (_cache[153] = _createElementVNode("span", {
+                          _cache[161] || (_cache[161] = _createElementVNode("span", {
                             class: "help",
                             style: {"margin-top":"-4px"}
                           }, "勾选后不管掉落配额满不满都只报名名单庄家的局（旧「专打模式」）；不勾选=只在配额满时才按名单收窄", -1)),
-                          _cache[154] || (_cache[154] = _createElementVNode("span", { class: "help" }, " 决策优先序：庄家爆牌→停牌 ｜ 我方五小（5 张未爆）→停牌赢 ×5 ｜ 庄家画像样本足够→EV 决策： 按画像点数分布+爆率算停牌 EV，对比 52 张先验递推的要牌 EV（含五小 ×5），择优要/停， 张数是一等公民（4 张低点数追五小、高点数早停）｜ 画像不足→退停牌阈值。 庄家 5 张不等于五小已定（他还会补牌爆掉）：停牌 EV 按「5 张」桶条件分布算——庄家成了五小输 ×5， 庄家爆了赢 +0.99；认输只在首手（我方还没拿牌）可选且只输本金 ×1， 五小概率大、停牌 EV ≤ -1 时才认输止损，否则照常在拿牌/停牌间择优 ", -1))
+                          _cache[162] || (_cache[162] = _createElementVNode("span", { class: "help" }, " 决策优先序：庄家爆牌→停牌 ｜ 我方五小（5 张未爆）→停牌赢 ×5 ｜ 庄家画像样本足够→EV 决策： 按画像点数分布+爆率算停牌 EV，对比 52 张先验递推的要牌 EV（含五小 ×5），择优要/停， 张数是一等公民（4 张低点数追五小、高点数早停）｜ 画像不足→退停牌阈值。 庄家 5 张不等于五小已定（他还会补牌爆掉）：停牌 EV 按「5 张」桶条件分布算——庄家成了五小输 ×5， 庄家爆了赢 +0.99；认输只在首手（我方还没拿牌）可选且只输本金 ×1， 五小概率大、停牌 EV ≤ -1 时才认输止损，否则照常在拿牌/停牌间择优 ", -1))
                         ]),
                         _createElementVNode("section", _hoisted_96, [
-                          _cache[157] || (_cache[157] = _createElementVNode("div", { class: "card-h" }, "庄家画像", -1)),
+                          _cache[165] || (_cache[165] = _createElementVNode("div", { class: "card-h" }, "庄家画像", -1)),
                           _createElementVNode("div", _hoisted_97, [
-                            _cache[155] || (_cache[155] = _createElementVNode("span", { class: "lbl" }, "保留局数（每档各算最近 N 局）", -1)),
+                            _cache[163] || (_cache[163] = _createElementVNode("span", { class: "lbl" }, "保留局数（每档各算最近 N 局）", -1)),
                             _withDirectives(_createElementVNode("input", {
                               "onUpdate:modelValue": _cache[46] || (_cache[46] = $event => ((cfg.tenhalf_dealer_keep) = $event)),
                               class: "inp",
@@ -1108,7 +1133,7 @@ return (_ctx, _cache) => {
                                 { number: true }
                               ]
                             ]),
-                            _cache[156] || (_cache[156] = _createElementVNode("span", { class: "help" }, "每个庄家留最近 N 局做总体画像，同时每种终局手牌张数（1张/2张/…）也各留最近 N 局做分桶，互不挤占：罕见张数（如 5 张）不再被高频张数挤掉、样本长期不够用。爆率/点数分布/停牌 EV 都只用这些近期样本（庄家点数风格会变，长期累积会拖失真；推送里的「N局」即窗口内局数）。改小后下次结算即按新上限裁剪", -1))
+                            _cache[164] || (_cache[164] = _createElementVNode("span", { class: "help" }, "每个庄家留最近 N 局做总体画像，同时每种终局手牌张数（1张/2张/…）也各留最近 N 局做分桶，互不挤占：罕见张数（如 5 张）不再被高频张数挤掉、样本长期不够用。爆率/点数分布/停牌 EV 都只用这些近期样本（庄家点数风格会变，长期累积会拖失真；推送里的「N局」即窗口内局数）。改小后下次结算即按新上限裁剪", -1))
                           ])
                         ]),
                         _createElementVNode("div", _hoisted_98, [
@@ -1121,9 +1146,9 @@ return (_ctx, _cache) => {
                       ], 64))
                     : (group.value === 'lucky')
                       ? (_openBlock(), _createElementBlock(_Fragment, { key: 4 }, [
-                          _cache[164] || (_cache[164] = _createElementVNode("h3", { class: "det-title" }, "幸运轮盘", -1)),
+                          _cache[172] || (_cache[172] = _createElementVNode("h3", { class: "det-title" }, "幸运轮盘", -1)),
                           _createElementVNode("section", _hoisted_100, [
-                            _cache[162] || (_cache[162] = _createElementVNode("div", { class: "card-h" }, "免费抽奖", -1)),
+                            _cache[170] || (_cache[170] = _createElementVNode("div", { class: "card-h" }, "免费抽奖", -1)),
                             _createElementVNode("label", _hoisted_101, [
                               _withDirectives(_createElementVNode("input", {
                                 "onUpdate:modelValue": _cache[47] || (_cache[47] = $event => ((cfg.lucky_enabled) = $event)),
@@ -1131,15 +1156,15 @@ return (_ctx, _cache) => {
                               }, null, 512), [
                                 [_vModelCheckbox, cfg.lucky_enabled]
                               ]),
-                              _cache[159] || (_cache[159] = _createElementVNode("span", null, "每天自动抽掉免费次数", -1))
+                              _cache[167] || (_cache[167] = _createElementVNode("span", null, "每天自动抽掉免费次数", -1))
                             ]),
-                            _cache[163] || (_cache[163] = _createElementVNode("span", {
+                            _cache[171] || (_cache[171] = _createElementVNode("span", {
                               class: "help",
                               style: {"margin-top":"-4px"}
                             }, "免费次数由当日随机掉落累计兑换，当天不用隔天作废", -1)),
                             _createElementVNode("div", _hoisted_102, [
                               _createElementVNode("div", _hoisted_103, [
-                                _cache[160] || (_cache[160] = _createElementVNode("span", { class: "lbl" }, "每日抽奖时刻", -1)),
+                                _cache[168] || (_cache[168] = _createElementVNode("span", { class: "lbl" }, "每日抽奖时刻", -1)),
                                 _withDirectives(_createElementVNode("input", {
                                   "onUpdate:modelValue": _cache[48] || (_cache[48] = $event => ((cfg.lucky_draw_time) = $event)),
                                   class: "inp",
@@ -1148,7 +1173,7 @@ return (_ctx, _cache) => {
                                 }, null, 512), [
                                   [_vModelText, cfg.lucky_draw_time]
                                 ]),
-                                _cache[161] || (_cache[161] = _createElementVNode("span", { class: "help" }, "格式 HH:MM，到点后的第一次检查执行，当天只抽一次", -1))
+                                _cache[169] || (_cache[169] = _createElementVNode("span", { class: "help" }, "格式 HH:MM，到点后的第一次检查执行，当天只抽一次", -1))
                               ])
                             ])
                           ]),
@@ -1160,90 +1185,247 @@ return (_ctx, _cache) => {
                             }, _toDisplayString(saving.value ? '保存中…' : '保存配置'), 9, _hoisted_105)
                           ])
                         ], 64))
-                      : (group.value === 'ai')
+                      : (group.value === 'scratch')
                         ? (_openBlock(), _createElementBlock(_Fragment, { key: 5 }, [
-                            _cache[175] || (_cache[175] = _createElementVNode("h3", { class: "det-title" }, "AI 评价（心路历程）", -1)),
+                            _cache[189] || (_cache[189] = _createElementVNode("h3", { class: "det-title" }, "刮奖 · 掉落兜底", -1)),
                             _createElementVNode("section", _hoisted_106, [
-                              _cache[168] || (_cache[168] = _createElementVNode("div", { class: "card-h" }, "基础设置", -1)),
+                              _cache[178] || (_cache[178] = _createElementVNode("div", { class: "card-h" }, "兜底刮奖", -1)),
                               _createElementVNode("label", _hoisted_107, [
                                 _withDirectives(_createElementVNode("input", {
-                                  "onUpdate:modelValue": _cache[49] || (_cache[49] = $event => ((cfg.ai_review_enabled) = $event)),
+                                  "onUpdate:modelValue": _cache[49] || (_cache[49] = $event => ((cfg.scratch_enabled) = $event)),
                                   type: "checkbox"
                                 }, null, 512), [
-                                  [_vModelCheckbox, cfg.ai_review_enabled]
+                                  [_vModelCheckbox, cfg.scratch_enabled]
                                 ]),
-                                _cache[165] || (_cache[165] = _createElementVNode("span", null, "启用 AI 评价", -1))
+                                _cache[173] || (_cache[173] = _createElementVNode("span", null, "每小时兜底时段用门户刮刮乐补掉落", -1))
                               ]),
-                              _cache[169] || (_cache[169] = _createElementVNode("span", {
+                              _cache[179] || (_cache[179] = _createElementVNode("span", {
                                 class: "help",
                                 style: {"margin-top":"-4px"}
-                              }, " 各游戏结算/结果后用平台 AI 在群聊总结心路历程：赢了炫耀决策、输了吐槽对手运气好， 不会出现 EV 数值；平台未接入 AI 时自动跳过 ", -1)),
+                              }, " 走门户 API（/api/portal/scratch），与 TG 群里的刮刮乐是同一张卡、同一份额度，不再往群里发 /scratch。 每小时「兜底起始分」到整点之间，本时段游戏剩余掉落 > 0（十点半/炸金花没把掉落打完）才刮： 每 60 秒判一次、一次最多一张，剩余归零或跨整点即停。每张刮完立刻催一次 /info 刷新剩余， 不等掉落守卫的检查周期。 ", -1)),
                               _createElementVNode("div", _hoisted_108, [
-                                _cache[166] || (_cache[166] = _createElementVNode("span", { class: "lbl" }, "评价的游戏（各游戏独立开关）", -1)),
-                                _createElementVNode("div", _hoisted_109, [
-                                  (_openBlock(), _createElementBlock(_Fragment, null, _renderList(AI_REVIEW_GAMES, (g) => {
-                                    return _createElementVNode("label", {
-                                      key: g.value,
-                                      class: "row switch ai-check"
-                                    }, [
-                                      _withDirectives(_createElementVNode("input", {
-                                        type: "checkbox",
-                                        value: g.value,
-                                        "onUpdate:modelValue": _cache[50] || (_cache[50] = $event => ((cfg.ai_review_games) = $event))
-                                      }, null, 8, _hoisted_110), [
-                                        [_vModelCheckbox, cfg.ai_review_games]
-                                      ]),
-                                      _createElementVNode("span", null, _toDisplayString(g.label), 1)
-                                    ])
-                                  }), 64))
-                                ]),
-                                _cache[167] || (_cache[167] = _createElementVNode("span", { class: "help" }, "勾选哪些游戏结算后生成 AI 评价消息", -1))
-                              ])
-                            ]),
-                            _createElementVNode("section", _hoisted_111, [
-                              _cache[172] || (_cache[172] = _createElementVNode("div", { class: "card-h" }, "发送目标", -1)),
-                              _createElementVNode("div", _hoisted_112, [
-                                _cache[170] || (_cache[170] = _createElementVNode("span", { class: "lbl" }, "发送到的群（一行一个ID）", -1)),
-                                _withDirectives(_createElementVNode("textarea", {
-                                  "onUpdate:modelValue": _cache[51] || (_cache[51] = $event => ((cfg.ai_review_groups) = $event)),
-                                  class: "inp",
-                                  rows: "3",
-                                  spellcheck: "false"
+                                _createElementVNode("span", _hoisted_109, "兜底起始分：每小时第 " + _toDisplayString(cfg.scratch_fallback_minute) + " 分起", 1),
+                                _withDirectives(_createElementVNode("input", {
+                                  "onUpdate:modelValue": _cache[50] || (_cache[50] = $event => ((cfg.scratch_fallback_minute) = $event)),
+                                  type: "range",
+                                  min: "0",
+                                  max: "55",
+                                  step: "5"
                                 }, null, 512), [
-                                  [_vModelText, cfg.ai_review_groups]
+                                  [
+                                    _vModelText,
+                                    cfg.scratch_fallback_minute,
+                                    void 0,
+                                    { number: true }
+                                  ]
                                 ]),
-                                _cache[171] || (_cache[171] = _createElementVNode("span", { class: "help" }, "一行一个；由你的用户账号直发（同私聊 /info 的通道，账号需已加入目标群）；留空=走通知中心原渠道（管理员私聊）", -1))
+                                _cache[174] || (_cache[174] = _createElementVNode("span", { class: "help" }, "默认 50 = 只在每小时 50-59 分兜底", -1))
+                              ]),
+                              _createElementVNode("div", _hoisted_110, [
+                                _createElementVNode("span", _hoisted_111, "逐格间隔：" + _toDisplayString(cfg.scratch_reveal_delay) + " 秒", 1),
+                                _withDirectives(_createElementVNode("input", {
+                                  "onUpdate:modelValue": _cache[51] || (_cache[51] = $event => ((cfg.scratch_reveal_delay) = $event)),
+                                  type: "range",
+                                  min: "0.2",
+                                  max: "2",
+                                  step: "0.1"
+                                }, null, 512), [
+                                  [
+                                    _vModelText,
+                                    cfg.scratch_reveal_delay,
+                                    void 0,
+                                    { number: true }
+                                  ]
+                                ]),
+                                _cache[175] || (_cache[175] = _createElementVNode("span", { class: "help" }, " 格序随机、逐格揭晓（带 ±20% 抖动），累计派奖 ≥ 已刮格数×每格价就点「放弃」停手； 未刮格子不扣款，门户 30 秒无操作会自动结束本张，别调到 3 秒以上 ", -1))
+                              ]),
+                              _createElementVNode("div", _hoisted_112, [
+                                _cache[176] || (_cache[176] = _createElementVNode("span", { class: "lbl" }, "连续亏损自动停止", -1)),
+                                _withDirectives(_createElementVNode("input", {
+                                  "onUpdate:modelValue": _cache[52] || (_cache[52] = $event => ((cfg.scratch_max_consecutive_loss) = $event)),
+                                  class: "inp",
+                                  type: "number",
+                                  min: "1",
+                                  max: "20",
+                                  step: "1"
+                                }, null, 512), [
+                                  [
+                                    _vModelText,
+                                    cfg.scratch_max_consecutive_loss,
+                                    void 0,
+                                    { number: true }
+                                  ]
+                                ]),
+                                _cache[177] || (_cache[177] = _createElementVNode("span", { class: "help" }, "连续 N 张净亏损后只停当天，次日自动恢复（不必重启插件）", -1))
                               ])
                             ]),
                             _createElementVNode("section", _hoisted_113, [
-                              _cache[174] || (_cache[174] = _createElementVNode("div", { class: "card-h" }, "提示词模板", -1)),
-                              _createElementVNode("div", _hoisted_114, [
-                                _withDirectives(_createElementVNode("textarea", {
-                                  "onUpdate:modelValue": _cache[52] || (_cache[52] = $event => ((cfg.ai_review_prompt) = $event)),
-                                  class: "inp",
-                                  rows: "4",
-                                  spellcheck: "false"
+                              _cache[187] || (_cache[187] = _createElementVNode("div", { class: "card-h" }, "收支统计", -1)),
+                              _createElementVNode("label", _hoisted_114, [
+                                _withDirectives(_createElementVNode("input", {
+                                  "onUpdate:modelValue": _cache[53] || (_cache[53] = $event => ((cfg.scratch_stats_enabled) = $event)),
+                                  type: "checkbox"
                                 }, null, 512), [
-                                  [_vModelText, cfg.ai_review_prompt]
+                                  [_vModelCheckbox, cfg.scratch_stats_enabled]
                                 ]),
-                                _cache[173] || (_cache[173] = _createElementVNode("span", { class: "help" }, " 已预填内置默认模板，可自由修改；占位符：{'{game}'} 游戏名、{'{actions}'} 动作序列、 {'{opponent}'} 对手简称、{'{result}'} 结果文本、{'{tone}'} 语气指令（按输赢自动生成）；留空也等价于默认模板 ", -1)),
-                                _createElementVNode("div", _hoisted_115, [
-                                  _createElementVNode("button", {
-                                    class: "btn",
-                                    onClick: _cache[53] || (_cache[53] = $event => (cfg.ai_review_prompt = DEFAULT_AI_REVIEW_PROMPT))
-                                  }, "恢复默认模板")
+                                _cache[180] || (_cache[180] = _createElementVNode("span", null, "逐张记账 + 每日收支日报", -1))
+                              ]),
+                              _cache[188] || (_cache[188] = _createElementVNode("span", {
+                                class: "help",
+                                style: {"margin-top":"-4px"}
+                              }, " 只记刮奖本身的派奖/成本/净额（净额按门户给出的、已扣结算手续费），账号级总额不记账； 单张结果不推送，只在每日日报汇总。 ", -1)),
+                              _createElementVNode("div", _hoisted_115, [
+                                _createElementVNode("div", _hoisted_116, [
+                                  _cache[181] || (_cache[181] = _createElementVNode("span", { class: "lbl" }, "日报时间(时)", -1)),
+                                  _withDirectives(_createElementVNode("input", {
+                                    "onUpdate:modelValue": _cache[54] || (_cache[54] = $event => ((cfg.scratch_stats_report_hour) = $event)),
+                                    class: "inp",
+                                    type: "number",
+                                    min: "0",
+                                    max: "23",
+                                    step: "1"
+                                  }, null, 512), [
+                                    [
+                                      _vModelText,
+                                      cfg.scratch_stats_report_hour,
+                                      void 0,
+                                      { number: true }
+                                    ]
+                                  ]),
+                                  _cache[182] || (_cache[182] = _createElementVNode("span", { class: "help" }, "按北京时间（UTC+8），每天最多一次", -1))
+                                ]),
+                                _createElementVNode("div", _hoisted_117, [
+                                  _cache[183] || (_cache[183] = _createElementVNode("span", { class: "lbl" }, "日报时间(分)", -1)),
+                                  _withDirectives(_createElementVNode("input", {
+                                    "onUpdate:modelValue": _cache[55] || (_cache[55] = $event => ((cfg.scratch_stats_report_minute) = $event)),
+                                    class: "inp",
+                                    type: "number",
+                                    min: "0",
+                                    max: "59",
+                                    step: "1"
+                                  }, null, 512), [
+                                    [
+                                      _vModelText,
+                                      cfg.scratch_stats_report_minute,
+                                      void 0,
+                                      { number: true }
+                                    ]
+                                  ]),
+                                  _cache[184] || (_cache[184] = _createElementVNode("span", { class: "help" }, "调度按此分钟位整点对齐", -1))
+                                ]),
+                                _createElementVNode("div", _hoisted_118, [
+                                  _cache[185] || (_cache[185] = _createElementVNode("span", { class: "lbl" }, "流水保留天数", -1)),
+                                  _withDirectives(_createElementVNode("input", {
+                                    "onUpdate:modelValue": _cache[56] || (_cache[56] = $event => ((cfg.scratch_stats_retention_days) = $event)),
+                                    class: "inp",
+                                    type: "number",
+                                    min: "7",
+                                    max: "365",
+                                    step: "1"
+                                  }, null, 512), [
+                                    [
+                                      _vModelText,
+                                      cfg.scratch_stats_retention_days,
+                                      void 0,
+                                      { number: true }
+                                    ]
+                                  ]),
+                                  _cache[186] || (_cache[186] = _createElementVNode("span", { class: "help" }, "推日报时自动裁剪超期逐张流水", -1))
                                 ])
                               ])
                             ]),
-                            _createElementVNode("div", _hoisted_116, [
+                            _createElementVNode("div", _hoisted_119, [
                               _createElementVNode("button", {
                                 class: "btn primary lg",
                                 disabled: saving.value,
                                 onClick: save
-                              }, _toDisplayString(saving.value ? '保存中…' : '保存配置'), 9, _hoisted_117)
+                              }, _toDisplayString(saving.value ? '保存中…' : '保存配置'), 9, _hoisted_120)
                             ])
                           ], 64))
-                        : _createCommentVNode("", true)
+                        : (group.value === 'ai')
+                          ? (_openBlock(), _createElementBlock(_Fragment, { key: 6 }, [
+                              _cache[200] || (_cache[200] = _createElementVNode("h3", { class: "det-title" }, "AI 评价（心路历程）", -1)),
+                              _createElementVNode("section", _hoisted_121, [
+                                _cache[193] || (_cache[193] = _createElementVNode("div", { class: "card-h" }, "基础设置", -1)),
+                                _createElementVNode("label", _hoisted_122, [
+                                  _withDirectives(_createElementVNode("input", {
+                                    "onUpdate:modelValue": _cache[57] || (_cache[57] = $event => ((cfg.ai_review_enabled) = $event)),
+                                    type: "checkbox"
+                                  }, null, 512), [
+                                    [_vModelCheckbox, cfg.ai_review_enabled]
+                                  ]),
+                                  _cache[190] || (_cache[190] = _createElementVNode("span", null, "启用 AI 评价", -1))
+                                ]),
+                                _cache[194] || (_cache[194] = _createElementVNode("span", {
+                                  class: "help",
+                                  style: {"margin-top":"-4px"}
+                                }, " 各游戏结算/结果后用平台 AI 在群聊总结心路历程：赢了炫耀决策、输了吐槽对手运气好， 不会出现 EV 数值；平台未接入 AI 时自动跳过 ", -1)),
+                                _createElementVNode("div", _hoisted_123, [
+                                  _cache[191] || (_cache[191] = _createElementVNode("span", { class: "lbl" }, "评价的游戏（各游戏独立开关）", -1)),
+                                  _createElementVNode("div", _hoisted_124, [
+                                    (_openBlock(), _createElementBlock(_Fragment, null, _renderList(AI_REVIEW_GAMES, (g) => {
+                                      return _createElementVNode("label", {
+                                        key: g.value,
+                                        class: "row switch ai-check"
+                                      }, [
+                                        _withDirectives(_createElementVNode("input", {
+                                          type: "checkbox",
+                                          value: g.value,
+                                          "onUpdate:modelValue": _cache[58] || (_cache[58] = $event => ((cfg.ai_review_games) = $event))
+                                        }, null, 8, _hoisted_125), [
+                                          [_vModelCheckbox, cfg.ai_review_games]
+                                        ]),
+                                        _createElementVNode("span", null, _toDisplayString(g.label), 1)
+                                      ])
+                                    }), 64))
+                                  ]),
+                                  _cache[192] || (_cache[192] = _createElementVNode("span", { class: "help" }, "勾选哪些游戏结算后生成 AI 评价消息", -1))
+                                ])
+                              ]),
+                              _createElementVNode("section", _hoisted_126, [
+                                _cache[197] || (_cache[197] = _createElementVNode("div", { class: "card-h" }, "发送目标", -1)),
+                                _createElementVNode("div", _hoisted_127, [
+                                  _cache[195] || (_cache[195] = _createElementVNode("span", { class: "lbl" }, "发送到的群（一行一个ID）", -1)),
+                                  _withDirectives(_createElementVNode("textarea", {
+                                    "onUpdate:modelValue": _cache[59] || (_cache[59] = $event => ((cfg.ai_review_groups) = $event)),
+                                    class: "inp",
+                                    rows: "3",
+                                    spellcheck: "false"
+                                  }, null, 512), [
+                                    [_vModelText, cfg.ai_review_groups]
+                                  ]),
+                                  _cache[196] || (_cache[196] = _createElementVNode("span", { class: "help" }, "一行一个；由你的用户账号直发（同私聊 /info 的通道，账号需已加入目标群）；留空=走通知中心原渠道（管理员私聊）", -1))
+                                ])
+                              ]),
+                              _createElementVNode("section", _hoisted_128, [
+                                _cache[199] || (_cache[199] = _createElementVNode("div", { class: "card-h" }, "提示词模板", -1)),
+                                _createElementVNode("div", _hoisted_129, [
+                                  _withDirectives(_createElementVNode("textarea", {
+                                    "onUpdate:modelValue": _cache[60] || (_cache[60] = $event => ((cfg.ai_review_prompt) = $event)),
+                                    class: "inp",
+                                    rows: "4",
+                                    spellcheck: "false"
+                                  }, null, 512), [
+                                    [_vModelText, cfg.ai_review_prompt]
+                                  ]),
+                                  _cache[198] || (_cache[198] = _createElementVNode("span", { class: "help" }, " 已预填内置默认模板，可自由修改；占位符：{'{game}'} 游戏名、{'{actions}'} 动作序列、 {'{opponent}'} 对手简称、{'{result}'} 结果文本、{'{tone}'} 语气指令（按输赢自动生成）；留空也等价于默认模板 ", -1)),
+                                  _createElementVNode("div", _hoisted_130, [
+                                    _createElementVNode("button", {
+                                      class: "btn",
+                                      onClick: _cache[61] || (_cache[61] = $event => (cfg.ai_review_prompt = DEFAULT_AI_REVIEW_PROMPT))
+                                    }, "恢复默认模板")
+                                  ])
+                                ])
+                              ]),
+                              _createElementVNode("div", _hoisted_131, [
+                                _createElementVNode("button", {
+                                  class: "btn primary lg",
+                                  disabled: saving.value,
+                                  onClick: save
+                                }, _toDisplayString(saving.value ? '保存中…' : '保存配置'), 9, _hoisted_132)
+                              ])
+                            ], 64))
+                          : _createCommentVNode("", true)
           ])
         ]))
   ]))
@@ -1251,6 +1433,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const Config = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-5efb12ad"]]);
+const Config = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-8cbdcdd4"]]);
 
 export { Config as default };

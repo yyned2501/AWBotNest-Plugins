@@ -119,6 +119,46 @@ def test_paused_clears_at_hour_boundary() -> None:
     assert dg.paused(ctx) is True
 
 
+# ── 剩余掉落对外入口（刮奖兜底用）──
+
+
+def test_remaining_returns_number_only_when_usable() -> None:
+    ctx = _GuardCtx()
+    assert dg.remaining(ctx) is None  # 从未查过
+    _set_full(ctx, remaining=3)
+    assert dg.remaining(ctx) == 3
+    _set_full(ctx, remaining=0)
+    assert dg.remaining(ctx) == 0  # 归零是有效数字（不是「未知」）
+    _set_full(ctx, remaining=5, age=dg._STALE_AFTER + 60)
+    assert dg.remaining(ctx) is None  # 过期 → 数字作废，调用方该先 refresh
+    ctx.kv.set(dg._KV_REMAINING, "abc")
+    assert dg.remaining(ctx) is None  # 脏数据不炸
+
+
+async def test_refresh_sends_info_with_throttle_and_can_force() -> None:
+    ctx = _GuardCtx()
+    assert await dg.refresh(ctx) is True
+    assert [t for t, _ in ctx.user.sent] == [str(dg._DEFAULT_BOT)]
+    assert await dg.refresh(ctx) is False  # 间隔内不重发（私聊刷屏）
+    assert len(ctx.user.sent) == 1
+    assert await dg.refresh(ctx, min_interval=0) is True  # 强制催一次
+    assert len(ctx.user.sent) == 2
+    ctx.config = {"drop_guard_enabled": False}
+    assert await dg.refresh(ctx, min_interval=0) is True  # 守卫关了也能动辄要数字
+
+
+async def test_apply_reply_records_number_even_when_guard_off() -> None:
+    """守卫关闭时 /info 回执仍入账（刮奖兜底要数字），但不播报「已暂停游戏参与」。"""
+    ctx = _GuardCtx()
+    assert await dg.apply_reply(ctx, "当前时段剩余掉落: 聊天 3 · 游戏 0", announce=False)
+    assert ctx.kv.get(dg._KV_REMAINING) == 0
+    assert ctx.notifications == []
+    # 守卫开着时同样这条翻转要通知（游戏真的停了）
+    ctx2 = _GuardCtx()
+    assert await dg.apply_reply(ctx2, "当前时段剩余掉落: 聊天 3 · 游戏 0")
+    assert len(ctx2.notifications) == 1 and "配额已满" in ctx2.notifications[0]
+
+
 def test_parse_remaining_new_and_legacy_format() -> None:
     # 新格式（2026-08-19 实测）：配额拆成聊天/游戏两类，守卫只认「游戏」
     assert dg.parse_remaining("当前时段剩余掉落: 聊天 3 · 游戏 0") == 0

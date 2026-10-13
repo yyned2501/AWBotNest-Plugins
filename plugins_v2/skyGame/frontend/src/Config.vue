@@ -42,6 +42,15 @@ const DEFAULTS = {
   // 幸运轮盘
   lucky_enabled: true,
   lucky_draw_time: '23:50',
+  // 刮奖（刮刮乐兜底）
+  scratch_enabled: true,
+  scratch_fallback_minute: 50,
+  scratch_reveal_delay: 0.6,
+  scratch_max_consecutive_loss: 5,
+  scratch_stats_enabled: true,
+  scratch_stats_report_hour: 23,
+  scratch_stats_report_minute: 55,
+  scratch_stats_retention_days: 90,
   // 炸金花
   zjh_enabled: true,
   zjh_poll_interval: 2,
@@ -100,6 +109,7 @@ const GROUPS = [
   { key: 'zjh', label: '炸金花', icon: '🃏' },
   { key: 'tenhalf', label: '十点半', icon: '🎲' },
   { key: 'lucky', label: '幸运轮盘', icon: '🎰' },
+  { key: 'scratch', label: '刮奖', icon: '🎫' },
   { key: 'ai', label: 'AI 评价', icon: '🤖' },
 ]
 
@@ -587,6 +597,76 @@ async function renewNow() {
                 <span class="lbl">每日抽奖时刻</span>
                 <input v-model="cfg.lucky_draw_time" class="inp" type="text" placeholder="23:50" />
                 <span class="help">格式 HH:MM，到点后的第一次检查执行，当天只抽一次</span>
+              </div>
+            </div>
+          </section>
+
+          <div class="savebar">
+            <button class="btn primary lg" :disabled="saving" @click="save">{{ saving ? '保存中…' : '保存配置' }}</button>
+          </div>
+        </template>
+
+        <!-- ============ 刮奖（刮刮乐兜底） ============ -->
+        <template v-else-if="group === 'scratch'">
+          <h3 class="det-title">刮奖 · 掉落兜底</h3>
+
+          <section class="card">
+            <div class="card-h">兜底刮奖</div>
+            <label class="row switch">
+              <input v-model="cfg.scratch_enabled" type="checkbox" />
+              <span>每小时兜底时段用门户刮刮乐补掉落</span>
+            </label>
+            <span class="help" style="margin-top:-4px">
+              走门户 API（/api/portal/scratch），与 TG 群里的刮刮乐是同一张卡、同一份额度，不再往群里发 /scratch。
+              每小时「兜底起始分」到整点之间，本时段游戏剩余掉落 &gt; 0（十点半/炸金花没把掉落打完）才刮：
+              每 60 秒判一次、一次最多一张，剩余归零或跨整点即停。每张刮完立刻催一次 /info 刷新剩余，
+              不等掉落守卫的检查周期。
+            </span>
+            <div class="fld">
+              <span class="lbl">兜底起始分：每小时第 {{ cfg.scratch_fallback_minute }} 分起</span>
+              <input v-model.number="cfg.scratch_fallback_minute" type="range" min="0" max="55" step="5" />
+              <span class="help">默认 50 = 只在每小时 50-59 分兜底</span>
+            </div>
+            <div class="fld">
+              <span class="lbl">逐格间隔：{{ cfg.scratch_reveal_delay }} 秒</span>
+              <input v-model.number="cfg.scratch_reveal_delay" type="range" min="0.2" max="2" step="0.1" />
+              <span class="help">
+                格序随机、逐格揭晓（带 ±20% 抖动），累计派奖 ≥ 已刮格数×每格价就点「放弃」停手；
+                未刮格子不扣款，门户 30 秒无操作会自动结束本张，别调到 3 秒以上
+              </span>
+            </div>
+            <div class="fld">
+              <span class="lbl">连续亏损自动停止</span>
+              <input v-model.number="cfg.scratch_max_consecutive_loss" class="inp" type="number" min="1" max="20" step="1" />
+              <span class="help">连续 N 张净亏损后只停当天，次日自动恢复（不必重启插件）</span>
+            </div>
+          </section>
+
+          <section class="card">
+            <div class="card-h">收支统计</div>
+            <label class="row switch">
+              <input v-model="cfg.scratch_stats_enabled" type="checkbox" />
+              <span>逐张记账 + 每日收支日报</span>
+            </label>
+            <span class="help" style="margin-top:-4px">
+              只记刮奖本身的派奖/成本/净额（净额按门户给出的、已扣结算手续费），账号级总额不记账；
+              单张结果不推送，只在每日日报汇总。
+            </span>
+            <div class="grid">
+              <div class="fld">
+                <span class="lbl">日报时间(时)</span>
+                <input v-model.number="cfg.scratch_stats_report_hour" class="inp" type="number" min="0" max="23" step="1" />
+                <span class="help">按北京时间（UTC+8），每天最多一次</span>
+              </div>
+              <div class="fld">
+                <span class="lbl">日报时间(分)</span>
+                <input v-model.number="cfg.scratch_stats_report_minute" class="inp" type="number" min="0" max="59" step="1" />
+                <span class="help">调度按此分钟位整点对齐</span>
+              </div>
+              <div class="fld">
+                <span class="lbl">流水保留天数</span>
+                <input v-model.number="cfg.scratch_stats_retention_days" class="inp" type="number" min="7" max="365" step="1" />
+                <span class="help">推日报时自动裁剪超期逐张流水</span>
               </div>
             </div>
           </section>

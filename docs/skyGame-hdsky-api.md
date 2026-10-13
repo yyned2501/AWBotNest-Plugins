@@ -115,10 +115,30 @@
 - **喂食成功响应（2026-08-13 POST feed divine 已确认）**：`result` 含 `ok/amount/feedType/feedLabel/expGain/progressGain/profile/message`。`message` 是十余行说明（规则/战绩/改名费），不适合原样推送；插件用结构化字段组表。`profile.last_feed_at_ms` 只在普通喂食时更新（当日 3 次仙草后该字段仍停在前一日普通喂食时间）。
 - **养护优先级（v1.16.29）**：玩家赛体力不够时喂一个仙草(+50)，喂成功后同轮立即参赛（不等下一轮）；一个仙草仍不达标就不喂、等体力自然恢复；仙草额度/冷却不可用则本轮空手。日常喂食只在**体力** < 阈值时触发（v1.16.29 起阈值从饱腹改按体力），优先喂配置草料（weed/fine），普通草冷却中或额度用尽才退回仙草。玩家赛每轮轮询检测，可加入就参加；官方赛每日免费报名一次（kv 记日期去重）。
 
+### 刮刮乐（scratch，2026-10-08 门户前端 `portal-scratch.js?v=20261007-2` 源码）
+
+门户把 TG 的刮刮乐搬进了网页（页面文案「九格惊喜 · 与 TG `/scratch` 同步」），**同一张卡、同一份额度**，所以插件走 API 就不必在群里发 `/scratch`、不必点内联按钮。**skyGame v1.30.0 已接入**（`games/scratch.py`，作为掉落兜底）。
+
+| 用途 | 方法与路径 | 请求体 | 证据 |
+| --- | --- | --- | --- |
+| 读卡状态 | `GET /api/portal/scratch` | 无 | 前端源码；未带会话实测返回 `401 {"ok":false,"error":"请先使用 HDSky UID 登录"}`（2026-10-08 实测） |
+| 领新卡 | `POST /api/portal/scratch` | `{action:"start"}`（有卡时带 `cardId`） | 前端源码，**待验证**；文案「开卡免费，刮开时才结算」 |
+| 刮单格 | `POST /api/portal/scratch` | `{action:"reveal", cardId, position}`（position 1–9） | 前端源码，**待验证** |
+| 一键刮开 | `POST /api/portal/scratch` | `{action:"all", cardId}` | 前端源码，**待验证**；剩余格全付费，回本即停策略不用它 |
+| 放弃本张 | `POST /api/portal/scratch` | `{action:"abandon", cardId}` | 前端源码，**待验证**；未刮格子不扣款 |
+| 游戏掉落流水 | `GET /api/portal/wallet/ledger?gameDrops=1[&afterId=N]` | 无 | 前端源码 `ledger.rows[]{id,createdAtMs,amount,message}`，**待验证** |
+
+- **响应形态（GET/POST 同）**：`{ok, notice?, scratch{card, cost}}`；`card{id, status, cells[{position, opened, prize, net}], expiresAt}`。`status` 前端只判 `=== 'open'` 为可刮，其余渲染成「本张已全部揭晓 / 本张已结束」——**具体取值待验证**。每格 `net` 是**已计结算手续费**的净额（页面「实际净收益…已计入结算手续费」）。
+- **30 秒无操作自动结束本张**（页面明示 + `card.expiresAt` 倒计时），未刮格子不扣款；所以逐格节奏（`scratch_reveal_delay`）必须远小于 30 秒，插件每次动作都视为重置计时。
+- **掉落触发口径**：「有效银元结算可触发游戏随机掉落，受概率、冷却和每小时次数限制」——刮奖消耗的是**游戏**掉落配额，与 TG 群发 `/scratch` 同源。门户**没有**「剩余掉落数」接口，兜底判定仍走天空小秘 TG `/info`（`games/drop_guard.py`）。
+- **POST 不带 `requestKey`**：与养马/十点半不同，刮刮乐前端只发 `{action, cardId?, position?}`；插件按前端逐字段对齐，不擅自加键。
+- **CSRF**：走统一 `HdskyClient`（`X-CSRF-Token`），失败/非 JSON 响应按「拿不到 `scratch` 字段 = 什么都不刮」处理，不猜状态。
+
 ## 待现场验证
 
 - `showdown` 实测只需 `{ "action": "showdown" }`（多次提交均 `ok: true`，无目标/确认字段）；`open` 同为开牌动作但尚未在实测中单独提交验证。
 - 对手发起应战后 `game.phase` 的更多取值；当前插件不会用它阻断行动（仅单挑强制摊牌阶段观察到 `"showdown"`）。
 - 十点半：`POST /api/portal/tenhalf/start` 的开庄请求格式、抓牌点数构成细节与 AI 玩家行为仍可继续实测（join/hit/stand 已实测可用，插件 v1.17.0 起接入、v1.18.1 修复庄家爆牌识别）。
+- 刮刮乐：`start`/`reveal`/`abandon` 三个 POST 的真实响应与失败码（含每小时次数用完、余额不足时 `notice` 的文案），以及 `card.status` 的全部取值——开卡免费、未刮格不扣款，用一格真机请求即可钉死（skyGame v1.30.0 起在 `hdsky_debug` 调试文件里会原样落盘）。
 
 发生应战失败时，记录并保留（脱敏后）`roundId`、`phase`、`actions`、`self` 关键状态与 POST 错误，用于补全本节。

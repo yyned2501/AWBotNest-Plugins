@@ -34,15 +34,16 @@
     },
     "skyGame": {
       "name": "天空游戏",
-      "version": "1.29.0",
+      "version": "1.30.0",
       "author": "Yy",
-      "description": "天空系列游戏统一入口：炸金花自动参与（Terminal EV 多人决策树 + 对手画像）、养马自动养护、十点半自动参与、门户 Cookie 自动续期、掉落配额守卫、幸运轮盘免费抽奖，Vue 左侧按游戏分组配置。",
+      "description": "天空系列游戏统一入口：炸金花自动参与（Terminal EV 多人决策树 + 对手画像）、养马自动养护、十点半自动参与、门户 Cookie 自动续期、掉落配额守卫、幸运轮盘免费抽奖、刮刮乐掉落兜底，Vue 左侧按游戏分组配置。",
       "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/skyGame.svg",
       "tags": [
         "炸金花",
         "养马",
         "十点半",
-        "Cookie 续期"
+        "Cookie 续期",
+        "刮刮乐"
       ],
       "scope": "user",
       "requirements": [
@@ -71,23 +72,6 @@
       ],
       "plugin_api_version": 2,
       "path": "plugins_v2/juai_checkin/"
-    },
-    "scratch": {
-      "name": "天空刮奖",
-      "id": "scratch",
-      "version": "1.7.2",
-      "author": "Yy",
-      "description": "散财童子（@lucifer_hdsky_bot）刮刮乐自动挂机：群聊每 2 分钟刷掉落（配额满自动暂停）、刮奖收支逐张记账 + 每日收支日报，随机逐格刮开、回本即停、连亏自动停止；私聊连锁默认关闭。",
-      "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/scratch.svg",
-      "tags": [
-        "刮刮乐",
-        "挂机",
-        "散财童子",
-        "天空"
-      ],
-      "scope": "user",
-      "plugin_api_version": 2,
-      "path": "plugins_v2/scratch.py"
     }
   }
 }

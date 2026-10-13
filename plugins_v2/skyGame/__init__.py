@@ -1,11 +1,12 @@
 # =============================================================================
-# AWBotNest 插件：天空游戏 (skyGame) v1.27.0
+# AWBotNest 插件：天空游戏 (skyGame) v1.30.0
 #
 # 天空系列游戏的统一入口：Vue 配置界面左侧按游戏分组，各游戏逻辑拆到
 # games/ 子模块，互不干扰。当前收录：
 #   - 炸金花：轮询 hdsky 门户 API，自动加入/看牌/好牌跟注烂牌弃牌
 #   - 养马：自动喂食/遛马/官方赛报名/复活提示
 #   - 十点半：自动报名下注/要牌停牌决策/结算通知（玩家位，不开庄）
+#   - 刮刮乐：每小时 50 分后若本时段游戏掉落还没领完，走门户 API 刮一张兜底
 #   - Cookie 自动续期：门户会话过期时从 CookieCloud 取浏览器 cookie，
 #     读 HDSky 站内信验证码自动重新登录，写回 cookie 文件
 #
@@ -16,8 +17,10 @@
 #   games/horse.py       养马养护循环
 #   games/tenhalf.py     十点半参与循环
 #   games/ai_review.py   AI 评价通用模块（各游戏结算后调 review() 生成心路历程）
-#   games/drop_guard.py  掉落守卫（/info 剩余掉落为 0 时自动暂停各游戏新加入）
+#   games/drop_guard.py  掉落守卫（/info 剩余掉落为 0 时自动暂停各游戏新加入；
+#                        remaining()/refresh() 是全插件唯一的掉落配额入口）
 #   games/lucky.py       幸运轮盘免费抽奖（每日到点抽掉当日免费次数）
+#   games/scratch.py     刮刮乐兜底（门户 /api/portal/scratch，掉落没领完时补刮）
 # =============================================================================
 
 from __future__ import annotations
@@ -30,9 +33,9 @@ from .games import hdsky_auth, kv_facade
 __plugin__ = {
     "name": "天空游戏",
     "id": "skyGame",
-    "version": "1.29.0",
+    "version": "1.30.0",
     "author": "Yy",
-    "description": "天空系列游戏统一入口：炸金花/养马/十点半自动参与、幸运轮盘免费抽奖，左侧按游戏分组配置。",
+    "description": "天空系列游戏统一入口：炸金花/养马/十点半自动参与、幸运轮盘免费抽奖、刮刮乐掉落兜底。",
     "icon": "https://raw.githubusercontent.com/yyned2501/AWBotNest-Plugins/main/icons/skyGame.svg",
     "scope": "user",
     "plugin_api_version": 2,
@@ -40,7 +43,7 @@ __plugin__ = {
     "render_mode": "vue",
     "default_enabled": False,
     "requirements": ["httpx>=0.28"],
-    "tags": ["炸金花", "养马", "十点半", "Cookie 续期"],
+    "tags": ["炸金花", "养马", "十点半", "Cookie 续期", "刮刮乐"],
     "config_schema": {
         # ── 全局设置 ──
         "bot": {
@@ -590,8 +593,109 @@ __plugin__ = {
             "help": "格式 HH:MM，到点后的第一次检查执行；当天只抽一次",
             "order": 61,
         },
+        # ── 刮奖（刮刮乐兜底） ──
+        "scratch_enabled": {
+            "type": "boolean",
+            "default": True,
+            "label": "启用刮奖兜底",
+            "section": "刮奖",
+            "help": "每小时兜底起始分之后，若本时段「游戏」剩余掉落仍 > 0（十点半/炸金花没把"
+            "掉落打完），就用门户刮刮乐把剩余刮掉；剩余归零或跨整点即停。"
+            "走门户 API，不在群里发 /scratch（同一张卡、同一份额度）",
+            "order": 70,
+        },
+        "scratch_fallback_minute": {
+            "type": "slider",
+            "default": 50,
+            "label": "兜底起始分",
+            "section": "刮奖",
+            "min": 0,
+            "max": 55,
+            "step": 5,
+            "help": "每小时从第几分钟开始兜底刮奖，到整点为止（默认 50 = 每小时 50-59 分）。"
+            "每 60 秒判一次，一次最多刮一张",
+            "order": 71,
+        },
+        "scratch_reveal_delay": {
+            "type": "slider",
+            "default": 0.6,
+            "label": "逐格间隔(秒)",
+            "section": "刮奖",
+            "min": 0.2,
+            "max": 2.0,
+            "step": 0.1,
+            "help": "两次揭晓之间的等待，带 ±20% 抖动。门户 30 秒无操作会自动结束本张，别调太大",
+            "order": 72,
+        },
+        "scratch_max_consecutive_loss": {
+            "type": "number",
+            "default": 5,
+            "label": "连续亏损自动停止",
+            "section": "刮奖",
+            "min": 1,
+            "max": 20,
+            "step": 1,
+            "help": "连续 N 张净亏损后停刮，只停当天（次日自动恢复，不必重启插件）",
+            "order": 73,
+        },
+        "scratch_stats_enabled": {
+            "type": "boolean",
+            "default": True,
+            "label": "收益统计",
+            "section": "刮奖",
+            "help": "逐张记录派奖/成本/净额（净额按门户给的、已扣结算手续费），并每日推送收支日报",
+            "order": 74,
+        },
+        "scratch_stats_report_hour": {
+            "type": "number",
+            "default": 23,
+            "label": "日报时间(时)",
+            "section": "刮奖",
+            "min": 0,
+            "max": 23,
+            "step": 1,
+            "help": "每天几点推送收支日报，按北京时间（UTC+8），每天最多一次",
+            "order": 75,
+            "show_if": {"scratch_stats_enabled": True},
+        },
+        "scratch_stats_report_minute": {
+            "type": "number",
+            "default": 55,
+            "label": "日报时间(分)",
+            "section": "刮奖",
+            "min": 0,
+            "max": 59,
+            "step": 1,
+            "help": "日报的分钟位；调度按整点对齐，小时位由插件按北京时间自判",
+            "order": 76,
+            "show_if": {"scratch_stats_enabled": True},
+        },
+        "scratch_stats_retention_days": {
+            "type": "number",
+            "default": 90,
+            "label": "流水保留天数",
+            "section": "刮奖",
+            "min": 7,
+            "max": 365,
+            "step": 1,
+            "help": "逐张流水保留天数，推日报时自动裁剪超期条目",
+            "order": 77,
+            "show_if": {"scratch_stats_enabled": True},
+        },
     },
     "changelog": (
+        "v1.30.0 新增：\n"
+        "- 并入天空刮奖，改走门户刮刮乐 API（不再依赖 TG 群发 /scratch 与点内联按钮）：\n"
+        "  GET/POST /api/portal/scratch 的 start/reveal/abandon，开卡免费、逐格结算、回本即放弃；\n"
+        "- 定位为掉落兜底：每小时「兜底起始分」（默认 50）到整点之间，本时段「游戏」剩余掉落 > 0\n"
+        "  才刮一张（一次 tick 最多一张），剩余归零或跨整点即停 —— 十点半/炸金花没把掉落打完时才补；\n"
+        "- 每张刮完立刻催一次 /info 刷新游戏剩余（不等掉落守卫的 */N 周期），下一轮按新数字决定继续还是收手；\n"
+        "- 剩余掉落口径唯一来自掉落守卫：drop_guard 新增 remaining()/refresh()，插件内不再有第二份 /info 解析；\n"
+        "- 收支统计沿用（逐张流水 + 每日收支日报，净额按门户已扣结算手续费的 net），日报按天幂等；\n"
+        "- 连亏自动停止改为「只停当天、次日自愈」：原独立插件要关插件重开才重置，"
+        "天空游戏不能为了重置刮奖而重启整个插件；\n"
+        "- 单张结果不再逐条推送（与十点半 v1.29.0 一致：玩法过程静默、只留运行日志），只在连亏停刮与日报时推送；\n"
+        "- 独立插件 scratch 从商店清单移除（同一张卡两份实现会重复点格、互抢额度）；\n"
         "v1.29.0 变更：\n"
         "- 十点半移除报名（参与）推送：报名/要牌停牌/结算全程静默，只在运行日志留痕；"
         "「十点半通知」开关从此只负责报名失败与轮询异常两类告警，"

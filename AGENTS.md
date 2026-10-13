@@ -86,3 +86,6 @@ rg -n "def <你要写的函数名>" --glob '!tests/**'                          
 | 能力 | 唯一入口 | 禁止写法 |
 |---|---|---|
 | 插件能力（HTTP / 存储 / 消息 / 日志） | `ctx.*`（见上文「ctx 能力速查」） | 插件内直连 httpx / sqlite3 / print |
+| 门户 API 请求（skyGame 系） | `games/hdsky.py` 的 `HdskyClient` / `make_client` / `request_key` | 模块里裸 `httpx.AsyncClient(`、自管 cookie/CSRF |
+| 本时段剩余掉落（配额） | `games/drop_guard.py`：`paused()` / `remaining()` / `refresh()` | 各游戏自己发 `/info`、自己写正则解析配额行 |
+| 刮刮乐（天空） | `plugins_v2/skyGame/games/scratch.py`（门户 `/api/portal/scratch`） | 另开一份 TG 群发 `/scratch` + 点内联按钮的实现 |

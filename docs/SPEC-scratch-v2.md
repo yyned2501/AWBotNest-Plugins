@@ -1,5 +1,11 @@
 # SPEC：天空刮奖（scratch）V1 → V2 移植
 
+> **状态（2026-10-08 更新）：本插件已并入天空游戏，独立 `plugins_v2/scratch.py` 已删除、商店清单条目已下架。**
+> 刮奖改为 skyGame 子模块 `plugins_v2/skyGame/games/scratch.py`，**走门户 `/api/portal/scratch` API**，
+> 定位为「每小时 50 分后的掉落兜底」。本文件的 §12/§13 真机结论仍是有效知识（TG 卡片形态、归属判定、
+> Telethon 按钮 data 路径），但「群聊每 2 分钟发 /scratch」的双通道玩法已被门户路取代；
+> 门户接口契约见 `docs/skyGame-hdsky-api.md`「刮刮乐」一节。
+>
 > 状态：已落地（§12 真机口径生效）· 作者：architect · 契约优先，冲突以本文件为准
 > 版本勘误定档：**2026-10-02，见 §13** —— 真机运行时是 **Telethon 1.45.0**；全文凡写「1.44」的版本标签一律以 §13 为准
 
